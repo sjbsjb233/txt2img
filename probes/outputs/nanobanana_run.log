@@ -1,0 +1,15 @@
+[nanobanana_key1] RUN  discover/gemini-2.5-flash-image  (success 0/5)
+  -> OK  1024x1024 PNG  saved=nanobanana_key1__discover_gemini-2.5-flash-image__134530.png
+[nanobanana_key1] RUN  discover/gemini-3-pro-image-preview  (success 1/5)
+  -> OK  1024x1024 JPEG  saved=nanobanana_key1__discover_gemini-3-pro-image-preview__134546.jpg
+[nanobanana_key1] RUN  discover/gemini-3.1-flash-image-preview  (success 2/5)
+  -> OK  1024x1024 JPEG  saved=nanobanana_key1__discover_gemini-3.1-flash-image-preview__134606.jpg
+[nanobanana_key1] RUN  vary/gemini-2.5-flash-image/16:9/2K  (success 3/5)
+  -> OK  1344x768 PNG  saved=nanobanana_key1__vary_gemini-2.5-flash-image_16_9_2K__134752.png
+     ! mismatch: {'ok': False, 'notes': ['got 1344x768, expected 2048x1152', 'long edge 1344 < min 1843']}
+[nanobanana_key1] RUN  vary/gemini-3-pro-image-preview/9:16/2K  (success 4/5)
+  -> OK  1536x2752 JPEG  saved=nanobanana_key1__vary_gemini-3-pro-image-preview_9_16_2K__134816.jpg
+     ! mismatch: {'ok': False, 'notes': ['got 1536x2752, expected 1152x2048']}
+
+[nanobanana] wrote /home/user/txt2img/probes/outputs/report_nanobanana.json
+[nanobanana] successes: 5/5, attempts: 5

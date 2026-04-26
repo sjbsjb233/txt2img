@@ -1,0 +1,285 @@
+{
+  "base_url": "https://api.bltcy.ai",
+  "generated_at": "2026-04-26 13:48:16",
+  "budgets": [
+    {
+      "label": "nanobanana_key1",
+      "max_successes": 5,
+      "successes": 5,
+      "attempts": 5,
+      "log": [
+        {
+          "test": "discover/gemini-2.5-flash-image",
+          "request": {
+            "endpoint": "/v1beta/models/.../generateContent",
+            "model": "gemini-2.5-flash-image",
+            "aspect_ratio": "1:1",
+            "image_size": "1K",
+            "input_images": 0
+          },
+          "http_status": 200,
+          "elapsed_s": 109.46,
+          "response_meta": {
+            "mime": "image/png",
+            "text": null,
+            "finishReason": "STOP",
+            "usageMetadata": {
+              "promptTokenCount": 13,
+              "candidatesTokenCount": 1290,
+              "totalTokenCount": 1303,
+              "promptTokensDetails": [
+                {
+                  "modality": "TEXT",
+                  "tokenCount": 13
+                }
+              ],
+              "candidatesTokensDetails": [
+                {
+                  "modality": "IMAGE",
+                  "tokenCount": 1290
+                }
+              ]
+            }
+          },
+          "success": true,
+          "image": {
+            "path": "outputs/nanobanana_key1__discover_gemini-2.5-flash-image__134530.png",
+            "bytes": 1126274,
+            "width": 1024,
+            "height": 1024,
+            "format": "PNG",
+            "mode": "RGB"
+          },
+          "expect": {
+            "width": 1024,
+            "height": 1024,
+            "min_long_edge": 921
+          },
+          "match": {
+            "ok": true,
+            "notes": [
+              "exact 1024x1024"
+            ]
+          }
+        },
+        {
+          "test": "discover/gemini-3-pro-image-preview",
+          "request": {
+            "endpoint": "/v1beta/models/.../generateContent",
+            "model": "gemini-3-pro-image-preview",
+            "aspect_ratio": "1:1",
+            "image_size": "1K",
+            "input_images": 0
+          },
+          "http_status": 200,
+          "elapsed_s": 16.28,
+          "response_meta": {
+            "mime": "image/jpeg",
+            "text": null,
+            "finishReason": "STOP",
+            "usageMetadata": {
+              "promptTokenCount": 13,
+              "candidatesTokenCount": 1194,
+              "totalTokenCount": 1336,
+              "promptTokensDetails": [
+                {
+                  "modality": "TEXT",
+                  "tokenCount": 13
+                }
+              ],
+              "candidatesTokensDetails": [
+                {
+                  "modality": "IMAGE",
+                  "tokenCount": 1120
+                }
+              ],
+              "thoughtsTokenCount": 129
+            }
+          },
+          "success": true,
+          "image": {
+            "path": "outputs/nanobanana_key1__discover_gemini-3-pro-image-preview__134546.jpg",
+            "bytes": 548547,
+            "width": 1024,
+            "height": 1024,
+            "format": "JPEG",
+            "mode": "RGB"
+          },
+          "expect": {
+            "width": 1024,
+            "height": 1024,
+            "min_long_edge": 921
+          },
+          "match": {
+            "ok": true,
+            "notes": [
+              "exact 1024x1024"
+            ]
+          }
+        },
+        {
+          "test": "discover/gemini-3.1-flash-image-preview",
+          "request": {
+            "endpoint": "/v1beta/models/.../generateContent",
+            "model": "gemini-3.1-flash-image-preview",
+            "aspect_ratio": "1:1",
+            "image_size": "1K",
+            "input_images": 0
+          },
+          "http_status": 200,
+          "elapsed_s": 19.68,
+          "response_meta": {
+            "mime": "image/jpeg",
+            "text": null,
+            "finishReason": "STOP",
+            "usageMetadata": {
+              "promptTokenCount": 13,
+              "candidatesTokenCount": 1536,
+              "totalTokenCount": 1549,
+              "promptTokensDetails": [
+                {
+                  "modality": "TEXT",
+                  "tokenCount": 13
+                }
+              ],
+              "candidatesTokensDetails": [
+                {
+                  "modality": "IMAGE",
+                  "tokenCount": 1120
+                }
+              ]
+            }
+          },
+          "success": true,
+          "image": {
+            "path": "outputs/nanobanana_key1__discover_gemini-3.1-flash-image-preview__134606.jpg",
+            "bytes": 402118,
+            "width": 1024,
+            "height": 1024,
+            "format": "JPEG",
+            "mode": "RGB"
+          },
+          "expect": {
+            "width": 1024,
+            "height": 1024,
+            "min_long_edge": 921
+          },
+          "match": {
+            "ok": true,
+            "notes": [
+              "exact 1024x1024"
+            ]
+          }
+        },
+        {
+          "test": "vary/gemini-2.5-flash-image/16:9/2K",
+          "request": {
+            "model": "gemini-2.5-flash-image",
+            "aspect_ratio": "16:9",
+            "image_size": "2K",
+            "input_images": 0
+          },
+          "http_status": 200,
+          "elapsed_s": 106.51,
+          "response_meta": {
+            "mime": "image/png",
+            "text": null,
+            "finishReason": "STOP",
+            "usageMetadata": {
+              "promptTokenCount": 11,
+              "candidatesTokenCount": 1290,
+              "totalTokenCount": 1301,
+              "promptTokensDetails": [
+                {
+                  "modality": "TEXT",
+                  "tokenCount": 11
+                }
+              ],
+              "candidatesTokensDetails": [
+                {
+                  "modality": "IMAGE",
+                  "tokenCount": 1290
+                }
+              ]
+            }
+          },
+          "success": true,
+          "image": {
+            "path": "outputs/nanobanana_key1__vary_gemini-2.5-flash-image_16_9_2K__134752.png",
+            "bytes": 1693356,
+            "width": 1344,
+            "height": 768,
+            "format": "PNG",
+            "mode": "RGB"
+          },
+          "expect": {
+            "width": 2048,
+            "height": 1152,
+            "min_long_edge": 1843
+          },
+          "match": {
+            "ok": false,
+            "notes": [
+              "got 1344x768, expected 2048x1152",
+              "long edge 1344 < min 1843"
+            ]
+          }
+        },
+        {
+          "test": "vary/gemini-3-pro-image-preview/9:16/2K",
+          "request": {
+            "model": "gemini-3-pro-image-preview",
+            "aspect_ratio": "9:16",
+            "image_size": "2K",
+            "input_images": 0
+          },
+          "http_status": 200,
+          "elapsed_s": 23.99,
+          "response_meta": {
+            "mime": "image/jpeg",
+            "text": null,
+            "finishReason": "STOP",
+            "usageMetadata": {
+              "promptTokenCount": 14,
+              "candidatesTokenCount": 1248,
+              "totalTokenCount": 1427,
+              "promptTokensDetails": [
+                {
+                  "modality": "TEXT",
+                  "tokenCount": 14
+                }
+              ],
+              "candidatesTokensDetails": [
+                {
+                  "modality": "IMAGE",
+                  "tokenCount": 1120
+                }
+              ],
+              "thoughtsTokenCount": 165
+            }
+          },
+          "success": true,
+          "image": {
+            "path": "outputs/nanobanana_key1__vary_gemini-3-pro-image-preview_9_16_2K__134816.jpg",
+            "bytes": 3378034,
+            "width": 1536,
+            "height": 2752,
+            "format": "JPEG",
+            "mode": "RGB"
+          },
+          "expect": {
+            "width": 1152,
+            "height": 2048,
+            "min_long_edge": 1843
+          },
+          "match": {
+            "ok": false,
+            "notes": [
+              "got 1536x2752, expected 1152x2048"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

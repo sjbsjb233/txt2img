@@ -1,0 +1,17 @@
+[gpt_image_2_key2_3] RUN  baseline_1024_low/gpt-image-2  (success 0/5)
+  -> OK  1254x1254 PNG  saved=gpt_image_2_key2_3__baseline_1024_low_gpt-image-2__134914.png
+     ! mismatch: {'ok': False, 'notes': ['got 1254x1254, expected 1024x1024']}
+[gpt_image_2_key2_3] RUN  portrait_1024x1536_low/gpt-image-2  (success 1/5)
+  -> OK  1024x1536 PNG  saved=gpt_image_2_key2_3__portrait_1024x1536_low_gpt-image-2__134945.png
+[gpt_image_2_key2_3] RUN  twoK_2048x2048_high/gpt-image-2  (success 2/5)
+  -> OK  1254x1254 PNG  saved=gpt_image_2_key2_3__twoK_2048x2048_high_gpt-image-2__135018.png
+     ! mismatch: {'ok': False, 'notes': ['got 1254x1254, expected 2048x2048']}
+[gpt_image_2_key2_3] RUN  fourK_4096x4096_high/gpt-image-2  (success 3/5)
+  -> OK  1254x1254 PNG  saved=gpt_image_2_key2_3__fourK_4096x4096_high_gpt-image-2__135055.png
+     ! mismatch: {'ok': False, 'notes': ['got 1254x1254, expected 4096x4096']}
+[gpt_image_2_key2_3] RUN  edit_1024_low/gpt-image-2  (success 4/5)
+  -> OK  1254x1254 PNG  saved=gpt_image_2_key2_3__edit_1024_low_gpt-image-2__135125.png
+     ! mismatch: {'ok': False, 'notes': ['got 1254x1254, expected 1024x1024']}
+
+[gpt-image-2] wrote /home/user/txt2img/probes/outputs/report_gpt_image_2.json
+[gpt-image-2] successes: 5/5, attempts: 5

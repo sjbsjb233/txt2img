@@ -1,0 +1,238 @@
+{
+  "base_url": "https://api.bltcy.ai",
+  "generated_at": "2026-04-26 13:51:25",
+  "budgets": [
+    {
+      "label": "gpt_image_2_key2_3",
+      "max_successes": 5,
+      "successes": 5,
+      "attempts": 5,
+      "log": [
+        {
+          "test": "baseline_1024_low/gpt-image-2",
+          "request": {
+            "endpoint": "/v1/images/generations",
+            "model": "gpt-image-2",
+            "size": "1024x1024",
+            "quality": "low"
+          },
+          "http_status": 200,
+          "elapsed_s": 26.23,
+          "response_meta": {
+            "echoed_size": null,
+            "echoed_quality": null,
+            "echoed_format": null,
+            "usage": {
+              "total_tokens": 790,
+              "input_tokens": 230,
+              "output_tokens": 560,
+              "input_tokens_details": {
+                "text_tokens": 230,
+                "image_tokens": 0
+              }
+            },
+            "fetched_url": "https://oss.filenest.top/uploads/f28059fa-8df6-4fe4-b794-1b891ddf65ab.png"
+          },
+          "success": true,
+          "image": {
+            "path": "outputs/gpt_image_2_key2_3__baseline_1024_low_gpt-image-2__134914.png",
+            "bytes": 1744352,
+            "width": 1254,
+            "height": 1254,
+            "format": "PNG",
+            "mode": "RGB"
+          },
+          "expect": {
+            "width": 1024,
+            "height": 1024
+          },
+          "match": {
+            "ok": false,
+            "notes": [
+              "got 1254x1254, expected 1024x1024"
+            ]
+          }
+        },
+        {
+          "test": "portrait_1024x1536_low/gpt-image-2",
+          "request": {
+            "model": "gpt-image-2",
+            "size": "1024x1536",
+            "quality": "low"
+          },
+          "http_status": 200,
+          "elapsed_s": 28.75,
+          "response_meta": {
+            "echoed_size": null,
+            "echoed_quality": null,
+            "echoed_format": null,
+            "usage": {
+              "total_tokens": 878,
+              "input_tokens": 318,
+              "output_tokens": 560,
+              "input_tokens_details": {
+                "text_tokens": 318,
+                "image_tokens": 0
+              }
+            },
+            "fetched_url": "https://oss.filenest.top/uploads/41dfc00b-a975-407b-8353-2068aa0473b1.png"
+          },
+          "success": true,
+          "image": {
+            "path": "outputs/gpt_image_2_key2_3__portrait_1024x1536_low_gpt-image-2__134945.png",
+            "bytes": 2030106,
+            "width": 1024,
+            "height": 1536,
+            "format": "PNG",
+            "mode": "RGB"
+          },
+          "expect": {
+            "width": 1024,
+            "height": 1536
+          },
+          "match": {
+            "ok": true,
+            "notes": [
+              "exact 1024x1536"
+            ]
+          }
+        },
+        {
+          "test": "twoK_2048x2048_high/gpt-image-2",
+          "request": {
+            "model": "gpt-image-2",
+            "size": "2048x2048",
+            "quality": "high"
+          },
+          "http_status": 200,
+          "elapsed_s": 32.17,
+          "response_meta": {
+            "echoed_size": null,
+            "echoed_quality": null,
+            "echoed_format": null,
+            "usage": {
+              "total_tokens": 790,
+              "input_tokens": 230,
+              "output_tokens": 560,
+              "input_tokens_details": {
+                "text_tokens": 230,
+                "image_tokens": 0
+              }
+            },
+            "fetched_url": "https://oss.filenest.top/uploads/799f20fc-f53e-4372-b555-2283df2f5e36.png"
+          },
+          "success": true,
+          "image": {
+            "path": "outputs/gpt_image_2_key2_3__twoK_2048x2048_high_gpt-image-2__135018.png",
+            "bytes": 1816119,
+            "width": 1254,
+            "height": 1254,
+            "format": "PNG",
+            "mode": "RGB"
+          },
+          "expect": {
+            "width": 2048,
+            "height": 2048
+          },
+          "match": {
+            "ok": false,
+            "notes": [
+              "got 1254x1254, expected 2048x2048"
+            ]
+          }
+        },
+        {
+          "test": "fourK_4096x4096_high/gpt-image-2",
+          "request": {
+            "model": "gpt-image-2",
+            "size": "4096x4096",
+            "quality": "high"
+          },
+          "http_status": 200,
+          "elapsed_s": 36.8,
+          "response_meta": {
+            "echoed_size": null,
+            "echoed_quality": null,
+            "echoed_format": null,
+            "usage": {
+              "total_tokens": 790,
+              "input_tokens": 230,
+              "output_tokens": 560,
+              "input_tokens_details": {
+                "text_tokens": 230,
+                "image_tokens": 0
+              }
+            },
+            "fetched_url": "https://oss.filenest.top/uploads/6b4959dd-4e5a-4267-aad3-4a9afc72796a.png"
+          },
+          "success": true,
+          "image": {
+            "path": "outputs/gpt_image_2_key2_3__fourK_4096x4096_high_gpt-image-2__135055.png",
+            "bytes": 1899802,
+            "width": 1254,
+            "height": 1254,
+            "format": "PNG",
+            "mode": "RGB"
+          },
+          "expect": {
+            "width": 4096,
+            "height": 4096
+          },
+          "match": {
+            "ok": false,
+            "notes": [
+              "got 1254x1254, expected 4096x4096"
+            ]
+          }
+        },
+        {
+          "test": "edit_1024_low/gpt-image-2",
+          "request": {
+            "endpoint": "/v1/images/edits",
+            "model": "gpt-image-2",
+            "size": "1024x1024",
+            "quality": "low",
+            "image": "test_square_1024.png",
+            "edit_prompt": "Replace the yellow sun with a full moon at night."
+          },
+          "http_status": 200,
+          "elapsed_s": 28.73,
+          "response_meta": {
+            "echoed_size": null,
+            "echoed_quality": null,
+            "echoed_format": null,
+            "usage": {
+              "total_tokens": 1268,
+              "input_tokens": 708,
+              "output_tokens": 560,
+              "input_tokens_details": {
+                "text_tokens": 148,
+                "image_tokens": 560
+              }
+            },
+            "fetched_url": "https://oss.filenest.top/uploads/c3b7026d-325f-4a3a-a62f-7795ce3fb5d3.png"
+          },
+          "success": true,
+          "image": {
+            "path": "outputs/gpt_image_2_key2_3__edit_1024_low_gpt-image-2__135125.png",
+            "bytes": 1237651,
+            "width": 1254,
+            "height": 1254,
+            "format": "PNG",
+            "mode": "RGB"
+          },
+          "expect": {
+            "width": 1024,
+            "height": 1024
+          },
+          "match": {
+            "ok": false,
+            "notes": [
+              "got 1254x1254, expected 1024x1024"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
