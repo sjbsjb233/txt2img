@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import TurnstileModal from "../components/TurnstileModal.jsx";
+import { apiFetch, getApiBase, setApiBase, setToken } from "../api/client.js";
 
 const CAPTIONS = [
   "issue №004 — apr 2026",
@@ -12,6 +13,12 @@ const CAPTIONS = [
 export default function LoginPage() {
   const [showTurnstile, setShowTurnstile] = useState(false);
   const [tick, setTick] = useState(0);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [apiBase, setApiBaseState] = useState(getApiBase());
+  const [healthMsg, setHealthMsg] = useState("");
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -25,14 +32,71 @@ export default function LoginPage() {
     tick % 60 > 50 ? cap.length : Math.min(cap.length, Math.floor((tick % 60) / 2))
   );
 
-  const submit = (e) => {
-    e.preventDefault();
-    setShowTurnstile(true);
+  const doLogin = async (captchaToken) => {
+    const data = await apiFetch("/api/auth/login", {
+      method: "POST",
+      body: { username, password, captcha_token: captchaToken },
+      auth: false,
+    });
+    setToken(data.access_token);
+    localStorage.setItem("user", JSON.stringify(data.user));
+    navigate("/");
   };
 
-  const completeLogin = () => {
+  const submit = async (e) => {
+    e.preventDefault();
+    if (loading) return;
+    setError("");
+    if (!username || !password) {
+      setError("Username and password are required.");
+      return;
+    }
+    setLoading(true);
+    try {
+      const { required } = await apiFetch("/api/auth/captcha-check", {
+        method: "POST",
+        body: { username },
+        auth: false,
+      });
+      if (required) {
+        setShowTurnstile(true);
+      } else {
+        await doLogin(null);
+      }
+    } catch (err) {
+      setError(err.message || "Login failed.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const completeLogin = async () => {
     setShowTurnstile(false);
-    navigate("/");
+    setError("");
+    setLoading(true);
+    try {
+      await doLogin("dev-stub-token");
+    } catch (err) {
+      setError(err.message || "Login failed.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const onApiBaseChange = (value) => {
+    setApiBaseState(value);
+    setApiBase(value);
+    setHealthMsg("");
+  };
+
+  const testApiBase = async () => {
+    setHealthMsg("…");
+    try {
+      const data = await apiFetch("/api/health", { auth: false });
+      setHealthMsg(data && data.ok ? "ok" : "unexpected response");
+    } catch (err) {
+      setHealthMsg(`error: ${err.message}`);
+    }
   };
 
   return (
@@ -336,6 +400,10 @@ export default function LoginPage() {
                 className="inp"
                 placeholder="liuxi"
                 style={{ marginTop: 4, height: 44 }}
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoComplete="username"
+                disabled={loading}
               />
             </div>
             <div>
@@ -347,16 +415,37 @@ export default function LoginPage() {
                 type="password"
                 placeholder="••••••••••"
                 style={{ marginTop: 4, height: 44 }}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                disabled={loading}
               />
             </div>
 
             <button
               type="submit"
               className="btn primary shadowed lg"
-              style={{ width: "100%", marginTop: 10, fontSize: 15 }}
+              style={{ width: "100%", marginTop: 10, fontSize: 15, opacity: loading ? 0.6 : 1 }}
+              disabled={loading}
             >
-              Sign in →
+              {loading ? "Signing in…" : "Sign in →"}
             </button>
+
+            {error ? (
+              <div
+                className="mono"
+                style={{
+                  fontSize: 11,
+                  color: "#c0392b",
+                  background: "#fdecea",
+                  border: "1px solid #c0392b",
+                  padding: "8px 10px",
+                  marginTop: 4,
+                }}
+              >
+                {error}
+              </div>
+            ) : null}
 
             <details style={{ marginTop: 8 }}>
               <summary
@@ -368,7 +457,7 @@ export default function LoginPage() {
                   outline: "none",
                 }}
               >
-                ◢ Backend: http://127.0.0.1:8000
+                ◢ Backend: {apiBase}
               </summary>
               <div
                 style={{
@@ -378,17 +467,27 @@ export default function LoginPage() {
                   border: "1px solid var(--ink)",
                   display: "flex",
                   gap: 6,
+                  alignItems: "center",
                 }}
               >
                 <input
                   className="inp"
-                  defaultValue="http://127.0.0.1:8000"
+                  value={apiBase}
+                  onChange={(e) => onApiBaseChange(e.target.value)}
                   style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}
                 />
-                <button type="button" className="btn sm">
+                <button type="button" className="btn sm" onClick={testApiBase}>
                   Test
                 </button>
               </div>
+              {healthMsg ? (
+                <div
+                  className="mono"
+                  style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 6 }}
+                >
+                  {healthMsg}
+                </div>
+              ) : null}
             </details>
           </div>
 
