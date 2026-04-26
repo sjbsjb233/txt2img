@@ -13,9 +13,12 @@ services:
     restart: unless-stopped
     env_file: ./backend.env
     environment:
-      DB_URL: sqlite:////data/txt2img.db
+      DB_URL: sqlite:////app/data/txt2img.db
     volumes:
-      - backend-data:/data
+      # Bind-mount: everything the backend needs to persist (SQLite DB, generated
+      # images, etc.) lives under ./data on the host so the whole project is in
+      # one directory.
+      - ./data:/app/data
     expose:
       - "8000"
     labels:
@@ -45,6 +48,3 @@ services:
       - --interval=30
       - --cleanup
       - --rolling-restart
-
-volumes:
-  backend-data:
