@@ -5,7 +5,7 @@ Uses the **native** OpenAI REST shape::
     POST {base_url}/v1/images/generations          (JSON body)
     POST {base_url}/v1/images/edits                (multipart/form-data)
 
-Verified upstream behavior on bltcy (see ``probes/`` for raw probe data):
+Verified upstream behavior on bltcy:
 
 - "Low-tier" keys silently ignore most ``size`` values (everything except
   ``1024x1536``) and quietly fall back to a ``1254x1254`` PNG default.

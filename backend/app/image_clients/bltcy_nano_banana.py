@@ -4,7 +4,7 @@ Uses the **native** Gemini REST shape::
 
     POST {base_url}/v1beta/models/{model}:generateContent
 
-Verified upstream behavior on bltcy (see ``probes/`` for raw probe data):
+Verified upstream behavior on bltcy:
 
 - ``gemini-2.5-flash-image`` — honors ``aspectRatio``; **ignores** ``imageSize``
   (output stays around a 1024-pixel long edge). Returns PNG.
