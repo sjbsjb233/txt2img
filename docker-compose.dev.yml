@@ -1,0 +1,50 @@
+# Deploy on the dev server. Pull-based: Watchtower polls GHCR every 30s and
+# auto-replaces containers when the :dev tag is updated.
+#
+# Setup:
+#   1. cp backend.env.example backend.env  (then fill in JWT_SECRET / ADMIN_PASSWORD / CORS_ORIGINS)
+#   2. docker login ghcr.io -u <github-user>   (use a PAT with read:packages)
+#   3. docker compose -f docker-compose.dev.yml up -d
+
+services:
+  backend:
+    image: ghcr.io/sjbsjb233/txt2img-backend:dev
+    container_name: txt2img-backend
+    restart: unless-stopped
+    env_file: ./backend.env
+    environment:
+      DB_URL: sqlite:////data/txt2img.db
+    volumes:
+      - backend-data:/data
+    expose:
+      - "8000"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  frontend:
+    image: ghcr.io/sjbsjb233/txt2img-frontend:dev
+    container_name: txt2img-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mount the host's docker config so Watchtower can authenticate to GHCR.
+      - ${HOME}/.docker/config.json:/config.json:ro
+    command:
+      - --label-enable
+      - --interval=30
+      - --cleanup
+      - --rolling-restart
+
+volumes:
+  backend-data:
