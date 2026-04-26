@@ -5,6 +5,10 @@
 #   1. cp backend.env.example backend.env  (then fill in JWT_SECRET / ADMIN_PASSWORD / CORS_ORIGINS)
 #   2. docker login ghcr.io -u <github-user>   (use a PAT with read:packages)
 #   3. docker compose -f docker-compose.dev.yml up -d
+#
+# Host ports default to uncommon numbers to avoid clashing with anything else
+# on the box. Override via env vars if you need different bindings, e.g.:
+#   FRONTEND_PORT=8080 BACKEND_PORT=18000 docker compose -f docker-compose.dev.yml up -d
 
 services:
   backend:
@@ -19,8 +23,8 @@ services:
       # images, etc.) lives under ./data on the host so the whole project is in
       # one directory.
       - ./data:/app/data
-    expose:
-      - "8000"
+    ports:
+      - "${BACKEND_PORT:-18000}:8000"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 
@@ -31,7 +35,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "80:80"
+      - "${FRONTEND_PORT:-18080}:80"
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 
