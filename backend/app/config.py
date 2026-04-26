@@ -15,7 +15,8 @@ class Settings(BaseSettings):
 
     FORCE_CAPTCHA: bool = False
 
-    CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # "*" = lenient mode (any origin). Otherwise comma-separated explicit list.
+    CORS_ORIGINS: str = "*"
 
     @property
     def cors_origins_list(self) -> list[str]:

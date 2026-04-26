@@ -6,7 +6,8 @@ export function getApiBase() {
   const stored = localStorage.getItem(API_BASE_KEY);
   if (stored) return stored;
   const fromEnv = import.meta.env?.VITE_API_BASE;
-  return fromEnv || DEFAULT_BASE;
+  if (fromEnv !== undefined) return fromEnv;
+  return DEFAULT_BASE;
 }
 
 export function setApiBase(value) {
