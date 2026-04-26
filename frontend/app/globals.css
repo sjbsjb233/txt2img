@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-display: "Space Grotesk", "Inter", system-ui, -apple-system, sans-serif;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-ink-900 text-ink-50 antialiased;
+  background-image: radial-gradient(1200px 600px at 80% -10%, rgba(255, 214, 51, 0.10), transparent 60%),
+    radial-gradient(900px 500px at -10% 100%, rgba(246, 192, 0, 0.06), transparent 60%);
+  background-attachment: fixed;
+}
+
+/* Subtle scrollbar */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+@layer components {
+  .glass {
+    @apply bg-white/[0.03] backdrop-blur-xl border border-white/[0.06];
+  }
+  .glass-strong {
+    @apply bg-white/[0.06] backdrop-blur-2xl border border-white/[0.08];
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-medium text-sm
+      transition-all duration-150 select-none disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-banana-400 text-ink-900 hover:bg-banana-300 active:bg-banana-500
+      shadow-[0_8px_24px_-8px_rgba(255,214,51,0.6)];
+  }
+  .btn-secondary {
+    @apply btn bg-white/[0.05] text-ink-50 hover:bg-white/[0.08] border border-white/[0.06];
+  }
+  .btn-ghost {
+    @apply btn text-ink-100 hover:bg-white/[0.05];
+  }
+  .input {
+    @apply w-full bg-black/30 border border-white/[0.08] rounded-xl px-4 py-3 text-sm
+      placeholder:text-ink-300/60 focus:outline-none focus:ring-2 focus:ring-banana-400/40
+      focus:border-banana-400/40 transition;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium
+      bg-white/[0.05] border border-white/[0.06] text-ink-100;
+  }
+  .card {
+    @apply rounded-2xl glass shadow-soft;
+  }
+  .label {
+    @apply text-xs font-medium uppercase tracking-[0.14em] text-ink-300;
+  }
+}
+
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+.shimmer {
+  background: linear-gradient(90deg, rgba(255,255,255,0.04) 0%, rgba(255,255,255,0.10) 50%, rgba(255,255,255,0.04) 100%);
+  background-size: 800px 100%;
+  animation: shimmer 1.6s linear infinite;
+}
+
+@keyframes float-slow {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-6px); }
+}
+.float-slow { animation: float-slow 6s ease-in-out infinite; }
+
+@keyframes pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgba(255,214,51,0.45); }
+  100% { box-shadow: 0 0 0 18px rgba(255,214,51,0); }
+}
+.pulse-ring { animation: pulse-ring 1.6s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
