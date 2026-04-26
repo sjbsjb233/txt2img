@@ -20,9 +20,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="txt2img backend", version="0.1.0", lifespan=lifespan)
 
+# Lenient mode: when CORS_ORIGINS contains "*", allow any origin via regex.
+# A literal "*" with allow_credentials=True is rejected by browsers, so we
+# route through allow_origin_regex instead.
+_origins = settings.cors_origins_list
+_allow_any = "*" in _origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins_list,
+    allow_origins=[] if _allow_any else _origins,
+    allow_origin_regex=".*" if _allow_any else None,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
