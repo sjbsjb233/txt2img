@@ -1,0 +1,51 @@
+# Deploy on the production server. Watchtower follows the floating :stable tag
+# (poll interval 5 min). To release a new version: push a v* tag in git;
+# CI builds :v1.2.3 + :stable; Watchtower picks it up. To roll back:
+# in GHCR's package UI, repoint :stable at an older :vX.Y.Z, or push a hot-fix tag.
+#
+# Setup:
+#   1. cp backend.env.example backend.env   (fill in production JWT_SECRET / ADMIN_PASSWORD / CORS_ORIGINS)
+#   2. docker login ghcr.io -u <github-user>    (use a PAT with read:packages)
+#   3. docker compose -f docker-compose.prod.yml up -d
+
+services:
+  backend:
+    image: ghcr.io/sjbsjb233/txt2img-backend:stable
+    container_name: txt2img-backend
+    restart: unless-stopped
+    env_file: ./backend.env
+    environment:
+      DB_URL: sqlite:////data/txt2img.db
+    volumes:
+      - backend-data:/data
+    expose:
+      - "8000"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  frontend:
+    image: ghcr.io/sjbsjb233/txt2img-frontend:stable
+    container_name: txt2img-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOME}/.docker/config.json:/config.json:ro
+    command:
+      - --label-enable
+      - --interval=300
+      - --cleanup
+      - --rolling-restart
+
+volumes:
+  backend-data:
