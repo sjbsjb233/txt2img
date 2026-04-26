@@ -1,0 +1,131 @@
+/* Nano Banana Pro — Redesign Tokens */
+:root {
+  /* Core palette — warm paper, deep ink, banana accent */
+  --paper: #f4efe6;
+  --paper-2: #ede6d6;
+  --paper-3: #e3dac5;
+  --ink: #191714;
+  --ink-2: #3a3631;
+  --ink-3: #6b6459;
+  --ink-4: #9c9488;
+  --rule: #1917141a;
+  --rule-2: #19171433;
+
+  /* Banana — the only accent you need */
+  --banana: #f4c430;
+  --banana-deep: #d9a400;
+  --banana-soft: #fbe9a1;
+  --peel: #3f5d2a;
+
+  /* Semantic */
+  --ok: #2f6b3b;
+  --warn: #b8690f;
+  --bad: #9b2d20;
+  --info: #2b4f8a;
+
+  /* Type */
+  --font-display: "Fraunces", "Times New Roman", serif;
+  --font-sans: "Inter", -apple-system, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+
+  /* Elevation (flat — we use rules, not shadows, mostly) */
+  --shadow-card: 0 1px 0 #19171414, 0 8px 32px -12px #19171422;
+  --shadow-lift: 0 2px 0 var(--ink), 0 10px 30px -10px #19171433;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--font-sans);
+  color: var(--ink);
+  background: var(--paper);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Utility */
+.mono { font-family: var(--font-mono); font-feature-settings: "ss01", "cv11"; }
+.display { font-family: var(--font-display); font-optical-sizing: auto; }
+.caps { text-transform: uppercase; letter-spacing: 0.14em; font-weight: 600; }
+.hair { height: 1px; background: var(--ink); opacity: 0.12; }
+.hair-thick { height: 2px; background: var(--ink); }
+
+/* Brutal card */
+.card-brutal {
+  background: #fffdf7;
+  border: 1px solid var(--ink);
+  border-radius: 0;
+  position: relative;
+}
+.card-brutal::after {
+  content: ""; position: absolute; inset: 4px -4px -4px 4px;
+  background: var(--ink); z-index: -1;
+}
+
+/* Chip */
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 8px; border: 1px solid var(--ink);
+  font-family: var(--font-mono); font-size: 11px;
+  background: #fffdf7; text-transform: uppercase; letter-spacing: 0.08em;
+}
+.chip.solid { background: var(--ink); color: var(--paper); }
+.chip.banana { background: var(--banana); }
+.chip.ok { background: #d5e6cf; }
+.chip.warn { background: #f4d8a8; }
+.chip.bad { background: #e8bdb5; }
+
+/* Button */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: 8px; height: 38px; padding: 0 16px;
+  font-family: var(--font-sans); font-size: 13px; font-weight: 600;
+  border: 1px solid var(--ink); background: #fffdf7; color: var(--ink);
+  cursor: pointer; position: relative;
+  transition: transform 80ms ease, background 80ms ease;
+}
+.btn:hover { background: var(--paper-2); }
+.btn:active { transform: translate(1px, 1px); }
+.btn.primary { background: var(--banana); }
+.btn.primary:hover { background: var(--banana-deep); }
+.btn.ink { background: var(--ink); color: var(--paper); }
+.btn.ink:hover { background: #000; }
+.btn.ghost { background: transparent; }
+.btn.sm { height: 28px; padding: 0 10px; font-size: 12px; }
+.btn.lg { height: 48px; padding: 0 22px; font-size: 14px; }
+
+/* Shadow variant */
+.btn.shadowed {
+  box-shadow: 3px 3px 0 var(--ink);
+}
+.btn.shadowed:hover {
+  box-shadow: 2px 2px 0 var(--ink);
+  transform: translate(1px, 1px);
+}
+
+/* Input */
+.inp {
+  width: 100%; height: 38px; padding: 0 12px;
+  border: 1px solid var(--ink); background: #fffdf7;
+  font-family: var(--font-sans); font-size: 13px; color: var(--ink);
+}
+.inp:focus { outline: 2px solid var(--banana); outline-offset: -2px; }
+
+textarea.inp { height: auto; padding: 12px; line-height: 1.55; font-family: var(--font-mono); font-size: 13px; }
+
+/* Tag ticker (for stat cards) */
+.ticker { font-family: var(--font-display); font-variant-numeric: tabular-nums; }
+
+/* Kbd */
+.kbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 20px; padding: 0 6px;
+  border: 1px solid var(--ink); background: #fffdf7;
+  font-family: var(--font-mono); font-size: 10px;
+  box-shadow: 0 2px 0 var(--ink);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--paper-2); }
+::-webkit-scrollbar-thumb { background: var(--ink-3); border: 2px solid var(--paper-2); }
