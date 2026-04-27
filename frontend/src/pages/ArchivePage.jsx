@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef, useLayoutEffect } from "react";
 import Icon from "../components/Icon.jsx";
+import {
+  RunningCard,
+  QueuedCard,
+  FailCard,
+  ArchiveSetCard,
+} from "../components/archive";
 
 const HX_IMGS = Array.from({ length: 24 }, (_, i) => {
   const palette = [
@@ -16,7 +22,16 @@ const HX_IMGS = Array.from({ length: 24 }, (_, i) => {
     "#5b2418",
     "#bedb98",
   ];
-  const statuses = ["", "", "", "", "FAIL", "RUNNING", "BEST", "", "", "", "", "", "", "", "", ""];
+  // 状态分布展示新组件:
+  //   SET     — 多图聚合卡 (gpt-image-2)
+  //   QUEUED  — 队列等待
+  //   FAIL    — 渲染失败
+  //   RUNNING — 渲染中
+  //   BEST    — 已完成的精选 (沿用旧实现)
+  const statuses = [
+    "", "", "SET", "", "FAIL", "RUNNING", "BEST", "",
+    "QUEUED", "", "", "", "SET", "", "", "",
+  ];
   const models = ["pro-2×", "flash", "pro-2×", "draft"];
   const ratios = ["1:1", "16:9", "3:4", "4:3"];
   return {
@@ -36,6 +51,12 @@ const HX_IMGS = Array.from({ length: 24 }, (_, i) => {
     ][i % 6],
   };
 });
+
+// SET 卡片用的 placeholder 图片色板 (4 张为一组)
+const SET_PALETTES = [
+  ["#d9a534", "#c25b30", "#4a6a2e", "#2f5bb7"],
+  ["#9bdac5", "#f0c2db", "#2f2c28", "#e3dac5"],
+];
 
 function FilterPopover({ onClose, onPick }) {
   const ref = useRef();
@@ -497,6 +518,15 @@ export default function ArchivePage() {
   const prev = () => idx > 0 && setDrawerItem(items[idx - 1]);
   const next = () => idx >= 0 && idx < items.length - 1 && setDrawerItem(items[idx + 1]);
 
+  // RUNNING 卡片需要一个秒数计时器以显示已运行时间。
+  // 这里用一个全局 ticker 给所有 RUNNING 卡片共享 — 真实场景下应该按
+  // 任务起始时间分别计算 (Date.now() - job.startedAt)。
+  const [runTick, setRunTick] = useState(0);
+  useEffect(() => {
+    const i = setInterval(() => setRunTick((t) => t + 1), 1000);
+    return () => clearInterval(i);
+  }, []);
+
   return (
     <div
       style={{
@@ -722,6 +752,83 @@ export default function ArchivePage() {
           >
             {items.map((img) => {
               const focused = drawerItem?.id === img.id;
+              const focusClass = focused ? "arch-focused" : "";
+
+              // —— RUNNING — 用 RunningCard 替代旧的简易 chip
+              if (img.s === "RUNNING") {
+                return (
+                  <RunningCard
+                    key={img.id}
+                    size="grid"
+                    id={img.id}
+                    model={img.model}
+                    ratio={img.ratio}
+                    seconds={runTick}
+                    onClick={() => open(img)}
+                    className={focusClass}
+                  />
+                );
+              }
+
+              // —— QUEUED — 队列等待
+              if (img.s === "QUEUED") {
+                return (
+                  <QueuedCard
+                    key={img.id}
+                    size="grid"
+                    id={img.id}
+                    model={img.model}
+                    ratio={img.ratio}
+                    position={3}
+                    total={8}
+                    eta="~ 48s"
+                    onClick={() => open(img)}
+                    className={focusClass}
+                  />
+                );
+              }
+
+              // —— FAIL — 静态失败卡 + retry 按钮
+              if (img.s === "FAIL") {
+                return (
+                  <FailCard
+                    key={img.id}
+                    size="grid"
+                    id={img.id}
+                    model={img.model}
+                    ratio={img.ratio}
+                    age={img.ago}
+                    label="failed"
+                    reason="timeout · 60s"
+                    onRetry={() => {
+                      // TODO: hook to backend retry endpoint
+                      console.log("retry", img.id);
+                    }}
+                    onClick={() => open(img)}
+                    className={focusClass}
+                  />
+                );
+              }
+
+              // —— SET — 多图聚合卡 (gpt-image-2 风格)
+              if (img.s === "SET") {
+                const palette = SET_PALETTES[img.id % SET_PALETTES.length];
+                return (
+                  <ArchiveSetCard
+                    key={img.id}
+                    size="grid"
+                    id={img.id}
+                    model="gpt-image-2"
+                    age={img.ago}
+                    images={palette.map((bg) => ({ bg }))}
+                    totalCount={4}
+                    onClick={() => open(img)}
+                    className={focusClass}
+                  />
+                );
+              }
+
+              // —— 默认 / BEST — 沿用原有简易卡片实现
               return (
                 <div
                   key={img.id}
@@ -738,40 +845,6 @@ export default function ArchivePage() {
                   }}
                 >
                   <div style={{ aspectRatio: "1/1", background: img.c, position: "relative" }}>
-                    {img.s === "FAIL" && (
-                      <span
-                        style={{
-                          position: "absolute",
-                          top: 8,
-                          left: 8,
-                          padding: "2px 8px",
-                          background: "var(--ink)",
-                          color: "var(--paper)",
-                          fontFamily: "var(--font-mono)",
-                          fontSize: 10,
-                          fontWeight: 700,
-                        }}
-                      >
-                        FAIL
-                      </span>
-                    )}
-                    {img.s === "RUNNING" && (
-                      <span
-                        style={{
-                          position: "absolute",
-                          top: 8,
-                          right: 8,
-                          padding: "2px 8px",
-                          background: "var(--banana)",
-                          color: "var(--ink)",
-                          fontFamily: "var(--font-mono)",
-                          fontSize: 10,
-                          fontWeight: 700,
-                        }}
-                      >
-                        ◐ RUNNING
-                      </span>
-                    )}
                     {img.s === "BEST" && (
                       <span
                         style={{
