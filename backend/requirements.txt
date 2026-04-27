@@ -9,3 +9,9 @@ argon2-cffi==23.*
 Pillow==10.*
 python-jose[cryptography]==3.3.*
 httpx==0.27.*
+
+# --- test-only ---
+# Kept in the same file so the dev image runs the suite without a separate
+# requirements-dev.txt. They add a few MB but no production attack surface.
+pytest==8.*
+pytest-asyncio==0.24.*
