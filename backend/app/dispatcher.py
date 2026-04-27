@@ -17,15 +17,19 @@ The dispatcher is intentionally thin: schema validation lives in
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import random
+import struct
+import zlib
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Mapping
 
 from sqlalchemy.orm import Session, selectinload
 
+from .config import settings
 from .image_clients import BltcyGptImage2Client, BltcyNanoBananaClient
 from .image_clients.bltcy_gpt_image_2 import BltcyGptImage2Error
 from .image_clients.bltcy_nano_banana import BltcyNanoBananaError
@@ -306,10 +310,26 @@ async def dispatch_generate(
     prompt: str,
     params: dict[str, Any],
     input_images: list[dict[str, Any]] | None = None,
+    simulate: bool = False,
 ) -> DispatchResult:
-    """End-to-end: pick a station, validate params, call upstream, decrement balance."""
+    """End-to-end: pick a station, validate params, call upstream, decrement balance.
+
+    When ``simulate`` is true the upstream call is skipped entirely: we only
+    check the model exists and the user-supplied params satisfy the model's
+    own ``param_schema`` (no station selection), then sleep a random delay and
+    return a synthetic PNG. Useful for CI and frontend dev so we don't burn
+    real relay credits.
+    """
     if not prompt or not prompt.strip():
         raise DispatcherError(422, "invalid_prompt", "prompt is required")
+
+    if simulate:
+        return await _dispatch_simulated(
+            db,
+            model_key=model_key,
+            prompt=prompt,
+            params=params,
+        )
 
     binding, effective_schema = select_station_binding(
         db, model_key=model_key, station=station, params=params
@@ -359,3 +379,128 @@ async def dispatch_generate(
             logger.exception("Failed to decrement balance for station %s", binding.relay_station.provider_id)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Simulation path (CI / dev — no real upstream call)
+# ---------------------------------------------------------------------------
+
+# Cap synthetic PNG size to keep CI fast & responses small. The user may have
+# asked for 4K but we don't want to ship 50MB of zeroes through the test loop.
+_SIM_MAX_EDGE = 256
+
+_GEMINI_SIZE_TO_LONG_EDGE: dict[str, int] = {"512": 512, "1K": 1024, "2K": 2048, "4K": 3840}
+
+
+def _simulated_dimensions(family: str, params: Mapping[str, Any]) -> tuple[int, int]:
+    """Pick (width, height) for a synthetic image, honoring the requested
+    aspect / size hints where possible. Caps the longest edge at ``_SIM_MAX_EDGE``
+    so we don't waste bytes generating real-resolution placeholders."""
+    if family == "openai_images":
+        size = params.get("size") or "1024x1024"
+        if size == "auto":
+            size = "1024x1024"
+        try:
+            w_str, h_str = str(size).split("x")
+            w, h = int(w_str), int(h_str)
+        except (ValueError, AttributeError):
+            w, h = 1024, 1024
+    else:  # gemini family (or unknown — same control surface is fine)
+        long_edge = _GEMINI_SIZE_TO_LONG_EDGE.get(str(params.get("image_size") or "1K"), 1024)
+        ratio = str(params.get("aspect_ratio") or "1:1")
+        try:
+            rw, rh = ratio.split(":")
+            rw, rh = int(rw), int(rh)
+        except (ValueError, AttributeError):
+            rw, rh = 1, 1
+        if rw >= rh:
+            w, h = long_edge, max(1, long_edge * rh // rw)
+        else:
+            h, w = long_edge, max(1, long_edge * rw // rh)
+
+    if max(w, h) > _SIM_MAX_EDGE:
+        scale = _SIM_MAX_EDGE / max(w, h)
+        w = max(1, int(w * scale))
+        h = max(1, int(h * scale))
+    return w, h
+
+
+def _make_solid_png(width: int, height: int, color: tuple[int, int, int]) -> bytes:
+    """Build a minimal 8-bit RGB PNG of a single solid color, no dependencies."""
+
+    def chunk(typ: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data))
+            + typ
+            + data
+            + struct.pack(">I", zlib.crc32(typ + data))
+        )
+
+    pixel = bytes(color)
+    raw = bytearray()
+    for _ in range(height):
+        raw.append(0)  # PNG filter byte: None
+        raw.extend(pixel * width)
+
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)  # 8-bit, color type 2 (RGB)
+    return (
+        sig
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+        + chunk(b"IEND", b"")
+    )
+
+
+async def _dispatch_simulated(
+    db: Session,
+    *,
+    model_key: str,
+    prompt: str,
+    params: Mapping[str, Any],
+) -> DispatchResult:
+    image_model = (
+        db.query(ImageModel)
+        .filter(ImageModel.model_key == model_key, ImageModel.enabled.is_(True))
+        .first()
+    )
+    if image_model is None:
+        raise DispatcherError(404, "model_not_found", f"unknown model_key {model_key!r}")
+
+    # Validate against the model's full param_schema; no per-station narrowing
+    # since we're not picking a station.
+    try:
+        cleaned = validate_params(image_model.param_schema or {}, params)
+    except ParamValidationError as exc:
+        raise DispatcherError(422, "invalid_params", str(exc), payload=exc.errors) from exc
+
+    delay_min = max(0.0, settings.SIMULATE_DELAY_MIN)
+    delay_max = max(delay_min, settings.SIMULATE_DELAY_MAX)
+    if delay_max > 0:
+        await asyncio.sleep(random.uniform(delay_min, delay_max))
+
+    n = int(cleaned.get("n", 1) or 1)
+    n = max(1, min(n, 10))
+    width, height = _simulated_dimensions(image_model.family, cleaned)
+
+    images: list[GeneratedImage] = []
+    for _ in range(n):
+        color = (
+            random.randint(40, 230),
+            random.randint(40, 230),
+            random.randint(40, 230),
+        )
+        images.append(
+            GeneratedImage(
+                mime_type="image/png",
+                image_bytes=_make_solid_png(width, height, color),
+            )
+        )
+
+    return DispatchResult(
+        images=images,
+        model_key=model_key,
+        station_provider_id="simulated",
+        revised_prompt=None,
+        usage={"simulated": True, "width": width, "height": height},
+    )
