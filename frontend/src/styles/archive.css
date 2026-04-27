@@ -1,0 +1,716 @@
+/* ============================================================================
+ * Archive — Card States & Set Card Styles
+ * ----------------------------------------------------------------------------
+ * 设计来源 (Design source):
+ *   - archive-states.html      → RUNNING / QUEUED / FAIL 三种归档卡片状态
+ *   - archive-set-card.html    → 多图生成的 SET 卡片（2x2 / 1x2 / 1+2 布局）
+ *
+ * 该文件提供这些组件需要的全部 class，统一以 `arch-` 前缀避免与项目
+ * 既有样式冲突。所有 token (颜色/字体) 沿用 tokens.css，未引入新 token。
+ *
+ * 使用方法 (Usage):
+ *   - 已经在 main.jsx 中通过 `import "./styles/archive.css"` 引入。
+ *   - React 组件位于 src/components/archive/，可直接 import 使用。
+ * ==========================================================================*/
+
+/* ------------------------------------------------------------------
+ * 基础卡片骨架 — 与 ArchivePage 现有图片网格保持完全一致的版式
+ * ------------------------------------------------------------------ */
+.arch-card {
+  width: 280px;
+  border: 1px solid var(--ink);
+  background: #fffdf7;
+  display: flex;
+  flex-direction: column;
+}
+/* 详情抽屉打开时被聚焦的卡片 — 复用 ArchivePage 现有的 2px bad 边框语义 */
+.arch-card.arch-focused {
+  outline: 2px solid var(--bad);
+  outline-offset: -2px;
+}
+/* `big` 仅用于详情/特写场景 (e.g. 单图详情侧栏中的 360px 大图) */
+.arch-card.arch-card-big { width: 360px; }
+/* 网格内自适应宽度（4 列 grid 中使用 width:auto 让 grid-template-columns 接管） */
+.arch-card.arch-card-grid { width: auto; }
+
+.arch-thumb {
+  aspect-ratio: 1 / 1;
+  position: relative;
+  overflow: hidden;
+  background: var(--paper-2);
+}
+.arch-meta {
+  padding: 8px 10px;
+  border-top: 1px solid var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.arch-meta .arch-meta-ago { color: var(--ink-3); }
+
+/* ------------------------------------------------------------------
+ * 状态 chip — 与既有 chip 系统视觉对齐
+ * ------------------------------------------------------------------ */
+.arch-chip-status {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  z-index: 3;
+}
+.arch-chip-running { background: var(--banana); color: var(--ink); }
+.arch-chip-queued {
+  background: #fffdf7;
+  color: var(--ink);
+  border: 1px solid var(--ink);
+}
+.arch-chip-fail-tl {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 2px 8px;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  z-index: 3;
+}
+
+/* RUNNING chip 内的旋转半圆 */
+.arch-chip-running .arch-glyph {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: linear-gradient(90deg, var(--ink) 0 50%, transparent 50% 100%);
+  border: 1px solid var(--ink);
+  box-sizing: border-box;
+  animation: archSpin 1.6s linear infinite;
+}
+/* QUEUED chip 内的脉动方块 */
+.arch-glyph-q {
+  width: 9px;
+  height: 9px;
+  border: 1px solid var(--ink);
+  box-sizing: border-box;
+  background: transparent;
+  position: relative;
+}
+.arch-glyph-q::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  background: var(--ink);
+  animation: archPulse 1.4s ease-in-out infinite;
+}
+
+/* ------------------------------------------------------------------
+ * RUNNING — 低注意力的渲染中状态
+ * 设计原则：纸面叠纸面，无彩色，避免抢走已完成图片的视觉
+ * ------------------------------------------------------------------ */
+.arch-run-thumb { background: var(--paper-2); }
+
+/* 1) 缓慢漂移的 45° 影线（纸纹质感） */
+.arch-run-thumb::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent 0 6px,
+    rgba(25, 23, 20, 0.045) 6px 7px
+  );
+  background-size: 200% 200%;
+  animation: archDrift 6.5s linear infinite;
+  opacity: 0.85;
+  pointer-events: none;
+}
+/* 2) 由上至下扫过的低透明度扫描线 */
+.arch-run-thumb::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--ink);
+  opacity: 0.18;
+  top: 0;
+  animation: archScan 2.6s cubic-bezier(.45, .05, .55, .95) infinite;
+  box-shadow: 0 1px 0 rgba(25, 23, 20, 0.06);
+  pointer-events: none;
+}
+/* 3) 软色块呼吸 — 用极低饱和的 banana 与 ink 让画面"活" */
+.arch-run-bgshift {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(120% 80% at 30% 30%, rgba(244, 196, 48, 0.10), transparent 60%),
+    radial-gradient(120% 80% at 70% 70%, rgba(25, 23, 20, 0.05), transparent 60%);
+  animation: archBgshift 5.5s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+/* 4) 底部不确定进度条 */
+.arch-run-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: rgba(25, 23, 20, 0.08);
+  overflow: hidden;
+  z-index: 2;
+}
+.arch-run-progress::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 36%;
+  background: var(--ink);
+  animation: archIndeterminate 2.2s cubic-bezier(.65, .05, .35, 1) infinite;
+}
+/* 5) 中央 caption (rendering 14s) */
+.arch-run-caption {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  pointer-events: none;
+  z-index: 1;
+}
+.arch-run-caption .arch-run-seconds {
+  display: inline-block;
+  min-width: 28px;
+  color: var(--ink);
+  margin-left: 8px;
+}
+
+/* meta 行用的脉动小点 + 计时器 */
+.arch-meta-running .arch-meta-ago { color: var(--ink); font-weight: 600; }
+.arch-meta-running .arch-blink {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  background: var(--ink);
+  border-radius: 50%;
+  vertical-align: middle;
+  margin-right: 4px;
+  animation: archPulse 1.4s ease-in-out infinite;
+}
+
+/* ------------------------------------------------------------------
+ * QUEUED — RUNNING 的变种，展示队列位置
+ * ------------------------------------------------------------------ */
+.arch-queue-stamp {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  pointer-events: none;
+  padding: 0 16px;
+  z-index: 1;
+}
+.arch-queue-stamp .arch-q-pos {
+  font-family: var(--font-display);
+  font-weight: 900;
+  letter-spacing: -0.04em;
+  line-height: 0.9;
+  color: var(--ink);
+  display: flex;
+  align-items: baseline;
+}
+.arch-queue-stamp .arch-q-hash {
+  font-size: 22px;
+  color: var(--ink-3);
+  margin-right: 2px;
+  font-weight: 700;
+}
+.arch-queue-stamp .arch-q-num {
+  font-size: 56px;
+  font-variant-numeric: tabular-nums;
+}
+.arch-queue-stamp .arch-q-of {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin-top: -2px;
+}
+.arch-queue-stamp .arch-q-eta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink);
+  letter-spacing: 0.04em;
+  margin-top: 2px;
+  font-weight: 600;
+}
+.arch-queue-stamp .arch-q-bar {
+  width: 70%;
+  height: 2px;
+  background: rgba(25, 23, 20, 0.12);
+  margin-top: 8px;
+  position: relative;
+}
+.arch-queue-stamp .arch-q-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--ink);
+  transition: width 600ms ease;
+}
+
+/* ------------------------------------------------------------------
+ * FAIL — 静态、不可错过、但不刺眼
+ * 设计原则：不大面积铺红，仅时间戳用 --bad，让网格保持平静
+ * ------------------------------------------------------------------ */
+.arch-fail-thumb {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--paper-3) 0 8px,
+    var(--paper-2) 8px 16px
+  );
+  position: relative;
+}
+.arch-fail-stamp {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--ink);
+  text-align: center;
+  padding: 0 12px;
+}
+/* 56px 圆形 ✕ 标志 */
+.arch-fail-glyph {
+  width: 56px;
+  height: 56px;
+  border: 2px solid var(--ink);
+  border-radius: 50%;
+  background: #fffdf7;
+  position: relative;
+}
+.arch-fail-glyph::before,
+.arch-fail-glyph::after {
+  content: "";
+  position: absolute;
+  width: 28px;
+  height: 2px;
+  background: var(--ink);
+  top: 50%;
+  left: 50%;
+}
+.arch-fail-glyph::before { transform: translate(-50%, -50%) rotate(45deg); }
+.arch-fail-glyph::after  { transform: translate(-50%, -50%) rotate(-45deg); }
+
+.arch-fail-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink);
+}
+.arch-fail-reason {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  letter-spacing: 0.04em;
+  max-width: 78%;
+  text-align: center;
+  line-height: 1.4;
+}
+.arch-fail-retry {
+  position: absolute;
+  bottom: 10px;
+  right: 10px;
+  padding: 3px 9px;
+  background: #fffdf7;
+  border: 1px solid var(--ink);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  cursor: pointer;
+  box-shadow: 2px 2px 0 var(--ink);
+  transition: transform 80ms ease, box-shadow 80ms ease;
+  z-index: 4;
+}
+.arch-fail-retry:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 3px 3px 0 var(--ink);
+}
+.arch-fail-retry:active {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 var(--ink);
+}
+.arch-meta-fail .arch-meta-ago { color: var(--bad); font-weight: 600; }
+
+/* ------------------------------------------------------------------
+ * SET CARD — 多图聚合卡片
+ * 占位与单图相同 (1:1 / 同 border / 同 meta 行)，仅 thumb 内部为 contact sheet
+ * ------------------------------------------------------------------ */
+.arch-set-badge {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 3;
+  padding: 4px 9px 5px;
+  background: var(--ink);
+  color: var(--banana);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.10em;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.arch-set-badge .arch-set-dot {
+  width: 4px;
+  height: 4px;
+  background: var(--banana);
+  display: inline-block;
+}
+
+/* contact sheet — 默认 2x2 网格，1px ink 间隙形成十字分隔 */
+.arch-sheet {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 1px;
+  background: var(--ink); /* 透出 1px 网格线 */
+}
+.arch-sheet > .arch-cell {
+  position: relative;
+  overflow: hidden;
+  background: var(--paper-2);
+}
+
+/* N=2 — 1x2 横向分割 */
+.arch-sheet.arch-n2 {
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr;
+}
+/* N=3 — 1 hero + 2 stacked (新闻版式) */
+.arch-sheet.arch-n3 {
+  grid-template-columns: 1.6fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+.arch-sheet.arch-n3 > .arch-cell:first-child { grid-row: 1 / span 2; }
+
+/* +N overlay — 当 N>4 时盖在第 4 个 cell 上展示剩余张数 */
+.arch-more-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(25, 23, 20, 0.78);
+  color: var(--paper);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--font-display);
+  z-index: 2;
+}
+.arch-more-overlay .arch-more-plus {
+  font-weight: 900;
+  font-size: 32px;
+  line-height: 1;
+  letter-spacing: -0.04em;
+}
+.arch-more-overlay .arch-more-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--paper);
+  opacity: 0.78;
+}
+
+/* 单 cell 失败标记（partial fail） */
+.arch-cell-fail::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(to top right,
+      transparent calc(50% - 1px),
+      rgba(155, 45, 32, 0.92) 50%,
+      transparent calc(50% + 1px)),
+    linear-gradient(to top left,
+      transparent calc(50% - 1px),
+      rgba(155, 45, 32, 0.92) 50%,
+      transparent calc(50% + 1px)),
+    rgba(155, 45, 32, 0.18);
+  pointer-events: none;
+}
+.arch-cell-fail .arch-cell-corner {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 12px;
+  height: 12px;
+  background: var(--bad);
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+}
+
+/* 单 cell 进行中占位（still rendering） */
+.arch-cell-running {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--paper-2) 0 6px,
+    var(--paper-3) 6px 7px
+  );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.arch-cell-running .arch-spin {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--ink);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: archSpin 1.2s linear infinite;
+}
+
+/* set 整体在跑时的右上角 chip — 与单图 RUNNING chip 同视觉 */
+.arch-chip-running-set {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  padding: 2px 8px;
+  background: var(--banana);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.arch-chip-running-set .arch-glyph {
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--ink);
+  border-top-color: transparent;
+  border-radius: 50%;
+  box-sizing: border-box;
+  animation: archSpin 1.2s linear infinite;
+}
+
+/* hover tooltip：cell 内底部条 (与设计稿一致) */
+.arch-cell-tooltip {
+  position: absolute;
+  inset: auto 0 0 0;
+  padding: 6px 8px;
+  background: linear-gradient(to top, rgba(25, 23, 20, 0.78), transparent);
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+}
+.arch-cell-tooltip .arch-cell-tooltip-num { opacity: 0.7; margin-right: 4px; }
+
+/* ------------------------------------------------------------------
+ * SET 详情视图 — 点击 SET 卡片后展开
+ * ------------------------------------------------------------------ */
+.arch-detail-frame {
+  border: 1px solid var(--ink);
+  background: #fffdf7;
+  padding: 28px 32px 36px;
+}
+.arch-detail-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  margin-bottom: 22px;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.arch-detail-top .arch-breadcrumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.arch-detail-top .arch-breadcrumb a {
+  color: var(--ink-3);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.arch-detail-top .arch-breadcrumb a:hover { color: var(--ink); }
+.arch-detail-top .arch-breadcrumb .arch-sep { color: var(--ink-4); }
+.arch-detail-top .arch-breadcrumb .arch-here { color: var(--ink); font-weight: 700; }
+
+.arch-prompt-box {
+  border: 1px solid var(--ink);
+  background: #fffdf7;
+  padding: 16px 20px 18px;
+  margin-bottom: 24px;
+}
+.arch-prompt-box .arch-ph-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+.arch-prompt-box .arch-ph-body {
+  font-family: var(--font-display);
+  font-size: 18px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+/* 子提示词高亮 (e.g. <b>01.</b> dawn interior) */
+.arch-prompt-box .arch-ph-body b {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  background: var(--banana-soft);
+  padding: 1px 5px;
+  margin: 0 1px;
+  letter-spacing: 0.04em;
+}
+
+.arch-panels {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 14px;
+}
+@media (max-width: 880px) {
+  .arch-panels { grid-template-columns: repeat(2, 1fr); }
+}
+.arch-panel {
+  border: 1px solid var(--ink);
+  background: #fffdf7;
+  display: flex;
+  flex-direction: column;
+}
+.arch-panel .arch-pic {
+  aspect-ratio: 1 / 1;
+  position: relative;
+  overflow: hidden;
+  background: var(--paper-2);
+}
+.arch-panel .arch-pmeta {
+  padding: 7px 10px;
+  border-top: 1px solid var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+}
+/* 已被收藏 / 选作 best 的 5 角星标记 */
+.arch-panel .arch-star {
+  width: 12px;
+  height: 12px;
+  display: inline-block;
+  background: var(--ink);
+  clip-path: polygon(50% 0, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
+}
+.arch-panel-num {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 4px 9px 5px;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  z-index: 2;
+}
+
+/* ------------------------------------------------------------------
+ * 动画关键帧 — 所有 archive 组件共用，前缀 arch 防冲突
+ * ------------------------------------------------------------------ */
+@keyframes archDrift {
+  from { background-position: 0 0; }
+  to   { background-position: 56px -56px; }
+}
+@keyframes archScan {
+  0%   { top: 0%;   opacity: 0; }
+  8%   { opacity: 0.22; }
+  92%  { opacity: 0.22; }
+  100% { top: 100%; opacity: 0; }
+}
+@keyframes archPulse {
+  0%, 100% { opacity: 0.25; transform: scale(0.85); }
+  50%      { opacity: 1;    transform: scale(1.1); }
+}
+@keyframes archIndeterminate {
+  0%   { left: -40%; }
+  100% { left: 100%; }
+}
+@keyframes archBgshift {
+  from { transform: translate(-2%, -1%); }
+  to   { transform: translate(2%, 1%); }
+}
+@keyframes archSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* 尊重用户的减弱动画偏好 */
+@media (prefers-reduced-motion: reduce) {
+  .arch-run-thumb::before,
+  .arch-run-thumb::after,
+  .arch-run-bgshift,
+  .arch-run-progress::after,
+  .arch-meta-running .arch-blink,
+  .arch-glyph-q::after,
+  .arch-chip-running .arch-glyph,
+  .arch-chip-running-set .arch-glyph,
+  .arch-cell-running .arch-spin {
+    animation: none;
+  }
+}
