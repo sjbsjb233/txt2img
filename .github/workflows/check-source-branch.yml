@@ -1,0 +1,17 @@
+name: check-source-branch
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure PR comes from develop
+        run: |
+          if [ "${{ github.head_ref }}" != "develop" ]; then
+            echo "❌ main 分支只接受来自 develop 的 PR"
+            echo "当前来源分支: ${{ github.head_ref }}"
+            exit 1
+          fi
+          echo "✅ 来源分支检查通过"
