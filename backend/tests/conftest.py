@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 from typing import AsyncIterator, Iterator
 
+import httpx
 import pytest
 import pytest_asyncio
 
@@ -62,3 +63,40 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
         yield
     finally:
         await db_engine.close_engine()
+
+
+@pytest_asyncio.fixture
+async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
+    """Boot the FastAPI app via lifespan and yield an httpx AsyncClient.
+
+    Goes through the real lifespan so the app under test sees the same
+    migration + seed path as production. The fixture also depends on
+    ``fresh_env`` indirectly: we set env vars and clear the settings
+    cache here so each test gets its own DB without bleeding state.
+    """
+    import tempfile
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="txt2img_test_"))
+    db_path = tmp_dir / f"test_{uuid.uuid4().hex}.db"
+    data_root = tmp_dir / "data"
+    data_root.mkdir(exist_ok=True)
+    _set_env_for_tests(db_path, data_root)
+
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    # Import here so env vars are already in place before Settings is
+    # instantiated by anything down the import graph.
+    from app.main import create_app
+
+    app = create_app()
+
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            yield client
+
+    get_settings.cache_clear()
