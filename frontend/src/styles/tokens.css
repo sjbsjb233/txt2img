@@ -129,3 +129,30 @@ textarea.inp { height: auto; padding: 12px; line-height: 1.55; font-family: var(
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: var(--paper-2); }
 ::-webkit-scrollbar-thumb { background: var(--ink-3); border: 2px solid var(--paper-2); }
+
+/* Sidebar nav button hover/focus */
+.nav-btn { transition: background 140ms ease, color 140ms ease; }
+.nav-btn:focus-visible { outline: 2px solid var(--banana); outline-offset: -2px; }
+.nav-btn-expanded[data-active="false"]:hover { background: var(--paper-3); }
+.nav-btn-rail[data-active="false"]:hover { background: #ffffff10; color: var(--paper); }
+.nav-btn-rail[data-active="true"]:hover { background: #000; }
+.rail-foot:hover { background: #ffffff08; }
+.rail-foot:focus-visible { outline: 2px solid var(--banana); outline-offset: -2px; }
+
+/* Route transition — subtle, premium, no JS deps */
+@keyframes routeStageIn {
+  from { opacity: 0; transform: translate3d(0, 6px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+.route-stage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  animation: routeStageIn 280ms cubic-bezier(.22,.85,.22,1) both;
+  will-change: opacity, transform;
+}
+@media (prefers-reduced-motion: reduce) {
+  .route-stage { animation: none; }
+}
