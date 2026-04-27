@@ -6,6 +6,7 @@ from .config import settings
 from .db import Base, SessionLocal, engine
 from .models import User
 from .security import hash_password
+from .seed_models import seed_image_models
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ def init() -> None:
     create_all()
     with SessionLocal() as db:
         bootstrap_admin(db)
+        seed_image_models(db)
 
 
 if __name__ == "__main__":
