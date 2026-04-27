@@ -517,23 +517,23 @@ export default function ArchivePage() {
           willChange: "padding-right",
         }}
       >
-        <div style={{ padding: "44px 56px 60px" }}>
+        <div style={{ padding: "32px 56px 60px" }}>
           <div
             className="mono caps"
-            style={{ fontSize: 11, color: "var(--ink-3)", letterSpacing: "0.18em" }}
+            style={{ fontSize: 10, color: "var(--ink-3)", letterSpacing: "0.18em" }}
           >
             HISTORY · ARCHIVE
           </div>
 
-          <div ref={titleWrap} style={{ marginTop: 20, overflow: "hidden" }}>
+          <div ref={titleWrap} style={{ marginTop: 6, overflow: "hidden", paddingBottom: 2 }}>
             <h1
               ref={titleEl}
               className="display"
               style={{
-                fontSize: 64,
+                fontSize: 42,
                 fontWeight: 900,
-                letterSpacing: "-0.04em",
-                lineHeight: 1,
+                letterSpacing: "-0.035em",
+                lineHeight: 1.15,
                 margin: 0,
                 whiteSpace: "nowrap",
                 display: "inline-block",
@@ -549,7 +549,7 @@ export default function ArchivePage() {
 
           <div
             style={{
-              marginTop: 28,
+              marginTop: 14,
               display: "flex",
               alignItems: "center",
               gap: 14,
