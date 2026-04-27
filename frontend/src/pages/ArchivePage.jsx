@@ -5,6 +5,7 @@ import {
   QueuedCard,
   FailCard,
   ArchiveSetCard,
+  ArchiveSetDetail,
 } from "../components/archive";
 
 const HX_IMGS = Array.from({ length: 24 }, (_, i) => {
@@ -483,6 +484,8 @@ export default function ArchivePage() {
   const [filterOpen, setFilterOpen] = useState(false);
   const [drawerItem, setDrawerItem] = useState(null);
   const drawerOpen = !!drawerItem;
+  // 当用户点击 SET 卡片时，进入全页详情视图（取代 grid + drawer）
+  const [setDetailId, setSetDetailId] = useState(null);
 
   const baseCols = 4;
   const cols = drawerOpen ? Math.max(3, baseCols - 1) : baseCols;
@@ -512,8 +515,21 @@ export default function ArchivePage() {
   }, [drawerOpen]);
 
   const items = HX_IMGS;
-  const open = (item) => setDrawerItem(item);
+  // SET 卡走详情视图，其它走右侧抽屉
+  const open = (item) => {
+    if (item.s === "SET") {
+      setDrawerItem(null);
+      setSetDetailId(item.id);
+    } else {
+      setSetDetailId(null);
+      setDrawerItem(item);
+    }
+  };
   const close = () => setDrawerItem(null);
+  const closeSetDetail = () => setSetDetailId(null);
+  const setDetailItem = setDetailId
+    ? items.find((x) => x.id === setDetailId)
+    : null;
   const idx = drawerItem ? items.findIndex((x) => x.id === drawerItem.id) : -1;
   const prev = () => idx > 0 && setDrawerItem(items[idx - 1]);
   const next = () => idx >= 0 && idx < items.length - 1 && setDrawerItem(items[idx + 1]);
@@ -526,6 +542,45 @@ export default function ArchivePage() {
     const i = setInterval(() => setRunTick((t) => t + 1), 1000);
     return () => clearInterval(i);
   }, []);
+
+  // —— SET 详情视图 — 整页替换 grid，与设计稿 archive-set-card.html · 03 对齐
+  if (setDetailItem) {
+    const palette = SET_PALETTES[setDetailItem.id % SET_PALETTES.length];
+    const PANEL_TITLES = [
+      "dawn interior",
+      "barista close-up",
+      "morning light",
+      "peak hour",
+    ];
+    const promptText = `A four-panel storyboard of a coffee shop opening day —
+01. empty interior at dawn, warm yellow tones.
+02. close-up of barista grinding beans, terracotta.
+03. forest light through the window, deep green.
+04. packed cafe at peak hour, cobalt rush.`;
+    return (
+      <div
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          background: "var(--paper)",
+          padding: "32px 56px 60px",
+        }}
+      >
+        <ArchiveSetDetail
+          id={setDetailItem.id}
+          model="gpt-image-2"
+          age={`${setDetailItem.ago} ago`}
+          prompt={promptText}
+          panels={palette.map((bg, i) => ({
+            bg,
+            title: PANEL_TITLES[i],
+            starred: i === 0,
+          }))}
+          onBack={closeSetDetail}
+        />
+      </div>
+    );
+  }
 
   return (
     <div
