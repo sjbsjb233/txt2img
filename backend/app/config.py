@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     # "*" = lenient mode (any origin). Otherwise comma-separated explicit list.
     CORS_ORIGINS: str = "*"
 
+    # ``simulate=true`` on /api/generations short-circuits the upstream call and
+    # returns a synthetic PNG after a random delay in this range (seconds).
+    # Set both to 0 in CI for fast tests; bump them in dev to mimic real latency.
+    SIMULATE_DELAY_MIN: float = 1.0
+    SIMULATE_DELAY_MAX: float = 3.0
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]

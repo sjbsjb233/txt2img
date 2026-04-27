@@ -40,6 +40,7 @@ async def create_generation(
             input_images=[img.model_dump() for img in payload.input_images]
             if payload.input_images
             else None,
+            simulate=payload.simulate,
         )
     except DispatcherError as exc:
         raise HTTPException(status_code=exc.status, detail={"code": exc.code, "message": exc.message})

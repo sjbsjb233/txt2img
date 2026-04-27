@@ -117,6 +117,10 @@ class GenerationIn(BaseModel):
     prompt: str = Field(min_length=1, max_length=8000)
     params: dict[str, Any] = Field(default_factory=dict)
     input_images: list[InputImage] | None = None
+    # When true the dispatcher skips station selection / upstream call and
+    # returns a synthetic PNG after a small random delay. Useful for CI and
+    # local frontend dev so we don't burn real relay credits.
+    simulate: bool = False
 
 
 class GeneratedImageOut(BaseModel):
