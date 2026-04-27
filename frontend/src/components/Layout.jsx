@@ -1,7 +1,8 @@
-import { Outlet } from "react-router-dom";
+import { Outlet, useLocation } from "react-router-dom";
 import Sidebar from "./Sidebar.jsx";
 
 export default function Layout() {
+  const location = useLocation();
   return (
     <div
       style={{
@@ -16,7 +17,9 @@ export default function Layout() {
     >
       <Sidebar />
       <main style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
-        <Outlet />
+        <div key={location.pathname} className="route-stage">
+          <Outlet />
+        </div>
       </main>
     </div>
   );
