@@ -32,6 +32,8 @@ export default function Sidebar({ defaultMode = "expanded" }) {
 
   const NavBtn = ({ it, muted = false }) => {
     const on = active === it.id;
+    const railColor = on ? "var(--paper)" : "#e8e1d180";
+    const expandedColor = on ? "var(--paper)" : muted ? "var(--ink-2)" : "var(--ink)";
     return (
       <button
         onClick={(e) => {
@@ -39,6 +41,8 @@ export default function Sidebar({ defaultMode = "expanded" }) {
           navigate(it.path);
         }}
         title={isRail ? it.label : undefined}
+        className={isRail ? "nav-btn nav-btn-rail" : "nav-btn nav-btn-expanded"}
+        data-active={on ? "true" : "false"}
         style={{
           display: "flex",
           alignItems: "center",
@@ -46,7 +50,7 @@ export default function Sidebar({ defaultMode = "expanded" }) {
           padding: isRail ? "10px 0" : "10px 12px",
           justifyContent: isRail ? "center" : "flex-start",
           background: on ? "var(--ink)" : "transparent",
-          color: on ? "var(--paper)" : muted ? "var(--ink-2)" : "var(--ink)",
+          color: isRail ? railColor : expandedColor,
           border: "none",
           cursor: "pointer",
           fontFamily: "var(--font-sans)",
@@ -57,7 +61,7 @@ export default function Sidebar({ defaultMode = "expanded" }) {
           width: "100%",
         }}
       >
-        <Icon name={it.icon} size={muted ? 14 : 16} />
+        <Icon name={it.icon} size={isRail ? 16 : muted ? 14 : 16} />
         {!isRail && <span style={{ whiteSpace: "nowrap" }}>{it.label}</span>}
         {on && !isRail && (
           <span
@@ -83,7 +87,6 @@ export default function Sidebar({ defaultMode = "expanded" }) {
 
   return (
     <div
-      onClick={isRail ? expand : undefined}
       style={{
         width: isRail ? railWidth : expandedWidth,
         flexShrink: 0,
@@ -91,8 +94,7 @@ export default function Sidebar({ defaultMode = "expanded" }) {
         background: isRail ? "var(--ink)" : "var(--paper-2)",
         display: "flex",
         flexDirection: "column",
-        transition: "width 200ms cubic-bezier(.2,.8,.2,1), background 200ms ease",
-        cursor: isRail ? "pointer" : "default",
+        transition: "width 220ms cubic-bezier(.22,.85,.22,1), background 220ms ease",
         position: "relative",
       }}
     >
@@ -136,29 +138,9 @@ export default function Sidebar({ defaultMode = "expanded" }) {
           gap: 2,
         }}
       >
-        {!isRail && BOTTOM.map((it) => <NavBtn key={it.id} it={it} muted />)}
-        {isRail &&
-          BOTTOM.map((it) => (
-            <button
-              key={it.id}
-              onClick={(e) => {
-                e.stopPropagation();
-                navigate(it.path);
-              }}
-              title={it.label}
-              style={{
-                padding: "8px 0",
-                justifyContent: "center",
-                display: "flex",
-                background: "transparent",
-                color: "#ffffffaa",
-                border: "none",
-                cursor: "pointer",
-              }}
-            >
-              <Icon name={it.icon} size={14} />
-            </button>
-          ))}
+        {BOTTOM.map((it) => (
+          <NavBtn key={it.id} it={it} muted />
+        ))}
       </div>
 
       {!isRail && (
@@ -195,10 +177,7 @@ export default function Sidebar({ defaultMode = "expanded" }) {
             </div>
           </div>
           <button
-            onClick={(e) => {
-              e.stopPropagation();
-              collapse();
-            }}
+            onClick={collapse}
             title="Collapse sidebar"
             style={{
               width: 22,
@@ -218,21 +197,34 @@ export default function Sidebar({ defaultMode = "expanded" }) {
       )}
 
       {isRail && (
-        <div
+        <button
+          onClick={expand}
+          title="Expand sidebar"
+          className="rail-foot"
           style={{
-            padding: "10px 0",
+            padding: "12px 0",
             borderTop: "1px solid #ffffff15",
             display: "flex",
             justifyContent: "center",
+            alignItems: "center",
+            gap: 6,
+            background: "transparent",
+            border: "none",
+            borderTopWidth: 1,
+            borderTopStyle: "solid",
+            borderTopColor: "#ffffff15",
+            cursor: "pointer",
+            color: "#e8e1d180",
+            width: "100%",
           }}
         >
-          <div
+          <span
             style={{
               width: 28,
               height: 28,
               background: "var(--banana)",
               color: "var(--ink)",
-              display: "flex",
+              display: "inline-flex",
               alignItems: "center",
               justifyContent: "center",
               fontSize: 10,
@@ -242,8 +234,8 @@ export default function Sidebar({ defaultMode = "expanded" }) {
             }}
           >
             LX
-          </div>
-        </div>
+          </span>
+        </button>
       )}
     </div>
   );
