@@ -3,8 +3,8 @@
 Implements design doc §7.4 / §15.3 ``MetricsEngine``. Every adapter call
 the executor makes lands here as a ``CallRecord``; the selector reads
 back ``success_rate``, ``p50_ms``, ``p95_ms``, ``qps`` and
-``recent_calls_in_60s`` to feed its score function. The circuit breaker
-also reads success / failure counts from the same windowed view.
+``recent_calls_in_60s`` to feed its score function, and admin views use
+the same windowed telemetry for recent-activity summaries.
 
 Design choices
 --------------
@@ -83,7 +83,7 @@ class CallRecord:
     percentiles so a fast 500 doesn't pretend to be a fast 200.
     """
 
-    ts: float  # unix seconds, time.monotonic-aligned via ``_now``
+    ts: float  # unix wall-clock seconds via ``_now`` / ``time.time``
     ok: bool
     latency_ms: float
     error_kind: str | None = None
@@ -238,10 +238,11 @@ class MetricsEngine:
         §7.4 freshness rationale: a brand-new provider should not be
         penalised on a metric it has had no opportunity to populate.
         """
-        deq = self._records.get((provider_id, model))
+        key = (provider_id, model)
+        deq = self._records.get(key)
         if not deq:
             return 1.0
-        self._evict(deq)
+        self._evict(deq, key=key)
         if not deq:
             return 1.0
         ok = sum(1 for r in deq if r.ok)
@@ -255,10 +256,11 @@ class MetricsEngine:
         hit either a success or the window's left edge. A return value
         of N means "the last N calls (and only those) failed".
         """
-        deq = self._records.get((provider_id, model))
+        key = (provider_id, model)
+        deq = self._records.get(key)
         if not deq:
             return 0
-        self._evict(deq)
+        self._evict(deq, key=key)
         n = 0
         for rec in reversed(deq):
             if rec.ok:
@@ -273,10 +275,11 @@ class MetricsEngine:
         return self._percentile(provider_id, model, 0.95)
 
     def qps(self, provider_id: str, model: str) -> float:
-        deq = self._records.get((provider_id, model))
+        key = (provider_id, model)
+        deq = self._records.get(key)
         if not deq:
             return 0.0
-        self._evict(deq)
+        self._evict(deq, key=key)
         if not deq:
             return 0.0
         return len(deq) / max(1.0, float(self.window_seconds()))
@@ -288,18 +291,41 @@ class MetricsEngine:
         design doc §7.4 step "RPM 未超") so the unit must match — RPM
         is calls per *minute*. We sum across models because the limit
         applies at the provider level.
+
+        Internally delegates to :meth:`recent_calls_in_60s_by_provider`
+        so single- and bulk-call paths share one implementation; the
+        per-provider wrapper is kept for readability at call sites that
+        only care about one provider.
+        """
+        return self.recent_calls_in_60s_by_provider().get(provider_id, 0)
+
+    def recent_calls_in_60s_by_provider(self) -> dict[str, int]:
+        """Return ``{provider_id: calls_in_last_60s}`` in a single pass.
+
+        Selector code (PR-10's hard filter) iterates many providers in
+        one decision. Calling :meth:`recent_calls_in_60s` per provider
+        would re-walk the entire metrics map each time — quadratic in
+        the number of registered (provider, model) buckets. This bulk
+        form lets the selector do one pass over the buckets and look
+        up by key inside the per-candidate loop.
+
+        Eviction happens once per bucket here, so callers who use this
+        method also get the side benefit of pruning stale entries.
         """
         now = _now()
         cutoff = now - 60.0
-        n = 0
-        for (pid, _model), deq in self._records.items():
-            if pid != provider_id:
+        counts: dict[str, int] = {}
+        for key in list(self._records.keys()):
+            deq = self._records.get(key)
+            if deq is None:
                 continue
-            self._evict(deq, now=now)
-            for rec in deq:
-                if rec.ts >= cutoff:
-                    n += 1
-        return n
+            self._evict(deq, key=key, now=now)
+            if not deq:
+                continue
+            recent = sum(1 for rec in deq if rec.ts >= cutoff)
+            if recent:
+                counts[key[0]] = counts.get(key[0], 0) + recent
+        return counts
 
     def last_used_at(self, provider_id: str, model: str) -> float | None:
         """Wall-clock seconds of the most recent attempt, or ``None``."""
@@ -371,10 +397,11 @@ class MetricsEngine:
     def _percentile(
         self, provider_id: str, model: str, q: float
     ) -> float | None:
-        deq = self._records.get((provider_id, model))
+        key = (provider_id, model)
+        deq = self._records.get(key)
         if not deq:
             return None
-        self._evict(deq)
+        self._evict(deq, key=key)
         # Latency percentiles only make sense over successful calls;
         # a 50ms 5xx skews "fast latency" downward in a misleading way.
         latencies = sorted(r.latency_ms for r in deq if r.ok)
@@ -390,14 +417,31 @@ class MetricsEngine:
         self,
         deq: deque[CallRecord],
         *,
+        key: tuple[str, str] | None = None,
         now: float | None = None,
     ) -> None:
-        """Drop records older than the window from ``deq`` in place."""
+        """Drop records older than the window from ``deq`` in place.
+
+        When ``key`` is supplied and eviction empties the bucket, the
+        ``(provider_id, model_id)`` entry is removed from
+        ``self._records`` and ``self._last_used`` so a long-running
+        process with many distinct providers/models doesn't accumulate
+        empty deques. Callers that have the key cheaply (the per-key
+        read path, the bulk RPM scan) pass it in; callers that don't
+        (``record_call`` after an append) skip cleanup because the
+        deque is non-empty by construction.
+        """
         if not deq:
+            if key is not None:
+                self._records.pop(key, None)
+                self._last_used.pop(key, None)
             return
         cutoff = (now if now is not None else _now()) - self.window_seconds()
         while deq and deq[0].ts < cutoff:
             deq.popleft()
+        if not deq and key is not None:
+            self._records.pop(key, None)
+            self._last_used.pop(key, None)
 
 
 # ---------------------------------------------------------------------------

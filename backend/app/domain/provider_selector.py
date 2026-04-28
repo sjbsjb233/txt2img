@@ -79,7 +79,6 @@ from app.db.models import (
 )
 from app.domain.circuit_breaker import (
     CircuitBreaker,
-    DRAINED,
     HEALTHY,
     get_circuit_breaker,
 )
@@ -273,6 +272,12 @@ class ProviderSelector:
         candidates: list[CandidateProvider] = []
         balance_threshold = self._filter.balance_min_threshold
 
+        # 3-pre. RPM is computed once for the whole pool. The
+        # per-provider variant would be O(N × total_records); the bulk
+        # form scans the metrics map once and lets us look up by id
+        # inside the per-candidate loop.
+        recent_calls_by_pid = self._metrics.recent_calls_in_60s_by_provider()
+
         for provider, model_row in rows:
             # 3a. Tier access. PMTA wins if defined; else fall back to
             # the provider-level whitelist.
@@ -296,15 +301,17 @@ class ProviderSelector:
                 await self._breaker.mark_drained(provider.id)
                 continue
 
-            # 3d. Circuit state. HEALTHY only — HALF_OPEN is the probe
-            # path's domain.
-            state = await self._breaker.get_state(provider.id)
-            if state != HEALTHY:
-                # Belt-and-suspenders: if breaker says DRAINED but the
-                # DB still says healthy (e.g. the breaker just flipped
-                # in memory), skip.
-                if state == DRAINED:
-                    continue
+            # 3d. Circuit state. HEALTHY only. The breaker is the sole
+            # writer of ``providers.circuit_state`` and it persists on
+            # every transition, so the value loaded with the bulk
+            # provider query is authoritative for filtering — this
+            # avoids an N+1 ``breaker.get_state(...)`` round-trip per
+            # candidate. A late OPEN that has not yet persisted will
+            # be caught by the actual call attempt: the executor
+            # consults the breaker at observe-time and records the
+            # failure if the call fails.
+            persisted_state = provider.circuit_state or HEALTHY
+            if persisted_state != HEALTHY:
                 continue
 
             # 3e. Concurrency cap.
@@ -314,11 +321,8 @@ class ProviderSelector:
             ):
                 continue
 
-            # 3f. RPM cap (per minute).
-            if (
-                self._metrics.recent_calls_in_60s(provider.id)
-                >= int(provider.rpm_limit)
-            ):
+            # 3f. RPM cap (per minute) — bulk lookup, see 3-pre.
+            if recent_calls_by_pid.get(provider.id, 0) >= int(provider.rpm_limit):
                 continue
 
             candidates.append(

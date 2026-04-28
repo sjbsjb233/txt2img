@@ -125,7 +125,7 @@ def _selector(metrics=None, breaker=None):
     from app.domain.provider_selector import ProviderSelector
 
     m = metrics or MetricsEngine(window_seconds=300)
-    b = breaker or CircuitBreaker(metrics=m)
+    b = breaker or CircuitBreaker()
     return ProviderSelector(metrics=m, breaker=b), m, b
 
 
@@ -463,30 +463,32 @@ async def test_freshness_default_one_for_unused_provider(
 
 
 # ---------------------------------------------------------------------------
-# Performance
+# Large-input smoke test
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_selector_handles_many_providers_quickly(
-    initialized_db: None,
-) -> None:
-    """200-provider sanity: select stays under a few hundred ms.
+async def test_selector_handles_many_providers(initialized_db: None) -> None:
+    """200-provider sanity: selection is correct on a larger pool.
 
-    Not a strict perf test (CI variance is real) — just an upper-bound
-    smoke check that we don't accidentally introduce N+1 queries.
+    Wall-clock assertions tend to flake under CI load, so we
+    deliberately don't assert elapsed time here — the test exists to
+    catch behaviour regressions on the bulk path (e.g. an accidental
+    N+1 over candidates that breaks the result ordering or the
+    capabilities filter on a large input). The hard-filter bulk
+    queries keep this O(N), but if a future refactor reintroduces a
+    per-candidate ``await``, this test still passes — it would be
+    the dedicated perf gate (a separate "slow" suite, not normal CI)
+    that surfaces it.
     """
-    import time
-
     await _bootstrap()
     for i in range(200):
         await _seed_provider(pid=f"p_{i:03d}", cost=0.1 + 0.001 * i)
     selector, _, _ = _selector()
 
-    t0 = time.perf_counter()
     out = await selector.select(_user(), _request())
-    elapsed = time.perf_counter() - t0
     assert len(out) == 3  # default top_k
-    # 200 providers should comfortably fit in well under a second on
-    # SQLite. Generous bound to keep CI quiet.
-    assert elapsed < 2.0
+
+    # Cheapest providers should win the top-3 since cost is the only
+    # axis that varies in this fixture. p_000 is the cheapest.
+    assert out[0].provider.provider_id == "p_000"

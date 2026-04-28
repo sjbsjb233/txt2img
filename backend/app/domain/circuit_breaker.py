@@ -38,12 +38,16 @@ is the only thing the hot path touches.
 Probe concurrency
 -----------------
 HALF_OPEN allows exactly ``half_open_probe_concurrency`` probes (default
-1). Each provider has its own ``asyncio.Semaphore`` so two providers
-can probe in parallel without contention. ``acquire_probe`` is an
-async context manager: ``async with breaker.acquire_probe(pid) as ok:``
-yields ``True`` if the caller may probe and is responsible for calling
-``observe`` afterward; ``False`` means the slot is taken and the
-caller should treat the provider as unavailable for now.
+1) per provider. Two providers do not contend with each other because
+each has its own ``asyncio.Lock``. The breaker tracks each provider's
+in-flight HALF_OPEN probes with an in-memory counter guarded by that
+lock — not with an ``asyncio.Semaphore`` — because we also need atomic
+state inspection (state read, count read, count increment) under the
+same critical section. ``acquire_probe`` is an async context manager:
+``async with breaker.acquire_probe(pid) as ok:`` yields ``True`` if
+the caller may probe and is responsible for calling ``observe``
+afterward; ``False`` means the provider is already at its HALF_OPEN
+probe limit and should be treated as unavailable for now.
 """
 
 from __future__ import annotations
@@ -60,7 +64,6 @@ from sqlalchemy import select, update
 
 from app.db.engine import get_session
 from app.db.models import Provider
-from app.domain.metrics_engine import MetricsEngine, get_metrics_engine
 from app.domain.runtime_configs import CircuitBreakerConfig
 
 logger = logging.getLogger("txt2img.breaker")
@@ -124,12 +127,15 @@ class CircuitBreaker:
 
     def __init__(
         self,
-        metrics: MetricsEngine | None = None,
         *,
         config: CircuitBreakerConfig | None = None,
         time_source=None,
     ) -> None:
-        self._metrics = metrics or get_metrics_engine()
+        # No MetricsEngine dependency: the breaker maintains its own
+        # ``consecutive_failures`` counter (the only failure metric it
+        # needs) and never reads from the windowed statistics. Coupling
+        # the two would force them to share a process lifetime they
+        # don't actually need.
         self._config = config or CircuitBreakerConfig()
         self._states: dict[str, _BreakerState] = {}
         # Per-provider lock guarding the state struct. We avoid one
@@ -209,11 +215,27 @@ class CircuitBreaker:
                 cooldown_until = cooldown_until.replace(tzinfo=timezone.utc)
             cd_ts = cooldown_until.timestamp()
 
+        # Restore exponential-backoff progress across restarts. The DB
+        # row only persists the absolute ``cooldown_until`` timestamp,
+        # not the doubled-cooldown duration that produced it. We
+        # approximate by using the *remaining* cooldown as the next
+        # base: a provider that backed off to e.g. 240s before the
+        # restart still has a meaningful chunk of that ahead and the
+        # next OPEN re-trip should double from there, not from the
+        # initial 30s. We floor at the configured initial so a stale
+        # row near expiry doesn't shrink below normal.
+        normalized_state = state or HEALTHY
+        hydrated_cooldown_seconds = self._initial_cooldown()
+        if normalized_state == OPEN and cd_ts is not None:
+            remaining = cd_ts - self._time()
+            if remaining > hydrated_cooldown_seconds:
+                hydrated_cooldown_seconds = int(remaining)
+
         st = _BreakerState(
-            state=state or HEALTHY,
+            state=normalized_state,
             consecutive_failures=0,
             cooldown_until=cd_ts,
-            current_cooldown_seconds=self._initial_cooldown(),
+            current_cooldown_seconds=hydrated_cooldown_seconds,
         )
         self._states[provider_id] = st
         return st
@@ -227,15 +249,23 @@ class CircuitBreaker:
         expired. The promotion is in-memory only; the DB row flips on
         the first :meth:`acquire_probe`. This deferral keeps the read
         path cheap.
+
+        Held under the per-provider lock so a concurrent ``observe``
+        / hydration cannot race the state inspection. Without the
+        lock, an in-flight ``_load_state`` (whose DB read precedes a
+        cache write) could overwrite an OPEN transition another caller
+        just persisted, causing this method to incorrectly report
+        HEALTHY.
         """
-        st = await self._load_state(provider_id)
-        if (
-            st.state == OPEN
-            and st.cooldown_until is not None
-            and self._time() >= st.cooldown_until
-        ):
-            return HALF_OPEN
-        return st.state
+        async with self._lock_for(provider_id):
+            st = await self._load_state(provider_id)
+            if (
+                st.state == OPEN
+                and st.cooldown_until is not None
+                and self._time() >= st.cooldown_until
+            ):
+                return HALF_OPEN
+            return st.state
 
     async def is_callable(self, provider_id: str) -> bool:
         """True when the provider may be issued a real (non-probe) call.

@@ -57,11 +57,9 @@ def _breaker(time_source=None):
     state alongside the per-test DB.
     """
     from app.domain.circuit_breaker import CircuitBreaker
-    from app.domain.metrics_engine import MetricsEngine
     from app.domain.runtime_configs import CircuitBreakerConfig
 
     return CircuitBreaker(
-        metrics=MetricsEngine(window_seconds=300),
         config=CircuitBreakerConfig(),
         time_source=time_source,
     )

@@ -139,6 +139,57 @@ def test_recent_calls_in_60s_sums_across_models(
     assert m.recent_calls_in_60s("p") == 0
 
 
+def test_recent_calls_in_60s_by_provider_one_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bulk method returns the same per-provider count in one scan.
+
+    The selector calls this once per ``select()``; the per-provider
+    wrapper :meth:`recent_calls_in_60s` is now a thin lookup over the
+    same dict, so the two paths must agree.
+    """
+    from app.domain import metrics_engine as me
+
+    fake_t = [1_000_000.0]
+    monkeypatch.setattr(me, "_now", lambda: fake_t[0])
+
+    m = _engine(window_seconds=300)
+    m.record_call("a", "m1", ok=True, latency_ms=10)
+    m.record_call("a", "m2", ok=True, latency_ms=10)
+    m.record_call("b", "m1", ok=True, latency_ms=10)
+
+    bulk = m.recent_calls_in_60s_by_provider()
+    assert bulk == {"a": 2, "b": 1}
+    assert m.recent_calls_in_60s("a") == bulk["a"]
+    assert m.recent_calls_in_60s("b") == bulk["b"]
+    # Provider with no records doesn't appear in the dict.
+    assert "c" not in bulk
+
+
+def test_eviction_prunes_empty_buckets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the window fully drains a bucket, the dict entry is removed.
+
+    Long-running processes shouldn't accumulate empty deques for
+    providers/models that haven't been used recently. We assert on the
+    private ``_records`` dict because there is no public observable
+    for it.
+    """
+    from app.domain import metrics_engine as me
+
+    fake_t = [1_000_000.0]
+    monkeypatch.setattr(me, "_now", lambda: fake_t[0])
+
+    m = _engine(window_seconds=60)
+    m.record_call("p", "m", ok=True, latency_ms=10)
+    assert ("p", "m") in m._records  # type: ignore[attr-defined]
+
+    fake_t[0] = 1_000_000.0 + 90.0
+    # Trigger a read that goes through ``_evict``; bucket should be cleaned.
+    assert m.success_rate("p", "m") == 1.0  # default for empty
+    assert ("p", "m") not in m._records  # type: ignore[attr-defined]
+    assert ("p", "m") not in m._last_used  # type: ignore[attr-defined]
+
+
 # ---------------------------------------------------------------------------
 # Concurrency tracking
 # ---------------------------------------------------------------------------
