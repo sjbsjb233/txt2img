@@ -747,3 +747,181 @@ async def test_adapters_endpoint_shows_in_use_after_create(
     assert by_type["gemini_v1beta"]["in_use_by_providers"] == ["bltcy"]
     # Other adapter still unused.
     assert by_type["openai_v1"]["in_use_by_providers"] == []
+
+
+# ---------------------------------------------------------------------------
+# Review-driven hardening (Copilot PR #34)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_patch_explicit_null_on_non_nullable_returns_422(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """PATCH must reject ``{"label": null}`` rather than overwriting with NULL."""
+    token = await _login_admin(seeded_app)
+    await seeded_app.post(
+        "/api/admin/providers",
+        headers=_auth(token),
+        json=_gemini_provider_payload(),
+    )
+
+    for field in [
+        "label",
+        "base_url",
+        "cost_per_image_cny",
+        "enabled",
+        "max_concurrency",
+        "rpm_limit",
+    ]:
+        resp = await seeded_app.patch(
+            "/api/admin/providers/bltcy",
+            headers=_auth(token),
+            json={field: None},
+        )
+        assert resp.status_code == 422, f"{field}: {resp.text}"
+        assert resp.json()["detail"]["code"] == "INVALID_PARAMETER"
+        assert resp.json()["detail"]["field"] == field
+
+
+@pytest.mark.asyncio
+async def test_patch_note_can_be_cleared_with_null(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """``note`` is the only nullable column — null clears it."""
+    token = await _login_admin(seeded_app)
+    await seeded_app.post(
+        "/api/admin/providers",
+        headers=_auth(token),
+        json=_gemini_provider_payload(),
+    )
+    resp = await seeded_app.patch(
+        "/api/admin/providers/bltcy",
+        headers=_auth(token),
+        json={"note": None},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["note"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_provider_with_unreadable_key_returns_500(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """A row whose ciphertext can't decrypt must surface a server error,
+    not a degraded ``api_key_masked='<unreadable>'`` payload."""
+    from app.db.engine import get_session
+    from app.db.models import Provider
+
+    token = await _login_admin(seeded_app)
+    await seeded_app.post(
+        "/api/admin/providers",
+        headers=_auth(token),
+        json=_gemini_provider_payload(),
+    )
+    # Corrupt the ciphertext to force a decrypt failure.
+    async with get_session() as session:
+        row = (
+            await session.execute(select(Provider).where(Provider.id == "bltcy"))
+        ).scalar_one()
+        row.api_key_enc = "v1:not-real-ciphertext"
+
+    resp = await seeded_app.get(
+        "/api/admin/providers/bltcy", headers=_auth(token)
+    )
+    assert resp.status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_list_providers_one_query_per_join(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """List must bulk-fetch joins: O(1) queries regardless of row count.
+
+    We seed three providers and assert the SQL log contains exactly one
+    SELECT against ``provider_models`` and one against
+    ``provider_tier_access``, regardless of provider count.
+    """
+    from sqlalchemy import event
+
+    from app.db.engine import get_engine
+
+    token = await _login_admin(seeded_app)
+
+    # Seed three providers with distinct ids.
+    for idx, pid in enumerate(("p_one", "p_two", "p_three")):
+        payload = _gemini_provider_payload(provider_id=pid)
+        resp = await seeded_app.post(
+            "/api/admin/providers", headers=_auth(token), json=payload
+        )
+        assert resp.status_code == 201, resp.text
+
+    # Capture every SQL statement on the underlying sync engine for the
+    # duration of the LIST call.
+    statements: list[str] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
+        statements.append(statement)
+
+    sync_engine = get_engine().sync_engine
+    event.listen(sync_engine, "before_cursor_execute", _capture)
+    try:
+        resp = await seeded_app.get(
+            "/api/admin/providers", headers=_auth(token)
+        )
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", _capture)
+
+    assert resp.status_code == 200
+    assert len(resp.json()) == 3
+
+    # One SELECT for providers, one for provider_models, one for
+    # provider_tier_access.  Other statements (BEGIN / COMMIT / PRAGMA)
+    # are tolerated.
+    pm_selects = [s for s in statements if "FROM provider_models" in s]
+    pta_selects = [s for s in statements if "FROM provider_tier_access" in s]
+    assert len(pm_selects) == 1, statements
+    assert len(pta_selects) == 1, statements
+
+
+@pytest.mark.asyncio
+async def test_topup_provider_no_redundant_select(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Topup endpoint must run only one SELECT (inside the ledger) and
+    one UPDATE — no duplicated ``providers`` SELECT from a pre-load."""
+    from sqlalchemy import event
+
+    from app.db.engine import get_engine
+
+    token = await _login_admin(seeded_app)
+    await seeded_app.post(
+        "/api/admin/providers",
+        headers=_auth(token),
+        json=_gemini_provider_payload(),
+    )
+
+    statements: list[str] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):  # type: ignore[no-untyped-def]
+        statements.append(statement)
+
+    sync_engine = get_engine().sync_engine
+    event.listen(sync_engine, "before_cursor_execute", _capture)
+    try:
+        resp = await seeded_app.post(
+            "/api/admin/providers/bltcy/topup",
+            headers=_auth(token),
+            json={"amount_cny": 1.0},
+        )
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", _capture)
+
+    assert resp.status_code == 200
+    provider_selects = [
+        s for s in statements
+        if "FROM providers" in s and "SELECT" in s
+    ]
+    # The ledger does one pre-state SELECT for the promoted detection;
+    # the route layer no longer re-loads on top of it.
+    assert len(provider_selects) == 1, statements

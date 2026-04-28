@@ -232,3 +232,76 @@ async def test_topup_unknown_provider_raises(initialized_db: None) -> None:
 
     with pytest.raises(LedgerError):
         await get_provider_ledger().topup("missing", 1.0)
+
+
+# ---------------------------------------------------------------------------
+# Atomicity: deduct / topup arithmetic happens as one SQL UPDATE
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_concurrent_deducts_do_not_lose_updates(
+    initialized_db: None,
+) -> None:
+    """Run several deducts back-to-back through independent sessions and
+    confirm the final balance reflects every charge.
+
+    SQLite serializes writes so true concurrency would just queue up.
+    The point of this test is to exercise the UPDATE-RETURNING path:
+    each call computes its arithmetic in SQL, so an interleave of
+    SELECTs (which the ORM read-modify-write pattern allowed) cannot
+    cause one charge to overwrite another's ``balance_cny``.
+    """
+    from app.domain.provider_ledger import get_provider_ledger
+
+    await _make_provider(id_="p_concurrent", cost=0.10, balance=10.0)
+    ledger = get_provider_ledger()
+
+    for i in range(5):
+        await ledger.deduct("p_concurrent", f"job_{i}", image_count=2)
+
+    # 5 calls × 2 images × 0.10 = 1.00 charged; 10.00 - 1.00 = 9.00.
+    assert await _balance("p_concurrent") == pytest.approx(9.0)
+    rows = await _ledger_rows("p_concurrent")
+    assert len(rows) == 5
+
+
+@pytest.mark.asyncio
+async def test_topup_then_deduct_preserves_arithmetic(
+    initialized_db: None,
+) -> None:
+    """Mixing topup and deduct must arrive at balance0 + topups - deducts."""
+    from app.domain.provider_ledger import get_provider_ledger
+
+    await _make_provider(id_="p_mix", cost=0.25, balance=2.0)
+    ledger = get_provider_ledger()
+
+    await ledger.topup("p_mix", 5.0)            # balance: 7.0
+    await ledger.deduct("p_mix", "j1", image_count=4)  # -1.0 → 6.0
+    await ledger.deduct("p_mix", "j2", image_count=8)  # -2.0 → 4.0
+    await ledger.topup("p_mix", 1.5)            # balance: 5.5
+
+    assert await _balance("p_mix") == pytest.approx(5.5)
+
+
+@pytest.mark.asyncio
+async def test_topup_promoted_flag_uses_pre_state(
+    initialized_db: None,
+) -> None:
+    """``promoted_from_drained`` reflects the state at the moment of topup.
+
+    A second consecutive topup on the now-healthy provider must report
+    ``promoted_from_drained=False`` even though the balance is still
+    rising — the flag tracks the state transition, not the credit.
+    """
+    from app.domain.provider_ledger import get_provider_ledger
+
+    await _make_provider(id_="p_seq", balance=0.0, state="drained")
+    ledger = get_provider_ledger()
+
+    first = await ledger.topup("p_seq", 1.0)
+    assert first.promoted_from_drained is True
+    assert await _circuit_state("p_seq") == "healthy"
+
+    second = await ledger.topup("p_seq", 1.0)
+    assert second.promoted_from_drained is False

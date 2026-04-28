@@ -171,27 +171,33 @@ def _isoformat(value: datetime | None) -> str | None:
     return value.isoformat()
 
 
-async def _build_view(
-    session: AsyncSession, provider: Provider
+def _view_from_parts(
+    provider: Provider,
+    models: list[ProviderModel],
+    tiers: list[str],
 ) -> ProviderResponse:
-    """Compose the full ``ProviderResponse`` from a provider + joins.
+    """Pure assembly of ``ProviderResponse`` from already-fetched parts.
 
-    We accept an open session and reuse it for the joins so list / get
-    can stay in a single read transaction.
+    Decoupled from the DB so ``list_providers`` (which bulk-fetches
+    every provider's models + tier-access in two queries) and
+    ``get_provider`` (which fetches per-row) share a single layout
+    function. Decryption + masking happens here because it is
+    consistent regardless of how the rows were fetched.
     """
-    models = await _load_models(session, provider.id)
-    tiers = await _load_tier_access(session, provider.id)
-
     try:
         masked = mask_api_key(decrypt(provider.api_key_enc))
     except CryptoError:
-        # A row whose ciphertext we can't decrypt is unusable — surface
-        # it loudly in the admin UI rather than silently showing "***".
-        masked = "<unreadable>"
-        logger.error(
+        # A row whose ciphertext we can't decrypt is unusable. We log
+        # the broken provider id and let the failure propagate so the
+        # route returns a 500 instead of a degraded success payload —
+        # see ``app/utils/crypto.py``: "callers should propagate this
+        # as a 500: a provider row with an undecodable ``api_key_enc``
+        # is broken and we can't paper over it."
+        logger.exception(
             "provider %s has unreadable api_key_enc; check JWT_SECRET",
             provider.id,
         )
+        raise
 
     return ProviderResponse(
         id=provider.id,
@@ -216,8 +222,22 @@ async def _build_view(
             )
             for m in sorted(models, key=lambda m: m.model_id)
         ],
-        tier_access=tiers,
+        tier_access=sorted(tiers),
     )
+
+
+async def _build_view(
+    session: AsyncSession, provider: Provider
+) -> ProviderResponse:
+    """Single-row variant — issues two extra SELECTs.
+
+    Used by ``get_provider`` / ``create_provider`` / ``patch_provider``
+    where the per-row cost is fine. ``list_providers`` does NOT call
+    this — it uses ``_view_from_parts`` after bulk-fetching the joins.
+    """
+    models = await _load_models(session, provider.id)
+    tiers = await _load_tier_access(session, provider.id)
+    return _view_from_parts(provider, models, tiers)
 
 
 def _safe_load_json(raw: str) -> dict[str, Any]:
@@ -254,19 +274,57 @@ def _capabilities_to_json(capabilities: Any) -> str:
 async def list_providers(_admin: CurrentAdmin) -> list[ProviderResponse]:
     """Return every provider, sorted by id for deterministic UI ordering.
 
+    Bulk-fetches ``provider_models`` and ``provider_tier_access`` in two
+    extra queries and groups them in Python so the route stays at three
+    SELECTs total regardless of provider count. The naive per-row
+    variant would be N+1 (one for models + one for tier-access per
+    provider) and noticeable as the catalog grows.
+
     Real-time metrics (``metrics_5min``) and richer ``circuit_state``
     transitions arrive in PR-10 / PR-16; today the row is the source of
     truth for the static fields and ``circuit_state`` is whatever was
     last persisted (``healthy`` for fresh rows).
     """
     async with get_session() as session:
-        rows = (
+        providers = (
             await session.execute(select(Provider).order_by(Provider.id))
         ).scalars().all()
-        out: list[ProviderResponse] = []
-        for r in rows:
-            out.append(await _build_view(session, r))
-    return out
+        if not providers:
+            return []
+
+        provider_ids = [p.id for p in providers]
+        model_rows = (
+            await session.execute(
+                select(ProviderModel).where(
+                    ProviderModel.provider_id.in_(provider_ids)
+                )
+            )
+        ).scalars().all()
+        tier_rows = (
+            await session.execute(
+                select(
+                    ProviderTierAccess.provider_id,
+                    ProviderTierAccess.tier,
+                ).where(ProviderTierAccess.provider_id.in_(provider_ids))
+            )
+        ).all()
+
+    models_by_pid: dict[str, list[ProviderModel]] = {pid: [] for pid in provider_ids}
+    for m in model_rows:
+        models_by_pid.setdefault(m.provider_id, []).append(m)
+
+    tiers_by_pid: dict[str, list[str]] = {pid: [] for pid in provider_ids}
+    for pid, tier in tier_rows:
+        tiers_by_pid.setdefault(pid, []).append(tier)
+
+    return [
+        _view_from_parts(
+            p,
+            models_by_pid.get(p.id, []),
+            tiers_by_pid.get(p.id, []),
+        )
+        for p in providers
+    ]
 
 
 @router.post("", response_model=ProviderResponse, status_code=201)
@@ -390,6 +448,30 @@ async def patch_provider(
             400, "BAD_REQUEST", "PATCH body must contain at least one field."
         )
 
+    # Reject explicit null on non-nullable columns up front so a stray
+    # ``{"label": null}`` returns 422 instead of either silently
+    # overwriting the row with 0/empty (the previous ``or`` fallback)
+    # or crashing the commit on a NOT NULL violation. ``note`` is the
+    # only field whose column is nullable; we honour ``null`` there as
+    # "clear the note". ``api_key=null`` is also tolerated (it means
+    # "no rotation requested").
+    _NON_NULLABLE = (
+        "label",
+        "base_url",
+        "cost_per_image_cny",
+        "enabled",
+        "max_concurrency",
+        "rpm_limit",
+    )
+    for field in _NON_NULLABLE:
+        if field in set_fields and getattr(body, field) is None:
+            raise api_error(
+                422,
+                "INVALID_PARAMETER",
+                f"{field!r} cannot be null.",
+                field=field,
+            )
+
     async with get_session() as session:
         provider = await _load_provider(session, provider_id)
 
@@ -397,29 +479,30 @@ async def patch_provider(
         # only record that it was rotated).
         change_summary: dict[str, Any] = {}
 
-        if "label" in set_fields:
-            provider.label = body.label  # type: ignore[assignment]
+        if "label" in set_fields and body.label is not None:
+            provider.label = body.label
             change_summary["label"] = body.label
-        if "base_url" in set_fields:
-            provider.base_url = body.base_url  # type: ignore[assignment]
+        if "base_url" in set_fields and body.base_url is not None:
+            provider.base_url = body.base_url
             change_summary["base_url"] = body.base_url
         if "api_key" in set_fields and body.api_key is not None:
             provider.api_key_enc = encrypt(body.api_key)
             change_summary["api_key"] = "<rotated>"
-        if "cost_per_image_cny" in set_fields:
-            provider.cost_per_image_cny = float(body.cost_per_image_cny or 0)
+        if "cost_per_image_cny" in set_fields and body.cost_per_image_cny is not None:
+            provider.cost_per_image_cny = float(body.cost_per_image_cny)
             change_summary["cost_per_image_cny"] = provider.cost_per_image_cny
-        if "enabled" in set_fields:
+        if "enabled" in set_fields and body.enabled is not None:
             provider.enabled = 1 if body.enabled else 0
             change_summary["enabled"] = bool(body.enabled)
         if "note" in set_fields:
+            # Nullable column: ``{"note": null}`` clears the note.
             provider.note = body.note
             change_summary["note"] = body.note
-        if "max_concurrency" in set_fields:
-            provider.max_concurrency = int(body.max_concurrency or 1)
+        if "max_concurrency" in set_fields and body.max_concurrency is not None:
+            provider.max_concurrency = int(body.max_concurrency)
             change_summary["max_concurrency"] = provider.max_concurrency
-        if "rpm_limit" in set_fields:
-            provider.rpm_limit = int(body.rpm_limit or 1)
+        if "rpm_limit" in set_fields and body.rpm_limit is not None:
+            provider.rpm_limit = int(body.rpm_limit)
             change_summary["rpm_limit"] = provider.rpm_limit
 
         provider.updated_at = datetime.now(timezone.utc)
@@ -626,9 +709,10 @@ async def topup_provider(
     """
     ledger = get_provider_ledger()
     async with get_session() as session:
-        # Load + validate inside the same session as the ledger op so
-        # the topup and the audit row commit atomically.
-        await _load_provider(session, provider_id)
+        # Skip a redundant pre-load: ``ledger.topup`` already raises
+        # ``LedgerError`` when the row doesn't exist (its UPDATE
+        # returns no row), and we map that to 404 here. This keeps
+        # the path to a single SELECT + a single UPDATE.
         try:
             result = await ledger.topup(
                 provider_id, body.amount_cny, session=session

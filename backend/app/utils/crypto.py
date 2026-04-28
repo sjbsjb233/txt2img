@@ -12,9 +12,10 @@ Key derivation
 The encryption key is derived from ``Settings.JWT_SECRET`` via HKDF-SHA256
 with a fixed application-scoped ``info`` label. Reusing the JWT secret
 keeps the operator's secret-management surface to one variable; the HKDF
-``info`` label makes sure the derived AES key is domain-separated from the
-JWT signing key (you'd need to also leak the HKDF inputs to recover the
-AES key, which we don't).
+``info`` label provides domain separation so this code derives a distinct
+AES key for provider-secret encryption rather than reusing the JWT signing
+key directly. ``info`` and ``salt`` are fixed constants in source — they
+are not secrets, just labels.
 
 Wire format
 -----------
@@ -76,10 +77,11 @@ class CryptoError(ValueError):
 def _derive_key(secret: str) -> bytes:
     """Stretch ``secret`` into a 32-byte AES key via HKDF-SHA256.
 
-    Salt and ``info`` are fixed strings: we don't have a per-row salt
-    because every encrypted blob already carries its own random nonce.
-    Using a constant-but-domain-specific ``info`` separates this AES key
-    from any other use of the JWT secret (e.g. JWT signing).
+    ``salt`` and ``info`` are fixed strings (not secrets) — they exist
+    purely for domain separation, so the AES key derived here is a
+    different bytestring than any other HKDF use of the same ``secret``.
+    Per-row salt is unnecessary because every encrypted blob already
+    carries its own random nonce.
     """
     if not secret:
         raise CryptoError("JWT_SECRET is empty; cannot derive crypto key")
