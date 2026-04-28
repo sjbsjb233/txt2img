@@ -58,13 +58,17 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
     """Run migrations + open the engine for a single test."""
     from app.db import engine as db_engine
     from app.db.migrate import upgrade_to_head
+    from app.domain.access_policy import reset_access_policy_for_tests
     from app.domain.config_center import reset_config_center_for_tests
+    from app.domain.quota_guard import reset_quota_guard_for_tests
     from app.domain.tier_config import reset_tier_config_for_tests
 
     # Singletons persist at module level; tests with fresh DBs need a
     # clean slate or they'd see leftover cache from a previous test's DB.
     reset_config_center_for_tests()
     reset_tier_config_for_tests()
+    reset_quota_guard_for_tests()
+    reset_access_policy_for_tests()
 
     upgrade_to_head()
     db_engine.init_engine()
@@ -74,6 +78,8 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
         await db_engine.close_engine()
         reset_config_center_for_tests()
         reset_tier_config_for_tests()
+        reset_quota_guard_for_tests()
+        reset_access_policy_for_tests()
 
 
 @pytest_asyncio.fixture
@@ -94,12 +100,16 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
     _set_env_for_tests(db_path, data_root)
 
     from app.config import get_settings
+    from app.domain.access_policy import reset_access_policy_for_tests
     from app.domain.config_center import reset_config_center_for_tests
+    from app.domain.quota_guard import reset_quota_guard_for_tests
     from app.domain.tier_config import reset_tier_config_for_tests
 
     get_settings.cache_clear()
     reset_config_center_for_tests()
     reset_tier_config_for_tests()
+    reset_quota_guard_for_tests()
+    reset_access_policy_for_tests()
 
     # Import here so env vars are already in place before Settings is
     # instantiated by anything down the import graph.
@@ -117,3 +127,5 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
     get_settings.cache_clear()
     reset_config_center_for_tests()
     reset_tier_config_for_tests()
+    reset_quota_guard_for_tests()
+    reset_access_policy_for_tests()

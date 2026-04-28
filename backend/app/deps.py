@@ -6,10 +6,10 @@ Three helpers, used as ``Depends(...)`` in the routers:
   the DB, and return it. Status checks (``disabled`` / ``deleted``) are
   enforced here so every authenticated route gets them for free.
 - ``get_current_admin`` — same, but additionally requires ``role=='admin'``.
-- ``require_not_blocked`` — placeholder for PR-09; returns the user
-  unchanged today. Wired in as a separate dep so that adding the real
-  emergency / quota gates later is a one-file change without touching
-  every router.
+- ``require_not_blocked`` — route-independent generation pause guard.
+  Job-specific quota / capacity decisions still live in
+  ``app.domain.access_policy`` because they need the submitted model and
+  request payload.
 
 All three return the SQLAlchemy ``User`` ORM row. Routers should not
 introspect tier / quota fields directly — those belong to the domain
@@ -25,6 +25,7 @@ from sqlalchemy import select
 
 from app.db.engine import get_session
 from app.db.models import User
+from app.domain.runtime_configs import EmergencyConfig
 from app.utils.errors import api_error
 from app.utils.security import TokenError, decode_access_token
 
@@ -119,10 +120,18 @@ CurrentAdmin = Annotated[User, Depends(get_current_admin)]
 async def require_not_blocked(
     user: Annotated[User, Depends(get_current_user)],
 ) -> User:
-    """Reserved for the access-policy gate (emergency / quota / busy).
+    """Reject generation routes while the global pause switch is on.
 
-    PR-09 replaces the body of this function with the full gate from
-    design doc §7.1; routers can already declare the dep so the rollout
-    is a no-op for them. Today it just returns the user.
+    FastAPI dependencies cannot see the submitted model / multipart
+    payload, so the complete PR-09 gate is exposed as
+    ``AccessPolicy.evaluate(user, model=...)`` for job routes to call
+    explicitly. This dependency covers the route-independent emergency
+    switch for handlers that only need "generation is not paused".
     """
+    if EmergencyConfig().pause_generation:
+        raise api_error(
+            403,
+            "BLOCKED_BY_EMERGENCY",
+            "Service temporarily paused by admin.",
+        )
     return user
