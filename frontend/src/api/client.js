@@ -60,11 +60,53 @@ export async function apiFetch(path, { method = "GET", body, auth = true, header
   }
 
   if (!res.ok) {
+    // Backend errors follow the §17 envelope `{detail: {code, message, field, extra}}`.
+    // Surface `message` as the human-friendly string and `code` as a stable
+    // identifier callers can branch on for i18n / routing decisions.
     const detail = (data && typeof data === "object" && data.detail) || res.statusText || `HTTP ${res.status}`;
-    const err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    let message;
+    let code = null;
+    if (typeof detail === "string") {
+      message = detail;
+    } else if (detail && typeof detail === "object") {
+      message = typeof detail.message === "string" ? detail.message : JSON.stringify(detail);
+      code = typeof detail.code === "string" ? detail.code : null;
+    } else {
+      message = String(detail);
+    }
+    const err = new Error(message);
     err.status = res.status;
+    err.code = code;
     err.data = data;
     throw err;
   }
   return data;
+}
+
+// ---------------------------------------------------------------------------
+// Auth state helpers — single source of truth for the cached user identity.
+// ---------------------------------------------------------------------------
+
+const USER_KEY = "user";
+
+export function getCurrentUser() {
+  try {
+    const raw = localStorage.getItem(USER_KEY);
+    if (!raw) return null;
+    const u = JSON.parse(raw);
+    if (u && typeof u === "object" && typeof u.id === "string") return u;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function setCurrentUser(user) {
+  if (user) localStorage.setItem(USER_KEY, JSON.stringify(user));
+  else localStorage.removeItem(USER_KEY);
+}
+
+export function clearAuth() {
+  clearToken();
+  setCurrentUser(null);
 }

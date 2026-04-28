@@ -1,7 +1,13 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import TurnstileModal from "../components/TurnstileModal.jsx";
-import { apiFetch, getApiBase, setApiBase, setToken } from "../api/client.js";
+import {
+  apiFetch,
+  getApiBase,
+  setApiBase,
+  setCurrentUser,
+  setToken,
+} from "../api/client.js";
 
 const CAPTIONS = [
   "issue №004 — apr 2026",
@@ -12,6 +18,7 @@ const CAPTIONS = [
 
 export default function LoginPage() {
   const [showTurnstile, setShowTurnstile] = useState(false);
+  const [siteKey, setSiteKey] = useState(null);
   const [tick, setTick] = useState(0);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -39,7 +46,7 @@ export default function LoginPage() {
       auth: false,
     });
     setToken(data.access_token);
-    localStorage.setItem("user", JSON.stringify(data.user));
+    setCurrentUser(data.user);
     navigate("/");
   };
 
@@ -53,12 +60,13 @@ export default function LoginPage() {
     }
     setLoading(true);
     try {
-      const { required } = await apiFetch("/api/auth/captcha-check", {
+      const check = await apiFetch("/api/auth/captcha-check", {
         method: "POST",
         body: { username },
         auth: false,
       });
-      if (required) {
+      if (check && check.captcha_required) {
+        setSiteKey(check.site_key || null);
         setShowTurnstile(true);
       } else {
         await doLogin(null);
@@ -70,12 +78,12 @@ export default function LoginPage() {
     }
   };
 
-  const completeLogin = async () => {
+  const completeLogin = async (captchaToken) => {
     setShowTurnstile(false);
     setError("");
     setLoading(true);
     try {
-      await doLogin("dev-stub-token");
+      await doLogin(captchaToken);
     } catch (err) {
       setError(err.message || "Login failed.");
     } finally {
@@ -511,6 +519,7 @@ export default function LoginPage() {
 
       <TurnstileModal
         open={showTurnstile}
+        siteKey={siteKey}
         onClose={() => setShowTurnstile(false)}
         onContinue={completeLogin}
       />
