@@ -1,0 +1,8 @@
+.venv/
+.pnpm-store/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.playwright-browsers/
+playwright-report/
+test-results/
