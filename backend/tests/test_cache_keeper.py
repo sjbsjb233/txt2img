@@ -261,6 +261,63 @@ async def test_refresh_disk_usage_skips_invalid_dirnames(
     assert totals[SCOPE_JOBS_TOTAL].bytes == 0
 
 
+@pytest.mark.asyncio
+async def test_refresh_disk_usage_does_not_warn_on_stray_dirs(
+    initialized_db: None, monkeypatch
+) -> None:
+    """Routine refreshes over ``data/jobs/`` must not spam the log even
+    when stray temp/workspace dirs exist alongside real job dirs."""
+    from app.domain import cache_keeper as cache_keeper_mod
+    from app.services import image_io as image_io_mod
+
+    captured: list[str] = []
+
+    def fake_warning(msg: str, *args, **kwargs) -> None:
+        captured.append(msg % args if args else msg)
+
+    # Patch the warning sink on both modules — the pre-fix code used
+    # validate_hash_id (logs through image_io) and a future regression
+    # might surface in either place.
+    monkeypatch.setattr(image_io_mod.logger, "warning", fake_warning)
+    monkeypatch.setattr(cache_keeper_mod.logger, "warning", fake_warning)
+
+    # Lay out a few stray names that would have made the old
+    # validate_hash_id-based filter emit warnings.
+    for stray in ("tmp_workspace", "j_short", ".DS_Store_dir", "debug-2025"):
+        (_data_root_jobs() / stray).mkdir(parents=True, exist_ok=True)
+
+    await cache_keeper_mod.refresh_disk_usage()
+
+    # No "rejected hash_id" warnings should appear from the directory walk.
+    bad = [m for m in captured if "rejected hash_id" in m]
+    assert bad == []
+
+
+@pytest.mark.asyncio
+async def test_refresh_disk_usage_skips_symlinked_job_dirs(
+    initialized_db: None,
+) -> None:
+    """A symlinked ``j_<12>`` entry must be skipped, not followed."""
+    import os as _os
+
+    from app.domain.cache_keeper import SCOPE_JOBS_TOTAL, refresh_disk_usage
+
+    real = _data_root_jobs() / "j_realreal0001"
+    (real / "outputs").mkdir(parents=True, exist_ok=True)
+    (real / "outputs" / "01_original.png").write_bytes(b"x" * 100)
+
+    link = _data_root_jobs() / "j_linkylinky01"
+    try:
+        _os.symlink(real, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported in this environment")
+
+    totals = await refresh_disk_usage()
+    # Only the real dir is counted; the symlink is skipped.
+    assert totals[SCOPE_JOBS_TOTAL].job_count == 1
+    assert totals[SCOPE_JOBS_TOTAL].bytes == 100
+
+
 # ---------------------------------------------------------------------------
 # Idempotency: running twice produces the same numbers, doesn't double-write
 # ---------------------------------------------------------------------------

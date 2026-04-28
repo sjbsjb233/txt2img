@@ -55,6 +55,64 @@ def test_validate_hash_id_accepts_canonical(fresh_env: None) -> None:
     assert validate_hash_id(VALID_HASH) == VALID_HASH
 
 
+def test_is_valid_hash_id_silent_predicate(fresh_env: None) -> None:
+    """Pure shape check — never raises, never logs."""
+    from app.services.image_io import is_valid_hash_id
+
+    assert is_valid_hash_id(VALID_HASH) is True
+    assert is_valid_hash_id("not-a-hash") is False
+    assert is_valid_hash_id("") is False
+    assert is_valid_hash_id(None) is False  # type: ignore[arg-type]
+    assert is_valid_hash_id(123) is False  # type: ignore[arg-type]
+
+
+def test_validate_hash_id_logs_redacted_value_on_failure(
+    fresh_env: None, monkeypatch
+) -> None:
+    """Failure log must include a length-limited repr for ops debugging."""
+    from app.services import image_io as image_io_mod
+
+    captured: list[tuple[str, tuple]] = []
+
+    def fake_warning(msg: str, *args, **kwargs) -> None:
+        captured.append((msg, args))
+
+    monkeypatch.setattr(image_io_mod.logger, "warning", fake_warning)
+
+    bad = "j_../etc/passwd"
+    with pytest.raises(image_io_mod.InvalidJobHashId):
+        image_io_mod.validate_hash_id(bad)
+
+    assert captured, "expected a warning to be logged"
+    # The bad value (or its repr) must be present somewhere in args.
+    rendered = "".join(str(a) for _, args in captured for a in args)
+    assert bad in rendered or repr(bad)[:32] in rendered
+
+
+def test_validate_hash_id_log_truncates_megabyte_payload(
+    fresh_env: None, monkeypatch
+) -> None:
+    """A megabyte-long bad input must not flood the log."""
+    from app.services import image_io as image_io_mod
+
+    captured: list[str] = []
+
+    def fake_warning(msg: str, *args, **kwargs) -> None:
+        # Approximate the rendered length so a future change to the
+        # format string still trips this assertion.
+        captured.append(msg % args if args else msg)
+
+    monkeypatch.setattr(image_io_mod.logger, "warning", fake_warning)
+
+    huge = "j_" + "A" * 1_000_000
+    with pytest.raises(image_io_mod.InvalidJobHashId):
+        image_io_mod.validate_hash_id(huge)
+
+    assert captured
+    # The rendered log line shouldn't be megabytes long.
+    assert max(len(m) for m in captured) < 200
+
+
 @pytest.mark.parametrize(
     "bad",
     [
@@ -93,6 +151,39 @@ def test_path_for_job_rejects_traversal(fresh_env: None) -> None:
 
     with pytest.raises(InvalidJobHashId):
         path_for_job("j_../etc/pwd")
+
+
+def test_path_for_job_containment_resists_prefix_collision(
+    fresh_env: None, monkeypatch, tmp_path: Path
+) -> None:
+    """The defense-in-depth check must use real path containment, not
+    string ``startswith`` — otherwise a sibling like ``data/jobs_evil``
+    could pass.
+
+    We simulate the failure mode by pointing DATA_ROOT at a directory
+    whose parent has a sibling that string-prefix-matches ``jobs/``,
+    then verifying that ``path_for_job`` still resolves correctly under
+    ``jobs/`` and not into the sibling.
+    """
+    from app.config import get_settings
+
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+    try:
+        # Layout:
+        #   tmp_path/jobs/j_aaaaaaaaaaaa  (legitimate)
+        #   tmp_path/jobs_evil/...        (would-be prefix collision)
+        (tmp_path / "jobs" / VALID_HASH).mkdir(parents=True)
+        (tmp_path / "jobs_evil").mkdir()
+
+        from app.services.image_io import jobs_root, path_for_job
+
+        p = path_for_job(VALID_HASH)
+        # Must resolve under jobs/, not jobs_evil/
+        assert p.is_relative_to(jobs_root().resolve())
+        assert "jobs_evil" not in str(p)
+    finally:
+        get_settings.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -391,3 +482,30 @@ def test_directory_size_bytes_missing_dir_returns_zero(
     from app.services.image_io import directory_size_bytes
 
     assert directory_size_bytes(tmp_path / "does-not-exist") == 0
+
+
+def test_directory_size_bytes_skips_symlinked_root(
+    fresh_env: None, tmp_path: Path
+) -> None:
+    """A symlinked root must not cause us to scan whatever it points at.
+
+    Defends against an operator dropping ``data/jobs/j_xxx -> /`` as a
+    debug shortcut and accidentally summing the whole filesystem.
+    """
+    import os as _os
+
+    from app.services.image_io import directory_size_bytes
+
+    target = tmp_path / "real"
+    target.mkdir()
+    (target / "big.bin").write_bytes(b"x" * 1024)
+
+    link = tmp_path / "link"
+    try:
+        _os.symlink(target, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported in this environment")
+
+    assert directory_size_bytes(link) == 0
+    # Sanity: the real root still works.
+    assert directory_size_bytes(target) == 1024

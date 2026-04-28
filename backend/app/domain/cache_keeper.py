@@ -33,6 +33,7 @@ they only count rows we can resolve.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -43,7 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.engine import get_session
 from app.db.models import DiskUsage, Job
-from app.services.image_io import directory_size_bytes, jobs_root, validate_hash_id
+from app.services.image_io import directory_size_bytes, is_valid_hash_id, jobs_root
 
 logger = logging.getLogger("txt2img.cache_keeper")
 
@@ -93,19 +94,34 @@ def _list_job_dirs() -> list[tuple[str, Path]]:
     Directories that don't match the ``j_<12>`` shape are ignored — we
     don't want stray files (``tmp/``, ``announcements/``, lockfiles, an
     operator's ``debug/`` dir) to be miscounted as jobs.
+
+    We use ``is_valid_hash_id`` (a silent regex check) rather than
+    ``validate_hash_id`` because this routine is called periodically and
+    every stray directory under ``jobs/`` would otherwise produce a
+    warning log on every refresh.
+
+    Symlinked entries — including a symlinked ``j_<...>`` dir — are
+    skipped, which keeps the disk scan inside the ``jobs/`` tree even
+    when an operator drops a symlink under ``data/jobs/`` for debug.
     """
     root = jobs_root()
     if not root.exists():
         return []
     entries: list[tuple[str, Path]] = []
-    for child in root.iterdir():
-        if not child.is_dir():
-            continue
-        try:
-            validate_hash_id(child.name)
-        except Exception:
-            continue
-        entries.append((child.name, child))
+    # ``os.scandir`` lets us check ``is_dir(follow_symlinks=False)`` and
+    # skip symlinked roots before we ever touch them.
+    with os.scandir(root) as it:
+        for entry in it:
+            if not is_valid_hash_id(entry.name):
+                continue
+            try:
+                if entry.is_symlink():
+                    continue
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            entries.append((entry.name, Path(entry.path)))
     return entries
 
 

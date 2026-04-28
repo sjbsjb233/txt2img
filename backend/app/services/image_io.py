@@ -93,16 +93,32 @@ class UnsupportedMimeType(ValueError):
     """Raised when a MIME type can't be mapped to a file extension."""
 
 
+def is_valid_hash_id(hash_id: object) -> bool:
+    """Pure shape predicate. Does not log, does not raise.
+
+    Use this where a "is this string-shaped like a job hash_id" check is
+    needed without the audit warning that ``validate_hash_id`` emits —
+    e.g., when scanning a directory we expect to contain non-job entries
+    (tmp dirs, lockfiles, an operator's debug folder).
+    """
+    return isinstance(hash_id, str) and _HASH_ID_RE.match(hash_id) is not None
+
+
 def validate_hash_id(hash_id: str) -> str:
     """Confirm ``hash_id`` matches the public-facing format.
 
     Returns the input unchanged on success so callers can ``Path(...) /
     validate_hash_id(h)`` in one line.
+
+    On failure logs a length-limited repr so operators have a breadcrumb
+    when debugging traversal attempts. We escape via ``repr`` (so weird
+    bytes don't poison the log) and cap at 64 chars (so a megabyte-long
+    payload doesn't end up in journald). Use ``is_valid_hash_id`` for
+    silent shape checks.
     """
-    if not isinstance(hash_id, str) or not _HASH_ID_RE.match(hash_id):
-        # Don't echo the bad value to the client — it could itself be an
-        # attempted injection — but log it for ops.
-        logger.warning("rejected hash_id with invalid shape")
+    if not is_valid_hash_id(hash_id):
+        safe = repr(hash_id)[:64] if isinstance(hash_id, str) else type(hash_id).__name__
+        logger.warning("rejected hash_id with invalid shape: %s", safe)
         raise InvalidJobHashId("hash_id must match ^j_[A-Za-z0-9]{12}$")
     return hash_id
 
@@ -153,13 +169,20 @@ def path_for_job(hash_id: str) -> Path:
     re-resolved and confirmed to live under ``jobs_root()``. This second
     check is defense-in-depth: even if the regex were ever loosened, a
     crafted id that happened to contain ``..`` would still be caught here.
+
+    The containment check uses ``Path.is_relative_to`` (3.9+) rather than
+    a string ``startswith`` — string prefixes fall to sibling-name
+    collisions like ``/data/jobs_evil`` happily matching ``/data/jobs``.
     """
     validate_hash_id(hash_id)
     base = jobs_root()
     candidate = (base / hash_id).resolve()
-    base_resolved = base.resolve() if base.exists() else base
-    # ``Path.is_relative_to`` requires Python 3.9+; we target 3.11.
-    if not str(candidate).startswith(str(base_resolved)):
+    # Resolve ``base`` even when it doesn't exist yet — ``resolve()`` on a
+    # missing dir is well-defined in 3.11 (returns the absolute logical
+    # path). If we let an unresolved relative path leak in here the
+    # ``is_relative_to`` check below would silently fail.
+    base_resolved = base.resolve()
+    if not candidate.is_relative_to(base_resolved):
         # Should be impossible after validate_hash_id, but be loud if it
         # ever happens.
         raise InvalidJobHashId("resolved path escapes jobs root")
@@ -176,23 +199,6 @@ def path_for_refs_dir(hash_id: str) -> Path:
 
 def path_for_upstream_dir(hash_id: str) -> Path:
     return path_for_job(hash_id) / DIR_UPSTREAM
-
-
-def path_for_reference(hash_id: str, order: int) -> Path:
-    """Build the absolute path for a reference image.
-
-    The actual filename is a glob — refs/01_*.* — because the original
-    filename and extension depend on the upload. Returns the *directory*
-    parent + the formatted prefix; callers should glob for ``<prefix>*``
-    to find the concrete file.
-
-    For tests and callers that want a deterministic path we use a stable
-    naming scheme described in the design doc: ``NN_<sanitised_name>.<ext>``.
-    The full path constructor is ``build_reference_path``.
-    """
-    validate_hash_id(hash_id)
-    validate_order(order)
-    return path_for_refs_dir(hash_id)
 
 
 def build_reference_path(
@@ -423,11 +429,15 @@ def directory_size_bytes(path: Path) -> int:
     part of the iteration), and the cache keeper runs this for every job
     directory on each refresh.
 
-    Symlinks: we follow only file-stat (no recursion across symlinked
-    dirs) — defensive against an admin who happens to leave a symlink
-    pointing into ``/`` while debugging.
+    Symlinks: neither the root nor any entry encountered during the walk
+    is followed. Returning ``0`` for a symlinked root is safer than
+    silently scanning whatever it points at — an operator who left a
+    ``data/jobs/j_xxxxxxxxxxxx -> /`` for debugging shouldn't make us
+    inadvertently sum the whole filesystem.
     """
     if not path.exists():
+        return 0
+    if path.is_symlink():
         return 0
     total = 0
     stack: list[Path] = [path]
