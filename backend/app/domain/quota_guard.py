@@ -57,22 +57,6 @@ def beijing_today() -> str:
     return datetime.now(BEIJING_TZ).date().isoformat()
 
 
-def _effective_quotas(user: UserLike) -> tuple[int, int]:
-    """Resolve per-user quota overrides over the tier defaults."""
-    spec = get_tier_config().get(user.tier)
-    soft = (
-        user.override_soft_quota
-        if user.override_soft_quota is not None
-        else spec.soft_quota
-    )
-    hard = (
-        user.override_hard_quota
-        if user.override_hard_quota is not None
-        else spec.hard_quota
-    )
-    return soft, hard
-
-
 class QuotaGuard:
     """Read and mutate ``users.today_count`` safely."""
 
@@ -88,7 +72,7 @@ class QuotaGuard:
         caller should reject job creation with 429 ``HARD_QUOTA_EXCEEDED``
         when this returns True.
         """
-        _, hard = _effective_quotas(user)
+        _, hard = get_tier_config().effective_quotas(user)
         count = await self.today_count(user.id, session=session)
         return count >= hard
 
@@ -104,7 +88,7 @@ class QuotaGuard:
         into the ``SOFT_QUOTA_EXCEEDED`` flag so the worker can apply
         Turnstile / delay / probability-fail later.
         """
-        soft, _ = _effective_quotas(user)
+        soft, _ = get_tier_config().effective_quotas(user)
         count = await self.today_count(user.id, session=session)
         return count >= soft
 

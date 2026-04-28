@@ -38,7 +38,7 @@ async def dryrun_access(
     return {
         "passed": decision.passed,
         "soft_quota_exceeded": decision.soft_quota_exceeded,
-        "flags": decision.flags,
+        "flags": dict(decision.flags),
         "code": decision.code,
         "active_jobs": decision.active_jobs,
         "active_capacity": decision.active_capacity,

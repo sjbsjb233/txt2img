@@ -20,18 +20,26 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.engine import get_session
 from app.db.models import Tier as TierRow
-from app.db.models import User
 
 logger = logging.getLogger("txt2img.tier")
 
 
 VALID_TIERS: tuple[str, ...] = ("vip", "premium", "standard", "free")
+
+
+class UserQuotaView(Protocol):
+    """Subset of ``User`` needed to resolve effective quotas."""
+
+    tier: str
+    override_soft_quota: int | None
+    override_hard_quota: int | None
 
 
 @dataclass(frozen=True)
@@ -119,7 +127,7 @@ class TierConfig:
 
     # -- override resolution ---------------------------------------------
 
-    def effective_quotas(self, user: User) -> tuple[int, int]:
+    def effective_quotas(self, user: UserQuotaView) -> tuple[int, int]:
         """Return ``(effective_soft, effective_hard)`` for one user.
 
         Precedence (design doc §3.2 / §13.2):

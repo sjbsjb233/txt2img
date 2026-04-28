@@ -19,6 +19,8 @@ the frontend uses those codes for different user copy.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Mapping
 
 from app.db.jobs_repository import JobsRepository, get_jobs_repository
 from app.db.models import User
@@ -34,12 +36,16 @@ class AccessDecision:
 
     passed: bool
     soft_quota_exceeded: bool = False
-    flags: dict[str, bool] = field(default_factory=dict)
+    flags: Mapping[str, bool] = field(default_factory=dict)
     http_status: int | None = None
     code: str | None = None
     message: str | None = None
     active_jobs: int | None = None
     active_capacity: int | None = None
+
+    def __post_init__(self) -> None:
+        """Freeze ``flags`` so the decision cannot be mutated indirectly."""
+        object.__setattr__(self, "flags", MappingProxyType(dict(self.flags)))
 
     def raise_if_denied(self) -> None:
         """Raise the standard HTTP error for a denied decision."""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 
 import httpx
 import pytest
@@ -128,6 +129,9 @@ async def test_access_policy_soft_quota_sets_flag(initialized_db: None) -> None:
     assert decision.passed is True
     assert decision.soft_quota_exceeded is True
     assert decision.flags == {"SOFT_QUOTA_EXCEEDED": True}
+    assert isinstance(decision.flags, MappingProxyType)
+    with pytest.raises(TypeError):
+        decision.flags["SOFT_QUOTA_EXCEEDED"] = False  # type: ignore[index]
 
 
 @pytest.mark.asyncio
