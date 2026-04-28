@@ -10,6 +10,9 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      {/* `/` lands on the dashboard, but the canonical path is /dashboard
+          so the URL bar matches the sidebar entry and external links work. */}
+      <Route path="/" element={<Navigate to="/dashboard" replace />} />
       <Route
         element={
           <RequireAuth>
@@ -17,11 +20,11 @@ export default function App() {
           </RequireAuth>
         }
       >
-        <Route path="/" element={<Dashboard />} />
+        <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/create" element={<CreatePage />} />
         <Route path="/archive" element={<ArchivePage />} />
       </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
   );
 }

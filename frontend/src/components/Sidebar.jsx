@@ -2,10 +2,10 @@ import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import Icon from "./Icon.jsx";
 import { Logo, Wordmark } from "./Logo.jsx";
-import { apiFetch, clearAuth, getCurrentUser } from "../api/client.js";
+import { logout as logoutFlow, useAuth } from "../store/auth.js";
 
 const NAV = [
-  { id: "dashboard", label: "Dashboard", icon: "chart", path: "/" },
+  { id: "dashboard", label: "Dashboard", icon: "chart", path: "/dashboard" },
   { id: "create", label: "Create", icon: "spark", path: "/create" },
   { id: "picker", label: "Picker", icon: "star", path: "/picker" },
   { id: "history", label: "Archive", icon: "archive", path: "/archive" },
@@ -26,8 +26,7 @@ export default function Sidebar({ defaultMode = "expanded" }) {
 
   const location = useLocation();
   const navigate = useNavigate();
-  const user = getCurrentUser();
-  const isAdmin = user?.role === "admin";
+  const { user, isAdmin } = useAuth();
   const bottomItems = BOTTOM.filter((it) => !it.adminOnly || isAdmin);
   const active =
     NAV.find((n) => n.path === location.pathname)?.id ||
@@ -37,12 +36,7 @@ export default function Sidebar({ defaultMode = "expanded" }) {
   const collapse = () => setMode("rail");
 
   const logout = async () => {
-    // Best-effort signal to the server; we don't gate on success because
-    // the backend is sessionless and the client is the source of truth.
-    try {
-      await apiFetch("/api/auth/logout", { method: "POST" });
-    } catch { /* ignore */ }
-    clearAuth();
+    await logoutFlow(); // best-effort POST + clearAuth + notify
     navigate("/login", { replace: true });
   };
 

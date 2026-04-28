@@ -1,13 +1,9 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import TurnstileModal from "../components/TurnstileModal.jsx";
-import {
-  apiFetch,
-  getApiBase,
-  setApiBase,
-  setCurrentUser,
-  setToken,
-} from "../api/client.js";
+import * as authApi from "../api/auth.js";
+import { apiFetch, getApiBase, setApiBase } from "../api/client.js";
+import { setSession } from "../store/auth.js";
 
 const CAPTIONS = [
   "issue №004 — apr 2026",
@@ -40,14 +36,9 @@ export default function LoginPage() {
   );
 
   const doLogin = async (captchaToken) => {
-    const data = await apiFetch("/api/auth/login", {
-      method: "POST",
-      body: { username, password, captcha_token: captchaToken },
-      auth: false,
-    });
-    setToken(data.access_token);
-    setCurrentUser(data.user);
-    navigate("/");
+    const data = await authApi.login({ username, password, captchaToken });
+    setSession({ accessToken: data.access_token, user: data.user });
+    navigate("/dashboard");
   };
 
   const submit = async (e) => {
@@ -60,11 +51,7 @@ export default function LoginPage() {
     }
     setLoading(true);
     try {
-      const check = await apiFetch("/api/auth/captcha-check", {
-        method: "POST",
-        body: { username },
-        auth: false,
-      });
+      const check = await authApi.captchaCheck(username);
       if (check && check.captcha_required) {
         setSiteKey(check.site_key || null);
         setShowTurnstile(true);
@@ -72,6 +59,19 @@ export default function LoginPage() {
         await doLogin(null);
       }
     } catch (err) {
+      // CAPTCHA_REQUIRED is the silent signal: precheck said no, but the
+      // backend's rolling counter just crossed the threshold during the
+      // round trip. Open the Turnstile modal instead of showing an error.
+      if (err.code === "CAPTCHA_REQUIRED") {
+        try {
+          const fresh = await authApi.captchaCheck(username);
+          setSiteKey(fresh.site_key || null);
+          setShowTurnstile(true);
+        } catch (e2) {
+          setError(e2.message || "Login failed.");
+        }
+        return;
+      }
       setError(err.message || "Login failed.");
     } finally {
       setLoading(false);
@@ -521,7 +521,7 @@ export default function LoginPage() {
         open={showTurnstile}
         siteKey={siteKey}
         onClose={() => setShowTurnstile(false)}
-        onContinue={completeLogin}
+        onSuccess={completeLogin}
       />
     </div>
   );

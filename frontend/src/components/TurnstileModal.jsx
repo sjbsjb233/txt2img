@@ -7,12 +7,12 @@ import { loadTurnstile } from "../api/turnstile.js";
 // Unlike the previous mockup, this version actually renders the Turnstile
 // widget against the site key the backend hands down via /api/auth/captcha-check.
 // The widget produces a token through its callback; we capture it in local
-// state and forward it to `onContinue(token)` when the user confirms.
+// state and forward it to `onSuccess(token)` when the user confirms.
 //
 // `siteKey` may be missing in dev environments where the operator has not
 // configured Turnstile at all — in that case we surface a friendly empty
 // state and disable the Continue button. Production should always pass one.
-export default function TurnstileModal({ open, onClose, onContinue, siteKey }) {
+export default function TurnstileModal({ open, onClose, onSuccess, siteKey }) {
   const containerRef = useRef(null);
   const widgetIdRef = useRef(null);
   const [token, setToken] = useState("");
@@ -73,11 +73,11 @@ export default function TurnstileModal({ open, onClose, onContinue, siteKey }) {
     if (!open) return;
     const onKey = (e) => {
       if (e.key === "Escape") onClose?.();
-      if (e.key === "Enter" && token) onContinue?.(token);
+      if (e.key === "Enter" && token) onSuccess?.(token);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose, onContinue, token]);
+  }, [open, onClose, onSuccess, token]);
 
   if (!open) return null;
   return (
@@ -253,7 +253,7 @@ export default function TurnstileModal({ open, onClose, onContinue, siteKey }) {
             Cancel
           </button>
           <button
-            onClick={() => token && onContinue?.(token)}
+            onClick={() => token && onSuccess?.(token)}
             disabled={!token}
             className="btn ink shadowed"
             style={{
