@@ -31,9 +31,12 @@ Quirks codified here (design doc §1.4):
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import ipaddress
 import json
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
@@ -389,36 +392,123 @@ class OpenAIV1Adapter(BaseAdapter):
                         headers={**headers, "Content-Type": "application/json"},
                         content=json.dumps(body).encode("utf-8"),
                     )
+                # The same client is reused to fetch any ``url``-format
+                # items the upstream returned (BLTCY-style relays do
+                # this), so we don't pay TLS-handshake twice.
+                return await self._parse_response(
+                    resp,
+                    request.output_format or "png",
+                    client,
+                )
         except StandardError:
             raise
         except Exception as exc:
             raise self.normalize_error(exc) from exc
 
-        # Pass the requested output_format to the parser. OpenAI's response
-        # items do not echo it back, so the request is the only source of
-        # truth for the on-disk MIME type.
-        return self._parse_response(resp, request.output_format or "png")
-
     # ------------------------------------------------------------------
     # Response parsing
     # ------------------------------------------------------------------
 
-    def _parse_response(
+    async def _resolve_item(
+        self,
+        item: Any,
+        client: httpx.AsyncClient,
+        requested_format: str,
+        sem: asyncio.Semaphore,
+    ) -> NormalizedImage | None:
+        """Decode one ``data[]`` item into a ``NormalizedImage`` or skip it.
+
+        Tries inline ``b64_json`` first; falls back to fetching ``url`` if
+        present. The CDN GET runs under ``sem`` so multi-image responses
+        download concurrently without overwhelming the relay.
+
+        Returns ``None`` when the item is neither decodable nor fetchable
+        — the executor's partial-failure semantics handle that upstream
+        of us.
+        """
+        if not isinstance(item, dict):
+            return None
+
+        image_bytes: bytes | None = None
+        item_mime: str | None = None
+
+        b64 = item.get("b64_json")
+        if isinstance(b64, str) and b64:
+            try:
+                image_bytes = base64.b64decode(b64, validate=False)
+            except Exception:
+                image_bytes = None
+
+        # Fallback to ``url``: the standard OpenAI response format when
+        # ``response_format`` isn't pinned to ``b64_json``. Relays such
+        # as BLTCY always return URL even for gpt-image-2.
+        if image_bytes is None:
+            url = item.get("url")
+            if isinstance(url, str) and url:
+                if not await _is_safe_url(url):
+                    # Defense in depth against a relay returning an
+                    # internal-network URL — refuse to fetch.
+                    return None
+                async with sem:
+                    try:
+                        dl = await client.get(url)
+                    except Exception:
+                        dl = None
+                if dl is not None and dl.status_code < 400 and dl.content:
+                    ctype = dl.headers.get("content-type", "")
+                    ctype_main = ctype.split(";")[0].strip().lower()
+                    # If Content-Type is set and isn't an image, treat
+                    # the download as a failure rather than persisting
+                    # an HTML error page as if it were a PNG.
+                    if ctype_main and not ctype_main.startswith("image/"):
+                        return None
+                    image_bytes = dl.content
+                    if ctype_main.startswith("image/"):
+                        item_mime = ctype_main
+
+        if image_bytes is None:
+            return None
+
+        image_meta: dict[str, Any] = {}
+        if isinstance(item.get("revised_prompt"), str):
+            image_meta["revised_prompt"] = item["revised_prompt"]
+        if isinstance(item.get("url"), str):
+            # Keep the relay's CDN URL around for the per-attempt log
+            # (handy when debugging "why did this image expire").
+            # Strip query/fragment so signed-token URLs don't leak.
+            image_meta["url"] = _sanitize_url_for_log(item["url"])
+
+        return NormalizedImage(
+            data=image_bytes,
+            mime=item_mime or _mime_for_format(requested_format),
+            metadata=image_meta,
+        )
+
+    async def _parse_response(
         self,
         resp: httpx.Response,
-        requested_format: str = "png",
+        requested_format: str,
+        client: httpx.AsyncClient,
     ) -> NormalizedResponse:
         """Translate the upstream HTTP response into our normalized shape.
 
         We treat anything below 200 or ≥ 300 as an error and let
         ``_raise_http_error`` build a typed ``StandardError`` from the
-        payload. On 2xx we expect the OpenAI shape::
+        payload. On 2xx OpenAI's API can return either of two shapes per
+        item — both are accepted::
 
-            {"created": ..., "data": [{"b64_json": "...", "revised_prompt": "..."}, ...]}
+            {"data": [{"b64_json": "...", "revised_prompt": "..."}]}
+            {"data": [{"url": "https://...", "revised_prompt": "..."}]}
+
+        Standalone OpenAI returns ``b64_json`` for gpt-image-2; relays
+        like BLTCY proxy the image to their CDN and return ``url``. We
+        support both: ``url`` items get GET'ed via ``client`` (sharing the
+        connection pool the request was made on), and the resulting bytes
+        are stored just like a base64-decoded item.
 
         ``requested_format`` is plumbed in because OpenAI's response items
         do not echo the format back; the request-time choice is what the
-        bytes actually are.
+        bytes actually are when they arrive over the wire.
         """
         if resp.status_code >= 400:
             self._raise_http_error(resp)
@@ -450,30 +540,17 @@ class OpenAIV1Adapter(BaseAdapter):
                 upstream_body_excerpt=str(body)[:_BODY_EXCERPT_CHARS],
             )
 
-        images: list[NormalizedImage] = []
-        for item in data:
-            if not isinstance(item, dict):
-                continue
-            b64 = item.get("b64_json")
-            if not isinstance(b64, str) or not b64:
-                # Per design doc partial-failure handling, a missing
-                # b64_json on an item is recorded but does not abort the
-                # whole call.
-                continue
-            try:
-                image_bytes = base64.b64decode(b64, validate=False)
-            except Exception:
-                continue
-            image_meta: dict[str, Any] = {}
-            if isinstance(item.get("revised_prompt"), str):
-                image_meta["revised_prompt"] = item["revised_prompt"]
-            images.append(
-                NormalizedImage(
-                    data=image_bytes,
-                    mime=_mime_for_format(requested_format),
-                    metadata=image_meta,
-                )
-            )
+        # Each item resolves independently. b64-only items finish
+        # synchronously; url-only items kick off a CDN GET. We dispatch
+        # them concurrently with a small semaphore so a response with
+        # n=10 doesn't take 10× a single download's latency.
+        sem = asyncio.Semaphore(_MAX_DOWNLOAD_CONCURRENCY)
+        tasks = [
+            self._resolve_item(item, client, requested_format, sem)
+            for item in data
+        ]
+        resolved = await asyncio.gather(*tasks)
+        images: list[NormalizedImage] = [img for img in resolved if img is not None]
 
         if not images:
             raise StandardError(
@@ -485,14 +562,24 @@ class OpenAIV1Adapter(BaseAdapter):
 
         # ``raw`` is for the per-attempt debug log. We strip the b64
         # blobs so the log doesn't balloon to MB; keep their lengths so
-        # we can still reason about them after the fact.
+        # we can still reason about them after the fact. URLs are
+        # sanitised — the host+path is useful for debugging but signed
+        # query tokens have no business being persisted to disk.
         raw: dict[str, Any] = {
             "created": body.get("created"),
             "data": [
                 {
-                    "b64_json_len": len(item.get("b64_json") or "")
-                    if isinstance(item, dict)
-                    else 0,
+                    "b64_json_len": (
+                        len(item.get("b64_json") or "")
+                        if isinstance(item, dict)
+                        else 0
+                    ),
+                    "url": (
+                        _sanitize_url_for_log(item["url"])
+                        if isinstance(item, dict)
+                        and isinstance(item.get("url"), str)
+                        else None
+                    ),
                     "revised_prompt": (
                         item.get("revised_prompt")
                         if isinstance(item, dict)
@@ -587,3 +674,110 @@ def _mime_for_format(fmt: str) -> str:
     if fmt == "webp":
         return "image/webp"
     return "image/png"
+
+
+# ---------------------------------------------------------------------------
+# URL safety helpers for the relay-CDN download path.
+#
+# A relay we trust to hold our API key still shouldn't be able to bounce us
+# at internal HTTP services if it ever gets compromised. We defend in depth
+# by validating the URL before fetching:
+#
+# - Scheme must be http or https
+# - Hostname must not be a private / loopback / link-local IP literal
+# - Hostname (if a name, not an IP) is resolved and the same checks applied
+#   to every resulting address
+#
+# DNS rebinding is still possible in theory (the IP can change between the
+# resolve and the actual fetch), but the common SSRF vectors — IP literals
+# pointing at 127.0.0.1, AWS metadata at 169.254.169.254, or RFC1918
+# ranges — are blocked here.
+# ---------------------------------------------------------------------------
+
+
+_MAX_DOWNLOAD_CONCURRENCY = 8
+_RESERVED_IPV4_NETS = (
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("169.254.0.0/16"),
+)
+
+
+def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return True if ``ip`` is a private, loopback, or otherwise unsafe IP.
+
+    ``ipaddress.is_private`` already covers RFC1918, loopback, link-local
+    (which catches 169.254.169.254 — AWS / GCP metadata), reserved, and
+    multicast for both v4 and v6. We add explicit nets for clarity and
+    in case the host stdlib classification ever drifts.
+    """
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    ):
+        return True
+    if isinstance(ip, ipaddress.IPv4Address):
+        for net in _RESERVED_IPV4_NETS:
+            if ip in net:
+                return True
+    return False
+
+
+async def _is_safe_url(url: str) -> bool:
+    """Cheap, defense-in-depth check before GET'ing a relay-supplied URL.
+
+    Resolves the host once via the running loop's ``getaddrinfo`` so we
+    don't block the event loop. False on any classification we can't
+    verify — refusing to fetch is safer than fetching the wrong thing.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+
+    # Host is already a literal IP — check directly without DNS.
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        return not _is_blocked_ip(ip)
+
+    # Hostname: resolve via the running loop and check every result.
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(host, None)
+    except Exception:
+        return False
+    for info in infos:
+        addr = info[4][0]
+        try:
+            resolved = ipaddress.ip_address(addr)
+        except ValueError:
+            return False
+        if _is_blocked_ip(resolved):
+            return False
+    return bool(infos)
+
+
+def _sanitize_url_for_log(url: str) -> str:
+    """Drop query / fragment from a URL before persisting it.
+
+    CDN URLs from relays often carry signed-token query strings that we
+    do not want sitting in the per-attempt debug log under
+    ``data/jobs/<hash>/upstream/``. Stripping query + fragment keeps the
+    debug-useful host + path while removing the secret.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
