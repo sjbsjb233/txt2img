@@ -59,7 +59,10 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
     from app.db import engine as db_engine
     from app.db.migrate import upgrade_to_head
     from app.domain.access_policy import reset_access_policy_for_tests
+    from app.domain.circuit_breaker import reset_circuit_breaker_for_tests
     from app.domain.config_center import reset_config_center_for_tests
+    from app.domain.metrics_engine import reset_metrics_engine_for_tests
+    from app.domain.provider_selector import reset_provider_selector_for_tests
     from app.domain.quota_guard import reset_quota_guard_for_tests
     from app.domain.tier_config import reset_tier_config_for_tests
 
@@ -69,6 +72,9 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
     reset_tier_config_for_tests()
     reset_quota_guard_for_tests()
     reset_access_policy_for_tests()
+    reset_metrics_engine_for_tests()
+    reset_circuit_breaker_for_tests()
+    reset_provider_selector_for_tests()
 
     upgrade_to_head()
     db_engine.init_engine()
@@ -80,6 +86,9 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
         reset_tier_config_for_tests()
         reset_quota_guard_for_tests()
         reset_access_policy_for_tests()
+        reset_metrics_engine_for_tests()
+        reset_circuit_breaker_for_tests()
+        reset_provider_selector_for_tests()
 
 
 @pytest_asyncio.fixture
@@ -101,7 +110,10 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
 
     from app.config import get_settings
     from app.domain.access_policy import reset_access_policy_for_tests
+    from app.domain.circuit_breaker import reset_circuit_breaker_for_tests
     from app.domain.config_center import reset_config_center_for_tests
+    from app.domain.metrics_engine import reset_metrics_engine_for_tests
+    from app.domain.provider_selector import reset_provider_selector_for_tests
     from app.domain.quota_guard import reset_quota_guard_for_tests
     from app.domain.tier_config import reset_tier_config_for_tests
 
@@ -110,6 +122,9 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
     reset_tier_config_for_tests()
     reset_quota_guard_for_tests()
     reset_access_policy_for_tests()
+    reset_metrics_engine_for_tests()
+    reset_circuit_breaker_for_tests()
+    reset_provider_selector_for_tests()
 
     # Import here so env vars are already in place before Settings is
     # instantiated by anything down the import graph.
@@ -129,3 +144,6 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
     reset_tier_config_for_tests()
     reset_quota_guard_for_tests()
     reset_access_policy_for_tests()
+    reset_metrics_engine_for_tests()
+    reset_circuit_breaker_for_tests()
+    reset_provider_selector_for_tests()
