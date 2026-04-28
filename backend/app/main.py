@@ -15,6 +15,8 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.adapters.base import AdapterRegistry
+from app.api.admin.adapters import router as admin_adapters_router
 from app.api.admin.config import router as admin_config_router
 from app.api.admin.tiers import router as admin_tiers_router
 from app.api.auth import router as auth_router
@@ -60,6 +62,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await get_config_center().load_from_db()
     await get_tier_config().load_from_db()
 
+    # Adapter discovery has to happen after the DB is up because the admin
+    # listing route joins against ``providers``, but it has no I/O of its
+    # own — just imports the modules under ``app.adapters/`` and
+    # instantiates each non-abstract subclass. Re-running ``discover`` on
+    # an already-populated registry is a no-op (duplicates are skipped).
+    AdapterRegistry.instance().discover()
+
     try:
         yield
     finally:
@@ -84,6 +93,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(health_router)
     app.include_router(auth_router)
+    app.include_router(admin_adapters_router)
     app.include_router(admin_config_router)
     app.include_router(admin_tiers_router)
     return app
