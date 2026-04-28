@@ -410,6 +410,140 @@ async def test_400_normalizes_to_invalid_parameter(mock_httpx) -> None:
 
 
 @pytest.mark.asyncio
+async def test_url_format_response_is_downloaded(monkeypatch) -> None:
+    """OpenAI's default response uses ``url`` rather than ``b64_json``.
+
+    Relays such as BLTCY always go through CDN URLs. The adapter must
+    GET each URL and surface the downloaded bytes as if they had arrived
+    inline. We mock the CDN response with a custom MockTransport handler
+    that routes both the API call and the CDN GET.
+    """
+    api_url = "https://api.example.com/v1/images/generations"
+    cdn_url = "https://cdn.example.com/img.png"
+    cdn_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 64
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == api_url:
+            return httpx.Response(
+                200,
+                json={
+                    "created": 1,
+                    "data": [
+                        {
+                            "url": cdn_url,
+                            "revised_prompt": "rewritten prompt",
+                        }
+                    ],
+                },
+            )
+        if str(request.url) == cdn_url:
+            return httpx.Response(
+                200,
+                content=cdn_bytes,
+                headers={"content-type": "image/png"},
+            )
+        return httpx.Response(404)
+
+    real_client = httpx.AsyncClient
+
+    class Patched(real_client):  # type: ignore[misc]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("app.adapters.openai_v1.httpx.AsyncClient", Patched)
+
+    adapter = OpenAIV1Adapter()
+    resp = await adapter.generate(
+        _provider(), NormalizedRequest(model="gpt-image-2", prompt="x")
+    )
+    assert resp.image_count == 1
+    assert resp.images[0].data == cdn_bytes
+    assert resp.images[0].mime == "image/png"
+    assert resp.images[0].metadata["revised_prompt"] == "rewritten prompt"
+    assert resp.images[0].metadata["url"] == cdn_url
+
+
+@pytest.mark.asyncio
+async def test_url_download_failure_skips_item(monkeypatch) -> None:
+    """If the CDN GET fails the item is skipped, not the whole call.
+
+    With only one item that fails we end up with no usable images, which
+    surfaces as ``EMPTY_RESPONSE`` — the same failure mode the executor
+    expects when an upstream returns text-only.
+    """
+    api_url = "https://api.example.com/v1/images/generations"
+    cdn_url = "https://cdn.example.com/img.png"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == api_url:
+            return httpx.Response(
+                200,
+                json={"created": 1, "data": [{"url": cdn_url}]},
+            )
+        # CDN is down.
+        return httpx.Response(502, content=b"")
+
+    real_client = httpx.AsyncClient
+
+    class Patched(real_client):  # type: ignore[misc]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("app.adapters.openai_v1.httpx.AsyncClient", Patched)
+
+    adapter = OpenAIV1Adapter()
+    with pytest.raises(StandardError) as exc:
+        await adapter.generate(
+            _provider(), NormalizedRequest(model="gpt-image-2", prompt="x")
+        )
+    assert exc.value.kind is StandardErrorKind.EMPTY_RESPONSE
+
+
+@pytest.mark.asyncio
+async def test_b64_takes_precedence_over_url(monkeypatch) -> None:
+    """When both fields are present we prefer b64 to avoid an extra GET."""
+    api_url = "https://api.example.com/v1/images/generations"
+    inline_b64 = base64.b64encode(b"inline-bytes").decode("ascii")
+    cdn_hits: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == api_url:
+            return httpx.Response(
+                200,
+                json={
+                    "created": 1,
+                    "data": [
+                        {
+                            "b64_json": inline_b64,
+                            "url": "https://cdn.example.com/should_not_fetch.png",
+                        }
+                    ],
+                },
+            )
+        cdn_hits.append(str(request.url))
+        return httpx.Response(500)
+
+    real_client = httpx.AsyncClient
+
+    class Patched(real_client):  # type: ignore[misc]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["transport"] = httpx.MockTransport(handler)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("app.adapters.openai_v1.httpx.AsyncClient", Patched)
+
+    adapter = OpenAIV1Adapter()
+    resp = await adapter.generate(
+        _provider(), NormalizedRequest(model="gpt-image-2", prompt="x")
+    )
+    assert resp.images[0].data == b"inline-bytes"
+    # Confirm we did not fall through to the CDN.
+    assert cdn_hits == []
+
+
+@pytest.mark.asyncio
 async def test_raw_redacts_b64_blobs(mock_httpx) -> None:
     """The per-attempt log should not carry raw base64 image data."""
     mock_httpx["status"] = 200

@@ -389,36 +389,48 @@ class OpenAIV1Adapter(BaseAdapter):
                         headers={**headers, "Content-Type": "application/json"},
                         content=json.dumps(body).encode("utf-8"),
                     )
+                # The same client is reused to fetch any ``url``-format
+                # items the upstream returned (BLTCY-style relays do
+                # this), so we don't pay TLS-handshake twice.
+                return await self._parse_response(
+                    resp,
+                    request.output_format or "png",
+                    client,
+                )
         except StandardError:
             raise
         except Exception as exc:
             raise self.normalize_error(exc) from exc
 
-        # Pass the requested output_format to the parser. OpenAI's response
-        # items do not echo it back, so the request is the only source of
-        # truth for the on-disk MIME type.
-        return self._parse_response(resp, request.output_format or "png")
-
     # ------------------------------------------------------------------
     # Response parsing
     # ------------------------------------------------------------------
 
-    def _parse_response(
+    async def _parse_response(
         self,
         resp: httpx.Response,
-        requested_format: str = "png",
+        requested_format: str,
+        client: httpx.AsyncClient,
     ) -> NormalizedResponse:
         """Translate the upstream HTTP response into our normalized shape.
 
         We treat anything below 200 or ≥ 300 as an error and let
         ``_raise_http_error`` build a typed ``StandardError`` from the
-        payload. On 2xx we expect the OpenAI shape::
+        payload. On 2xx OpenAI's API can return either of two shapes per
+        item — both are accepted::
 
-            {"created": ..., "data": [{"b64_json": "...", "revised_prompt": "..."}, ...]}
+            {"data": [{"b64_json": "...", "revised_prompt": "..."}]}
+            {"data": [{"url": "https://...", "revised_prompt": "..."}]}
+
+        Standalone OpenAI returns ``b64_json`` for gpt-image-2; relays
+        like BLTCY proxy the image to their CDN and return ``url``. We
+        support both: ``url`` items get GET'ed via ``client`` (sharing the
+        connection pool the request was made on), and the resulting bytes
+        are stored just like a base64-decoded item.
 
         ``requested_format`` is plumbed in because OpenAI's response items
         do not echo the format back; the request-time choice is what the
-        bytes actually are.
+        bytes actually are when they arrive over the wire.
         """
         if resp.status_code >= 400:
             self._raise_http_error(resp)
@@ -454,23 +466,54 @@ class OpenAIV1Adapter(BaseAdapter):
         for item in data:
             if not isinstance(item, dict):
                 continue
+
+            image_bytes: bytes | None = None
+            item_mime: str | None = None
+
             b64 = item.get("b64_json")
-            if not isinstance(b64, str) or not b64:
-                # Per design doc partial-failure handling, a missing
-                # b64_json on an item is recorded but does not abort the
-                # whole call.
+            if isinstance(b64, str) and b64:
+                try:
+                    image_bytes = base64.b64decode(b64, validate=False)
+                except Exception:
+                    image_bytes = None
+
+            # Fallback to ``url``: the standard OpenAI response format
+            # when ``response_format`` is not pinned to ``b64_json``.
+            # Relays such as BLTCY always return URL even for gpt-image-2.
+            if image_bytes is None:
+                url = item.get("url")
+                if isinstance(url, str) and url:
+                    try:
+                        dl = await client.get(url)
+                    except Exception:
+                        dl = None
+                    if dl is not None and dl.status_code < 400 and dl.content:
+                        image_bytes = dl.content
+                        # Trust the CDN's Content-Type when present —
+                        # relays sometimes change formats (e.g. asked for
+                        # webp but CDN serves png).
+                        ctype = dl.headers.get("content-type", "")
+                        if ctype.startswith("image/"):
+                            item_mime = ctype.split(";")[0].strip()
+
+            if image_bytes is None:
+                # Per design doc partial-failure handling, a missing or
+                # un-fetchable image on an item is skipped but does not
+                # abort the whole call.
                 continue
-            try:
-                image_bytes = base64.b64decode(b64, validate=False)
-            except Exception:
-                continue
+
             image_meta: dict[str, Any] = {}
             if isinstance(item.get("revised_prompt"), str):
                 image_meta["revised_prompt"] = item["revised_prompt"]
+            if isinstance(item.get("url"), str):
+                # Keep the relay's CDN URL around for the per-attempt log
+                # (handy when debugging "why did this image expire").
+                image_meta["url"] = item["url"]
+
             images.append(
                 NormalizedImage(
                     data=image_bytes,
-                    mime=_mime_for_format(requested_format),
+                    mime=item_mime or _mime_for_format(requested_format),
                     metadata=image_meta,
                 )
             )
@@ -485,14 +528,20 @@ class OpenAIV1Adapter(BaseAdapter):
 
         # ``raw`` is for the per-attempt debug log. We strip the b64
         # blobs so the log doesn't balloon to MB; keep their lengths so
-        # we can still reason about them after the fact.
+        # we can still reason about them after the fact. ``url`` items
+        # are kept verbatim because they're already small.
         raw: dict[str, Any] = {
             "created": body.get("created"),
             "data": [
                 {
-                    "b64_json_len": len(item.get("b64_json") or "")
-                    if isinstance(item, dict)
-                    else 0,
+                    "b64_json_len": (
+                        len(item.get("b64_json") or "")
+                        if isinstance(item, dict)
+                        else 0
+                    ),
+                    "url": (
+                        item.get("url") if isinstance(item, dict) else None
+                    ),
                     "revised_prompt": (
                         item.get("revised_prompt")
                         if isinstance(item, dict)
