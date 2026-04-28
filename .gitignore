@@ -1,5 +1,10 @@
 .venv/
 .codex/
+.python/
+.tools/
+.uv-cache/
+.pip-cache/
+.npm-cache/
 .pnpm-store/
 __pycache__/
 *.py[cod]
