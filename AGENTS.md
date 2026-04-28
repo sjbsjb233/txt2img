@@ -4,7 +4,7 @@
 
 - Run `scripts/setup-python-env.sh` from the repository root before Python or browser-based work.
 - The script installs a project-local Python runtime with `uv` under `.python/`, creates `.venv/` from that runtime, installs `backend/requirements.txt`, installs frontend dependencies with pnpm, and installs the Playwright Chromium browser into `.playwright-browsers/`.
-- The default Python version is `3.14`, which resolves to the latest available 3.14 patch release. Override with `PYTHON_VERSION=3.x scripts/setup-python-env.sh`.
+- The default Python version is `3.12`, matching the backend Docker production image. Override with `PYTHON_VERSION=3.x scripts/setup-python-env.sh`.
 - If `pnpm` is not installed, the setup script falls back to `npm exec pnpm@latest` with a project-local npm cache under `.npm-cache/`.
 - For every registered git worktree, run `scripts/setup-python-env.sh --all-worktrees` from the main worktree.
 - Do not copy `.python/` or `.venv/` between worktrees. Both contain absolute paths, so each worktree needs its own runtime and environment.

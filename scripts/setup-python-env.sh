@@ -3,7 +3,7 @@ set -euo pipefail
 
 PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 VENV_DIR="${VENV_DIR:-$PROJECT_ROOT/.venv}"
-PYTHON_VERSION="${PYTHON_VERSION:-3.14}"
+PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 TOOLS_DIR="${TOOLS_DIR:-$PROJECT_ROOT/.tools}"
 UV_BIN="${UV_BIN:-$TOOLS_DIR/bin/uv}"
 UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-$PROJECT_ROOT/.python}"
@@ -21,7 +21,7 @@ Usage:
   scripts/setup-python-env.sh [--all-worktrees] [--skip-playwright]
 
 Environment variables:
-  PYTHON_VERSION      Python version to install with uv. Default: 3.14
+  PYTHON_VERSION      Python version to install with uv. Default: 3.12
   UV_BIN              uv executable path. Default: <repo>/.tools/bin/uv
   UV_PYTHON_INSTALL_DIR
                       Python runtime install path. Default: <repo>/.python
