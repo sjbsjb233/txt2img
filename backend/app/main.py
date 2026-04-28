@@ -12,12 +12,14 @@ import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.adapters.base import AdapterRegistry
 from app.api.admin.adapters import router as admin_adapters_router
 from app.api.admin.config import router as admin_config_router
+from app.api.admin.providers import router as admin_providers_router
 from app.api.admin.tiers import router as admin_tiers_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
@@ -27,6 +29,7 @@ from app.db import seed as db_seed
 from app.db.migrate import upgrade_to_head
 from app.domain.config_center import get_config_center
 from app.domain.tier_config import get_tier_config
+from app.utils.crypto import CryptoError
 
 logger = logging.getLogger("txt2img")
 
@@ -91,10 +94,36 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Surface a corrupted ``providers.api_key_enc`` row as a clean 500
+    # rather than letting the raw exception escape past starlette's
+    # exception middleware. Per ``app/utils/crypto.py``: a row whose
+    # ciphertext we can't decrypt is broken state we cannot paper
+    # over. The 500 message is generic — operators look at the log
+    # for the offending provider id (logged by ``_view_from_parts``).
+    @app.exception_handler(CryptoError)
+    async def _crypto_error_handler(  # type: ignore[unused-ignore]
+        request: Request, exc: CryptoError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": {
+                    "code": "CRYPTO_ERROR",
+                    "message": (
+                        "A stored secret could not be decrypted. "
+                        "Check JWT_SECRET and the affected provider row."
+                    ),
+                    "field": None,
+                    "extra": None,
+                }
+            },
+        )
+
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(admin_adapters_router)
     app.include_router(admin_config_router)
+    app.include_router(admin_providers_router)
     app.include_router(admin_tiers_router)
     return app
 
