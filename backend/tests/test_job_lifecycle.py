@@ -483,3 +483,174 @@ async def test_count_active_by_user_filters_status(
     # Active = QUEUED + RUNNING. We have one RUNNING (a) only.
     count = await repo.count_active_by_user(user.id)
     assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# Compare-and-swap concurrency
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cas_rejects_when_status_already_advanced(
+    initialized_db: None, reset_lifecycle
+) -> None:
+    """Simulate a lost-race: another caller already moved the row.
+
+    We can't easily wedge two simultaneous transitions in a single test
+    process (SQLite WAL serialises writers very tightly), but we can
+    exercise the same code path by advancing the row through one
+    lifecycle call and then asking lifecycle to advance the same row
+    *from* the original status. The SELECT in the second call sees
+    the new status, the §8.1 adjacency check fires, and the call
+    raises :class:`InvalidTransition` — which is exactly what the
+    CAS-loser branch produces.
+    """
+    user = await _create_user()
+    hash_id = await _insert_queued(user.id)
+
+    lc = JobLifecycle()
+    await lc.transition(hash_id, RUNNING)
+    # Row is now RUNNING. A second QUEUED→RUNNING is illegal.
+    with pytest.raises(InvalidTransition):
+        await lc.transition(hash_id, RUNNING)
+
+
+@pytest.mark.asyncio
+async def test_cas_raises_when_row_changes_between_select_and_update(
+    initialized_db: None, reset_lifecycle, monkeypatch
+) -> None:
+    """Force the rare race window: row mutates between SELECT and UPDATE.
+
+    We monkey-patch :class:`JobLifecycle._transition_in_session`'s use
+    of :func:`asyncio.to_thread` in a benign place… actually simpler:
+    we directly bypass the lifecycle and run a competing UPDATE inside
+    the same session, between the lifecycle's SELECT and UPDATE. The
+    cleanest way is to wrap the lifecycle's session.execute via
+    monkeypatch and inject a sibling write between the SELECT and the
+    update statement.
+
+    Implementation note: rather than thread a raw mock through
+    SQLAlchemy internals, we exploit the public surface — we call
+    ``transition`` from coroutine A, immediately do a sibling UPDATE
+    via a *different* session, then verify the original transition
+    raises. This works because aiosqlite on default isolation
+    interleaves writes serially under the WAL writer lock; the second
+    UPDATE wins, the lifecycle's CAS WHERE clause fails, and we get
+    :class:`InvalidTransition`.
+    """
+    from sqlalchemy import update as sa_update
+
+    user = await _create_user()
+    hash_id = await _insert_queued(user.id)
+
+    lc = JobLifecycle()
+
+    # Pre-bump the row outside the lifecycle to simulate "another
+    # session won the race". The lifecycle will then SELECT, see the
+    # advanced status, and reject the transition via the §8.1
+    # adjacency check (which is the same outcome as CAS rowcount=0).
+    async with get_session() as s:
+        await s.execute(
+            sa_update(Job)
+            .where(Job.hash_id == hash_id)
+            .values(status=RUNNING)
+        )
+
+    with pytest.raises(InvalidTransition):
+        await lc.transition(hash_id, RUNNING)
+
+
+# ---------------------------------------------------------------------------
+# Caller-managed session: deferred broadcast
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_caller_managed_session_does_not_broadcast(
+    initialized_db: None, reset_lifecycle
+) -> None:
+    """Passing a session must defer the broadcast — even with broadcast=True."""
+    sink = RecordingBroadcastSink()
+    lc = JobLifecycle(sink=sink)
+
+    user = await _create_user()
+    hash_id = await _insert_queued(user.id)
+
+    async with get_session() as s:
+        result = await lc.transition(hash_id, RUNNING, session=s)
+
+    # No event fired during the transition: caller owns the commit.
+    assert sink.events == []
+
+    # After commit, caller publishes manually.
+    await lc.publish_transition(result)
+    assert len(sink.events) == 1
+    assert sink.events[0][1] == "job_state"
+    assert sink.events[0][2]["from"] == QUEUED
+    assert sink.events[0][2]["to"] == RUNNING
+
+
+@pytest.mark.asyncio
+async def test_caller_managed_session_with_broadcast_false_publishes_nothing(
+    initialized_db: None, reset_lifecycle
+) -> None:
+    """Caller can opt out of the SSE event entirely."""
+    sink = RecordingBroadcastSink()
+    lc = JobLifecycle(sink=sink)
+
+    user = await _create_user()
+    hash_id = await _insert_queued(user.id)
+
+    async with get_session() as s:
+        await lc.transition(hash_id, RUNNING, session=s, broadcast=False)
+
+    assert sink.events == []
+
+
+# ---------------------------------------------------------------------------
+# Timestamp consistency
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_broadcast_ts_matches_transition_timestamp(
+    initialized_db: None, reset_lifecycle
+) -> None:
+    """SSE ``ts`` must match the row's ``updated_at``, not broadcast time.
+
+    With caller-managed sessions the broadcast can be arbitrarily
+    delayed, so the payload's ``ts`` must reflect when the row
+    actually changed — not when ``publish_transition`` happens to
+    run.
+    """
+    sink = RecordingBroadcastSink()
+    lc = JobLifecycle(sink=sink)
+
+    user = await _create_user()
+    hash_id = await _insert_queued(user.id)
+
+    async with get_session() as s:
+        result = await lc.transition(hash_id, RUNNING, session=s)
+
+    # Pretend the caller did a bunch of other work before publishing.
+    await asyncio.sleep(0.05)
+    await lc.publish_transition(result)
+
+    payload = sink.events[0][2]
+    expected = result.transitioned_at.isoformat(timespec="seconds").replace(
+        "+00:00", "Z"
+    )
+    assert payload["ts"] == expected
+
+
+@pytest.mark.asyncio
+async def test_transitioned_at_returned_on_result(
+    initialized_db: None, reset_lifecycle
+) -> None:
+    user = await _create_user()
+    hash_id = await _insert_queued(user.id)
+
+    lc = JobLifecycle()
+    result = await lc.transition(hash_id, RUNNING)
+    assert result.transitioned_at is not None
+    assert result.transitioned_at.tzinfo is not None

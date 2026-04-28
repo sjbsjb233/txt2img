@@ -224,6 +224,31 @@ async def test_patch_empty_body_returns_400(
 
 
 @pytest.mark.asyncio
+async def test_patch_explicit_null_name_returns_422(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """``{"name": null}`` is a non-empty body that does nothing — reject it.
+
+    Letting it through would silently bump ``updated_at`` and reorder
+    the user's session list with no observable rename. The request is
+    almost certainly a frontend bug; surface it as 422 so it's visible.
+    """
+    token = await _login_admin(seeded_app)
+    create = await seeded_app.post(
+        "/api/sessions", json={"name": "x"}, headers=_auth(token)
+    )
+    sid = create.json()["id"]
+
+    resp = await seeded_app.patch(
+        f"/api/sessions/{sid}", json={"name": None}, headers=_auth(token)
+    )
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["detail"]["code"] == "INVALID_PARAMETER"
+    assert body["detail"]["field"] == "name"
+
+
+@pytest.mark.asyncio
 async def test_patch_other_users_session_returns_404(
     seeded_app: httpx.AsyncClient,
 ) -> None:

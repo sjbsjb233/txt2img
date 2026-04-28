@@ -167,6 +167,22 @@ async def patch_session(
             400, "BAD_REQUEST", "PATCH body must contain at least one field."
         )
 
+    # ``name`` is the only mutable field today, but the schema declares
+    # it as ``str | None`` so pydantic accepts ``{"name": null}`` (which
+    # is technically a non-empty body — ``set_fields`` contains "name"
+    # — yet nothing is actually being asked to change). Letting that
+    # request through would silently bump ``updated_at`` and reorder
+    # the user's session list, which is surprising. Reject it as
+    # 422 INVALID_PARAMETER instead. Field omission still works (the
+    # field isn't in ``set_fields`` then).
+    if "name" in set_fields and body.name is None:
+        raise api_error(
+            422,
+            "INVALID_PARAMETER",
+            "'name' cannot be null.",
+            field="name",
+        )
+
     async with get_session() as session:
         row = (
             await session.execute(

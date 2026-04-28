@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.engine import get_session
@@ -195,17 +195,23 @@ class JobsRepository:
         capacity" until the real :class:`JobQueue` lands in PR-11. We
         place it here rather than in PR-09 because the SELECT pattern
         belongs alongside the other ``jobs`` access helpers.
+
+        Implemented as a single ``SELECT COUNT(*)`` so the DB does the
+        counting and only one scalar comes back over the wire — at
+        scale a per-row materialisation would dominate this call.
         """
         async def _count(s: AsyncSession) -> int:
-            rows = (
+            value = (
                 await s.execute(
-                    select(Job.id).where(
+                    select(func.count())
+                    .select_from(Job)
+                    .where(
                         Job.user_id == user_id,
                         Job.status.in_(("QUEUED", "RUNNING")),
                     )
                 )
-            ).all()
-            return len(rows)
+            ).scalar_one()
+            return int(value)
 
         if session is None:
             async with get_session() as s:
