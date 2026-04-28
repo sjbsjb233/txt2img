@@ -61,9 +61,13 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
     from app.domain.access_policy import reset_access_policy_for_tests
     from app.domain.circuit_breaker import reset_circuit_breaker_for_tests
     from app.domain.config_center import reset_config_center_for_tests
+    from app.domain.job_executor import reset_job_executor_for_tests
+    from app.domain.job_queue import reset_job_queue_for_tests
+    from app.domain.job_scheduler import reset_job_scheduler_for_tests
     from app.domain.metrics_engine import reset_metrics_engine_for_tests
     from app.domain.provider_selector import reset_provider_selector_for_tests
     from app.domain.quota_guard import reset_quota_guard_for_tests
+    from app.domain.soft_penalty import reset_soft_penalty_for_tests
     from app.domain.tier_config import reset_tier_config_for_tests
 
     # Singletons persist at module level; tests with fresh DBs need a
@@ -75,6 +79,10 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
     reset_metrics_engine_for_tests()
     reset_circuit_breaker_for_tests()
     reset_provider_selector_for_tests()
+    reset_job_queue_for_tests()
+    reset_job_executor_for_tests()
+    reset_job_scheduler_for_tests()
+    reset_soft_penalty_for_tests()
 
     upgrade_to_head()
     db_engine.init_engine()
@@ -89,6 +97,10 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
         reset_metrics_engine_for_tests()
         reset_circuit_breaker_for_tests()
         reset_provider_selector_for_tests()
+        reset_job_queue_for_tests()
+        reset_job_executor_for_tests()
+        reset_job_scheduler_for_tests()
+        reset_soft_penalty_for_tests()
 
 
 @pytest_asyncio.fixture
@@ -112,9 +124,13 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
     from app.domain.access_policy import reset_access_policy_for_tests
     from app.domain.circuit_breaker import reset_circuit_breaker_for_tests
     from app.domain.config_center import reset_config_center_for_tests
+    from app.domain.job_executor import reset_job_executor_for_tests
+    from app.domain.job_queue import reset_job_queue_for_tests
+    from app.domain.job_scheduler import reset_job_scheduler_for_tests
     from app.domain.metrics_engine import reset_metrics_engine_for_tests
     from app.domain.provider_selector import reset_provider_selector_for_tests
     from app.domain.quota_guard import reset_quota_guard_for_tests
+    from app.domain.soft_penalty import reset_soft_penalty_for_tests
     from app.domain.tier_config import reset_tier_config_for_tests
 
     get_settings.cache_clear()
@@ -125,6 +141,10 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
     reset_metrics_engine_for_tests()
     reset_circuit_breaker_for_tests()
     reset_provider_selector_for_tests()
+    reset_job_queue_for_tests()
+    reset_job_executor_for_tests()
+    reset_job_scheduler_for_tests()
+    reset_soft_penalty_for_tests()
 
     # Import here so env vars are already in place before Settings is
     # instantiated by anything down the import graph.
@@ -147,3 +167,7 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
     reset_metrics_engine_for_tests()
     reset_circuit_breaker_for_tests()
     reset_provider_selector_for_tests()
+    reset_job_queue_for_tests()
+    reset_job_executor_for_tests()
+    reset_job_scheduler_for_tests()
+    reset_soft_penalty_for_tests()

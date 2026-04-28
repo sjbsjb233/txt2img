@@ -25,9 +25,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Protocol
+from typing import Any, Protocol, cast
 
 from sqlalchemy import case, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.engine import get_session
@@ -201,10 +202,13 @@ class QuotaGuard:
         today = beijing_today()
 
         async def _reset(s: AsyncSession) -> int:
-            result = await s.execute(
-                update(User)
-                .where(User.today_reset_date != today)
-                .values(today_count=0, today_reset_date=today)
+            result = cast(
+                CursorResult[Any],
+                await s.execute(
+                    update(User)
+                    .where(User.today_reset_date != today)
+                    .values(today_count=0, today_reset_date=today)
+                ),
             )
             return int(result.rowcount or 0)
 

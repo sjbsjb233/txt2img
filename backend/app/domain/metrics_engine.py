@@ -50,7 +50,7 @@ import logging
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Awaitable, Callable, Iterable
 
 from sqlalchemy import update
 
@@ -481,12 +481,7 @@ async def run_metrics_snapshot_loop(
         await asyncio.sleep(interval_seconds)
 
 
-# Type alias used purely for documentation in the loop signature.
-class ProviderIdsProvider:
-    """Async callable returning the set of provider ids to snapshot."""
-
-    async def __call__(self) -> Iterable[str]:  # pragma: no cover - protocol
-        ...
+ProviderIdsProvider = Callable[[], Awaitable[Iterable[str]]]
 
 
 # ---------------------------------------------------------------------------

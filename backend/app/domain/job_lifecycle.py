@@ -55,9 +55,10 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping, Protocol
+from typing import Any, Mapping, Protocol, cast
 
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.engine import get_session
@@ -407,7 +408,7 @@ class JobLifecycle:
             .where(Job.hash_id == hash_id, Job.status == from_status)
             .values(**update_values)
         )
-        result = await session.execute(cas_stmt)
+        result = cast(CursorResult[Any], await session.execute(cas_stmt))
         if result.rowcount == 0:
             raise InvalidTransition(
                 f"concurrent transition lost for {hash_id!r}: status "
