@@ -15,12 +15,16 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.admin.config import router as admin_config_router
+from app.api.admin.tiers import router as admin_tiers_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
 from app.config import get_settings
 from app.db import engine as db_engine
 from app.db import seed as db_seed
 from app.db.migrate import upgrade_to_head
+from app.domain.config_center import get_config_center
+from app.domain.tier_config import get_tier_config
 
 logger = logging.getLogger("txt2img")
 
@@ -50,6 +54,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     db_engine.init_engine()
     await db_seed.bootstrap()
 
+    # Hydrate the in-memory config caches before any route handler runs.
+    # Both reads must succeed: the scheduler / access policy / etc. that
+    # PR-09+ wire on top assume both caches are warm at startup.
+    await get_config_center().load_from_db()
+    await get_tier_config().load_from_db()
+
     try:
         yield
     finally:
@@ -74,6 +84,8 @@ def create_app() -> FastAPI:
     )
     app.include_router(health_router)
     app.include_router(auth_router)
+    app.include_router(admin_config_router)
+    app.include_router(admin_tiers_router)
     return app
 
 
