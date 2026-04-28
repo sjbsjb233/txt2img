@@ -1,0 +1,548 @@
+"""Job state machine — the only allowed writer of ``jobs.status`` for
+existing rows.
+
+Every transition between the six statuses defined in design doc §8.1
+flows through :meth:`JobLifecycle.transition`. Centralising writes here
+gives us four load-bearing guarantees that the rest of the system
+relies on:
+
+1. **State validity.** The graph in §8.1 is enforced as data, not as
+   "I'll remember to check"; an executor or admin handler that tries
+   to take ``SUCCEEDED → RUNNING`` gets an :class:`InvalidTransition`
+   instead of silently corrupting the row.
+2. **Concurrency safety.** The DB write is a compare-and-swap UPDATE
+   (``WHERE hash_id = ? AND status = expected_from``). Two callers
+   that both observe ``QUEUED`` and try to advance to ``RUNNING``
+   serialise through SQLite's WAL writer lock; the second's ``WHERE``
+   clause won't match and the call raises :class:`InvalidTransition`
+   instead of silently last-commit-wins clobbering the first.
+3. **Side effects move together with state.** ``timeline.jsonl`` gets
+   appended in the same call that flips ``jobs.status``; nothing in the
+   codebase writes one without the other. Likewise the SSE
+   ``job_state`` broadcast is part of the same atomic step from the
+   caller's point of view, *but* — see (4) — it is deferred for
+   caller-managed sessions.
+4. **No hidden mutators.** A grep for ``Job.status =`` outside this
+   module should return zero hits **for already-persisted rows**. The
+   single exception is ``JobsRepository.insert_queued`` which sets
+   ``status='QUEUED'`` on the initial INSERT; once a row exists in the
+   DB, lifecycle is the only path that changes it.
+
+PR-12 wires a real SSE hub. Until then, the broadcast happens through
+:class:`BroadcastSink`, an interface lifecycle takes by injection. The
+default sink is a no-op so calling code doesn't have to care whether
+the hub is available — tests can drop in a recording sink to assert on
+what the lifecycle would have published.
+
+Broadcast ordering with caller-managed sessions
+-----------------------------------------------
+When the caller passes its own :class:`AsyncSession`, the lifecycle
+can't know when the surrounding transaction will commit. Auto-broadcast
+in that mode would risk emitting a ``job_state`` event for a transition
+that later rolls back. The contract is therefore:
+
+- ``transition(...)`` (no ``session`` kwarg): we open + commit our
+  own session and broadcast immediately after commit. The 90% case.
+- ``transition(..., session=s)``: we update the row inside ``s``,
+  return :class:`TransitionResult`, and **do not broadcast**. The
+  caller is responsible for calling :meth:`publish_transition` after
+  ``s.commit()`` returns.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Mapping, Protocol
+
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.engine import get_session
+from app.db.models import Job
+from app.services.image_io import append_timeline
+
+logger = logging.getLogger("txt2img.job_lifecycle")
+
+
+# ---------------------------------------------------------------------------
+# State graph
+# ---------------------------------------------------------------------------
+
+
+# All status values that may appear in ``jobs.status``. The DB CHECK
+# constraint enforces this set too — keep the two in lockstep.
+QUEUED = "QUEUED"
+RUNNING = "RUNNING"
+SUCCEEDED = "SUCCEEDED"
+FAILED = "FAILED"
+CANCELLED = "CANCELLED"
+DELETED = "DELETED"
+
+
+VALID_STATUSES: frozenset[str] = frozenset(
+    {QUEUED, RUNNING, SUCCEEDED, FAILED, CANCELLED, DELETED}
+)
+
+
+# Adjacency list copied straight from design doc §8.1. ``None`` is the
+# pseudo state from which a fresh job emerges; ``transition`` allows
+# ``None → QUEUED`` so the create-job path can use the same code path.
+_ALLOWED_TRANSITIONS: dict[str | None, frozenset[str]] = {
+    # Job creation: insert with status=QUEUED.
+    None: frozenset({QUEUED}),
+    # QUEUED can be picked up, cancelled, or hard-failed (e.g. captcha
+    # invalid / NO_PROVIDER_AVAILABLE before dispatch).
+    QUEUED: frozenset({RUNNING, CANCELLED, FAILED}),
+    # RUNNING can finish, fail, or be cancelled mid-flight.
+    RUNNING: frozenset({SUCCEEDED, FAILED, CANCELLED}),
+    # Terminal-ish: only "user/admin/cleanup deletes the row" is allowed.
+    SUCCEEDED: frozenset({DELETED}),
+    FAILED: frozenset({DELETED}),
+    CANCELLED: frozenset({DELETED}),
+    # DELETED is final: nothing further. Cleanup of the on-disk dir
+    # happens through the cache_keeper, not the lifecycle.
+    DELETED: frozenset(),
+}
+
+
+class InvalidTransition(ValueError):
+    """Raised when a caller asks for a state change the §8.1 graph forbids."""
+
+
+class JobNotFound(LookupError):
+    """Raised when the lifecycle is asked to transition an id we can't find."""
+
+
+# ---------------------------------------------------------------------------
+# Broadcast sink
+# ---------------------------------------------------------------------------
+
+
+class BroadcastSink(Protocol):
+    """Minimal interface PR-12's SSE hub will satisfy.
+
+    Lifecycle calls :meth:`broadcast_to_user` immediately after persisting
+    a status change. Until the real hub lands the lifecycle uses a no-op
+    sink so calling code doesn't need a feature flag.
+
+    Implementations must be safe to call from inside an async task and
+    must not raise on bad payloads — failures here should not roll the
+    transition back. The PR-12 hub will satisfy that by serialising
+    payloads and swallowing transport errors per-client.
+    """
+
+    async def broadcast_to_user(
+        self, user_id: str, event: str, payload: Mapping[str, Any]
+    ) -> None: ...
+
+
+class NullBroadcastSink:
+    """The default sink: drops everything. Used until PR-12 wires the hub.
+
+    Concrete (not a Protocol) so callers can store it in module-level
+    variables without losing the type. Behaviour: log at DEBUG only.
+    """
+
+    async def broadcast_to_user(
+        self, user_id: str, event: str, payload: Mapping[str, Any]
+    ) -> None:
+        logger.debug(
+            "null sink: drop event=%s user=%s payload_keys=%s",
+            event,
+            user_id,
+            list(payload.keys()),
+        )
+
+
+class RecordingBroadcastSink:
+    """Test-friendly sink that captures every broadcast in order.
+
+    Lifecycle tests use this to assert "transitioning from QUEUED to
+    RUNNING fired one ``job_state`` event with the right payload" without
+    standing up the SSE hub.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def broadcast_to_user(
+        self, user_id: str, event: str, payload: Mapping[str, Any]
+    ) -> None:
+        self.events.append((user_id, event, dict(payload)))
+
+
+# ---------------------------------------------------------------------------
+# Result type
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TransitionResult:
+    """Snapshot of the post-transition row.
+
+    Convenient for callers that want to log without re-querying. We
+    return a frozen dataclass rather than the live ``Job`` ORM instance
+    so the lifecycle's session lifecycle is fully encapsulated and
+    callers can't accidentally mutate the row through it.
+
+    ``transitioned_at`` is the single timestamp shared by the DB row's
+    ``updated_at`` (and ``finished_at`` when terminal), the
+    ``timeline.jsonl`` event's ``ts``, and the broadcast payload's
+    ``ts``. Carrying it on the result lets a caller emit a deferred
+    SSE event whose ``ts`` matches the on-disk audit log exactly,
+    even when the broadcast happens seconds after the DB commit.
+    """
+
+    job_id: str
+    hash_id: str
+    user_id: str
+    seq_no: int
+    set_id: str | None
+    model: str
+    from_status: str | None
+    to_status: str
+    reason: str | None
+    finished_at: datetime | None
+    transitioned_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# JobLifecycle
+# ---------------------------------------------------------------------------
+
+
+# Mapping from terminal state → which timestamp column to set. The job
+# scheduler / executor already sets ``dispatched_at`` and ``started_at``
+# directly because they are about pre-RUNNING / RUNNING transitions
+# respectively; the lifecycle only owns the final timestamp.
+_TIMESTAMP_FOR_TERMINAL: dict[str, str] = {
+    SUCCEEDED: "finished_at",
+    FAILED: "finished_at",
+    CANCELLED: "finished_at",
+}
+
+
+class JobLifecycle:
+    """The single writer of ``jobs.status``.
+
+    Stateless aside from the broadcast sink. PR-12 swaps the sink for
+    the real SSE hub via :func:`set_broadcast_sink`; until then the
+    process-wide default is :class:`NullBroadcastSink`.
+    """
+
+    def __init__(self, sink: BroadcastSink | None = None) -> None:
+        self._sink: BroadcastSink = sink or NullBroadcastSink()
+
+    # -- sink wiring ------------------------------------------------------
+
+    def set_sink(self, sink: BroadcastSink) -> None:
+        """Replace the broadcast sink (PR-12 plugs the SSE hub in here)."""
+        self._sink = sink
+
+    @property
+    def sink(self) -> BroadcastSink:
+        return self._sink
+
+    # -- transition -------------------------------------------------------
+
+    async def transition(
+        self,
+        hash_id: str,
+        to_status: str,
+        *,
+        reason: str | None = None,
+        broadcast: bool = True,
+        session: AsyncSession | None = None,
+        extra_timeline: Mapping[str, Any] | None = None,
+    ) -> TransitionResult:
+        """Move ``hash_id`` to ``to_status`` atomically.
+
+        Steps, in order:
+
+        1. Validate ``to_status``.
+        2. SELECT the current row (id / user / status / etc.) so we
+           know the ``from_status`` for the §8.1 adjacency check and
+           for the timeline / broadcast payload.
+        3. Verify the §8.1 adjacency allows ``current → to_status``.
+        4. Issue a single compare-and-swap UPDATE
+           (``WHERE hash_id = :h AND status = :expected``). If the
+           rowcount is 0, another transaction won the race; raise
+           :class:`InvalidTransition`.
+        5. Append one event to ``timeline.jsonl`` — off the event loop
+           via :func:`asyncio.to_thread` so the synchronous file write
+           never stalls unrelated requests.
+        6. Commit (when we own the session) and broadcast.
+
+        Broadcast contract:
+
+        - ``session`` omitted → we own the commit. Broadcast happens
+          immediately after commit, regardless of ``broadcast=True``
+          (the default).
+        - ``session`` provided → caller owns the commit. Broadcast is
+          **always** deferred. To publish the SSE event, the caller
+          must invoke :meth:`publish_transition` after their commit
+          returns. ``broadcast=True`` in this mode is silently ignored
+          (we log a debug record); ``broadcast=False`` is also fine.
+        """
+        if to_status not in VALID_STATUSES:
+            raise InvalidTransition(
+                f"unknown status {to_status!r}; must be one of {sorted(VALID_STATUSES)}"
+            )
+
+        caller_managed = session is not None
+
+        if session is None:
+            async with get_session() as new_session:
+                result = await self._transition_in_session(
+                    new_session,
+                    hash_id,
+                    to_status,
+                    reason=reason,
+                    extra_timeline=extra_timeline,
+                )
+        else:
+            result = await self._transition_in_session(
+                session,
+                hash_id,
+                to_status,
+                reason=reason,
+                extra_timeline=extra_timeline,
+            )
+
+        # Caller-managed sessions defer the broadcast to ``publish_transition``
+        # so we never emit an SSE event for a row that later rolls back.
+        if broadcast and not caller_managed:
+            await self._broadcast(result)
+        elif broadcast and caller_managed:
+            logger.debug(
+                "lifecycle: broadcast deferred for caller-managed session "
+                "(job=%s, %s -> %s); call publish_transition() after commit",
+                hash_id,
+                result.from_status,
+                to_status,
+            )
+        return result
+
+    async def publish_transition(self, result: TransitionResult) -> None:
+        """Broadcast ``job_state`` for a result returned by ``transition``.
+
+        Use only with caller-managed sessions. After ``await session.commit()``
+        (or scope exit) call this to emit the SSE event the executor (PR-11)
+        and admin tools depend on::
+
+            async with get_session() as s:
+                result = await lc.transition(hash, RUNNING, session=s)
+                # ... other writes inside the same tx ...
+            # session committed here
+            await lc.publish_transition(result)
+
+        Callers can opt out of the broadcast entirely by skipping the
+        post-commit call; that is intentional — bulk admin operations
+        sometimes need to suppress per-row SSE noise.
+        """
+        await self._broadcast(result)
+
+    async def _transition_in_session(
+        self,
+        session: AsyncSession,
+        hash_id: str,
+        to_status: str,
+        *,
+        reason: str | None,
+        extra_timeline: Mapping[str, Any] | None,
+    ) -> TransitionResult:
+        # SELECT the columns we actually need rather than the full ORM
+        # object. We don't mutate the row through the ORM here — the
+        # actual write is a compare-and-swap UPDATE further down — so
+        # loading a tuple of scalars keeps us out of the identity map
+        # (no stale snapshot to expire later).
+        row = (
+            await session.execute(
+                select(
+                    Job.id,
+                    Job.user_id,
+                    Job.seq_no,
+                    Job.set_id,
+                    Job.model,
+                    Job.status,
+                    Job.finished_at,
+                ).where(Job.hash_id == hash_id)
+            )
+        ).one_or_none()
+        if row is None:
+            raise JobNotFound(f"job hash_id={hash_id!r} not found")
+
+        job_id, user_id, seq_no, set_id, model, from_status, current_finished_at = row
+
+        if to_status not in _ALLOWED_TRANSITIONS.get(from_status, frozenset()):
+            raise InvalidTransition(
+                f"illegal transition {from_status!r} -> {to_status!r} "
+                f"for job {hash_id!r}"
+            )
+
+        now = datetime.now(timezone.utc)
+        update_values: dict[str, Any] = {
+            "status": to_status,
+            "status_reason": reason,
+            "updated_at": now,
+        }
+        new_finished_at = current_finished_at
+        terminal_field = _TIMESTAMP_FOR_TERMINAL.get(to_status)
+        if terminal_field is not None and current_finished_at is None:
+            update_values[terminal_field] = now
+            new_finished_at = now
+
+        # Compare-and-swap: the WHERE clause includes the status we
+        # observed during the SELECT. SQLite's WAL serialises writers,
+        # so a concurrent transaction that landed first will have
+        # changed ``status`` and our rowcount will be 0. Raising
+        # :class:`InvalidTransition` here is the correct outcome —
+        # the caller's view of the world is stale and they must reload
+        # before retrying.
+        cas_stmt = (
+            update(Job)
+            .where(Job.hash_id == hash_id, Job.status == from_status)
+            .values(**update_values)
+        )
+        result = await session.execute(cas_stmt)
+        if result.rowcount == 0:
+            raise InvalidTransition(
+                f"concurrent transition lost for {hash_id!r}: status "
+                f"changed since read (expected {from_status!r}, "
+                f"target {to_status!r})"
+            )
+
+        # Append the timeline event off the event loop. ``append_timeline``
+        # opens the file, writes a JSON line, and closes — synchronous I/O
+        # that, on a slow disk under SSE-broadcast load, would block every
+        # other coroutine sharing this loop. ``asyncio.to_thread`` punts it
+        # to the default ThreadPoolExecutor.
+        #
+        # We swallow OSError because the DB row is the canonical record;
+        # an unwriteable ``timeline.jsonl`` is a debug-aid problem, not a
+        # state problem.
+        event: dict[str, Any] = {
+            "from": from_status,
+            "to": to_status,
+        }
+        if reason is not None:
+            event["reason"] = reason
+        if extra_timeline:
+            # Caller-supplied keys are namespaced under "extra" so
+            # they can never overwrite the canonical from/to/reason.
+            event["extra"] = dict(extra_timeline)
+        try:
+            await asyncio.to_thread(append_timeline, hash_id, event)
+        except OSError:
+            logger.warning(
+                "timeline append failed for job=%s; DB transition kept",
+                hash_id,
+                exc_info=True,
+            )
+
+        logger.info(
+            "lifecycle: job=%s %s -> %s reason=%s",
+            hash_id,
+            from_status,
+            to_status,
+            reason,
+        )
+
+        return TransitionResult(
+            job_id=job_id,
+            hash_id=hash_id,
+            user_id=user_id,
+            seq_no=seq_no,
+            set_id=set_id,
+            model=model,
+            from_status=from_status,
+            to_status=to_status,
+            reason=reason,
+            finished_at=new_finished_at,
+            transitioned_at=now,
+        )
+
+    async def _broadcast(self, result: TransitionResult) -> None:
+        """Publish a ``job_state`` event for the post-transition snapshot.
+
+        Payload mirrors design doc §8.5.3. Image / progress fields are
+        deliberately omitted here — they are filled in by the executor
+        via dedicated ``job_progress`` and ``job_state SUCCEEDED`` events
+        that ride the same SSE channel (PR-11 / PR-12).
+
+        ``ts`` is sourced from ``result.transitioned_at`` so SSE events
+        line up exactly with the timestamp that landed in the DB row's
+        ``updated_at`` column and the ``timeline.jsonl`` event. Without
+        this, a deferred broadcast (e.g. one published seconds after
+        ``commit`` because the caller had other work to do first) would
+        carry a different timestamp than the audit log line.
+        """
+        payload = {
+            "hash_id": result.hash_id,
+            "set_id": result.set_id,
+            "seq_no": result.seq_no,
+            "model": result.model,
+            "from": result.from_status,
+            "to": result.to_status,
+            "ts": _isoformat(result.transitioned_at),
+            "reason": result.reason,
+        }
+        try:
+            await self._sink.broadcast_to_user(
+                result.user_id, "job_state", payload
+            )
+        except Exception:
+            # The sink is responsible for not raising in normal
+            # operation. Catching here is defense-in-depth so a buggy
+            # sink can never roll back a state change that already
+            # committed.
+            logger.exception(
+                "lifecycle broadcast sink raised for job=%s; ignored",
+                result.hash_id,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton
+# ---------------------------------------------------------------------------
+
+
+_instance: JobLifecycle | None = None
+
+
+def get_job_lifecycle() -> JobLifecycle:
+    """Return the process-wide :class:`JobLifecycle` singleton."""
+    global _instance
+    if _instance is None:
+        _instance = JobLifecycle()
+    return _instance
+
+
+def set_broadcast_sink(sink: BroadcastSink) -> None:
+    """Install ``sink`` on the singleton. PR-12 calls this once at startup."""
+    get_job_lifecycle().set_sink(sink)
+
+
+def reset_job_lifecycle_for_tests() -> None:
+    """Drop the singleton and any installed sink. Tests-only."""
+    global _instance
+    _instance = None
+
+
+# ---------------------------------------------------------------------------
+# Tiny helpers
+# ---------------------------------------------------------------------------
+
+
+def _isoformat(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    # ``timespec='seconds'`` matches the format ``image_io._utc_now_iso``
+    # writes into ``timeline.jsonl`` so SSE payload timestamps and the
+    # on-disk audit log line up exactly.
+    return value.isoformat(timespec="seconds").replace("+00:00", "Z")
