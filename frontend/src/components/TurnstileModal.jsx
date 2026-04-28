@@ -19,10 +19,17 @@ export default function TurnstileModal({ open, onClose, onContinue, siteKey }) {
   const [loadError, setLoadError] = useState("");
 
   // Mount the widget when the modal opens; tear it down when it closes so
-  // the next open gets a fresh challenge.
+  // the next open gets a fresh challenge. Always clear `token` and
+  // `loadError` on close / on the no-siteKey path so a previously
+  // captured token can't keep Continue enabled across reopens.
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      setToken("");
+      setLoadError("");
+      return;
+    }
     if (!siteKey) {
+      setToken("");
       setLoadError("Turnstile is not configured on the server.");
       return undefined;
     }

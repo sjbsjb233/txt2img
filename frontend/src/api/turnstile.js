@@ -22,19 +22,28 @@ export function loadTurnstile() {
   if (window.turnstile) return Promise.resolve(window.turnstile);
   if (_promise) return _promise;
 
+  // Wrap every reject so a transient failure (network blip, ad-blocker
+  // intercept, or window.turnstile missing on load) doesn't permanently
+  // pin a rejected promise on the module — next caller starts fresh.
   _promise = new Promise((resolve, reject) => {
-    const existing = document.querySelector(`script[src^="${TURNSTILE_SRC}"]`);
+    const fail = (err) => {
+      _promise = null;
+      reject(err);
+    };
     const onReady = () => {
       if (window.turnstile) resolve(window.turnstile);
-      else reject(new Error("Turnstile script loaded but window.turnstile is missing"));
+      else fail(new Error("Turnstile script loaded but window.turnstile is missing"));
     };
+    const existing = document.querySelector(`script[src^="${TURNSTILE_SRC}"]`);
     if (existing) {
       // Another consumer already injected it; just wait for load.
       if (window.turnstile) return resolve(window.turnstile);
       existing.addEventListener("load", onReady, { once: true });
-      existing.addEventListener("error", () => reject(new Error("Turnstile script failed to load")), {
-        once: true,
-      });
+      existing.addEventListener(
+        "error",
+        () => fail(new Error("Turnstile script failed to load")),
+        { once: true },
+      );
       return;
     }
     const tag = document.createElement("script");
@@ -42,10 +51,11 @@ export function loadTurnstile() {
     tag.async = true;
     tag.defer = true;
     tag.addEventListener("load", onReady, { once: true });
-    tag.addEventListener("error", () => {
-      _promise = null; // allow retry
-      reject(new Error("Turnstile script failed to load"));
-    });
+    tag.addEventListener(
+      "error",
+      () => fail(new Error("Turnstile script failed to load")),
+      { once: true },
+    );
     document.head.appendChild(tag);
   });
 
