@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./pages/LoginPage.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
@@ -5,26 +6,59 @@ import CreatePage from "./pages/CreatePage.jsx";
 import ArchivePage from "./pages/ArchivePage.jsx";
 import Layout from "./components/Layout.jsx";
 import RequireAuth from "./components/RequireAuth.jsx";
+import ConnectionLost from "./components/ConnectionLost.jsx";
+import { useAuth } from "./store/auth.js";
+import {
+  connect as connectSSE,
+  disconnect as disconnectSSE,
+  useConnectionState,
+} from "./store/sse.js";
 
 export default function App() {
+  const { isAuthenticated } = useAuth();
+  const conn = useConnectionState();
+
+  // Open the SSE connection whenever the user has a token, close it
+  // when they don't. The SSE client itself lives in store/sse.js — this
+  // effect only owns its lifecycle relative to auth state. We re-run on
+  // every isAuthenticated change so a logout-then-login flow lands on a
+  // brand-new stream (no leaked subscribers, no stale Last-Event-ID
+  // pointing at the previous user's buffer).
+  useEffect(() => {
+    if (isAuthenticated) {
+      connectSSE();
+      return () => disconnectSSE();
+    }
+    disconnectSSE();
+    return undefined;
+  }, [isAuthenticated]);
+
+  // Show the full-screen "connection lost" overlay only after the SSE
+  // client has tried at least 5 times in a row to reconnect. It hides
+  // automatically when status flips back to ``open``.
+  const showLost = conn.status === "lost";
+
   return (
-    <Routes>
-      <Route path="/login" element={<LoginPage />} />
-      {/* `/` lands on the dashboard, but the canonical path is /dashboard
-          so the URL bar matches the sidebar entry and external links work. */}
-      <Route path="/" element={<Navigate to="/dashboard" replace />} />
-      <Route
-        element={
-          <RequireAuth>
-            <Layout />
-          </RequireAuth>
-        }
-      >
-        <Route path="/dashboard" element={<Dashboard />} />
-        <Route path="/create" element={<CreatePage />} />
-        <Route path="/archive" element={<ArchivePage />} />
-      </Route>
-      <Route path="*" element={<Navigate to="/dashboard" replace />} />
-    </Routes>
+    <>
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        {/* `/` lands on the dashboard, but the canonical path is /dashboard
+            so the URL bar matches the sidebar entry and external links work. */}
+        <Route path="/" element={<Navigate to="/dashboard" replace />} />
+        <Route
+          element={
+            <RequireAuth>
+              <Layout />
+            </RequireAuth>
+          }
+        >
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/create" element={<CreatePage />} />
+          <Route path="/archive" element={<ArchivePage />} />
+        </Route>
+        <Route path="*" element={<Navigate to="/dashboard" replace />} />
+      </Routes>
+      {showLost && <ConnectionLost attempts={conn.attempts || 5} />}
+    </>
   );
 }

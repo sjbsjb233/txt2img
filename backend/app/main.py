@@ -27,6 +27,7 @@ from app.api.auth import router as auth_router
 from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
 from app.api.sessions import router as sessions_router
+from app.api.sse import router as sse_router
 from app.config import get_settings
 from app.db import engine as db_engine
 from app.db import seed as db_seed
@@ -34,6 +35,7 @@ from app.db.migrate import upgrade_to_head
 from app.domain.circuit_breaker import get_circuit_breaker
 from app.domain.config_center import get_config_center
 from app.domain.job_executor import get_job_executor
+from app.domain.job_lifecycle import set_broadcast_sink
 from app.domain.job_queue import get_job_queue
 from app.domain.job_scheduler import (
     get_job_scheduler,
@@ -44,6 +46,7 @@ from app.domain.metrics_engine import get_metrics_engine, run_metrics_snapshot_l
 from app.domain.provider_ledger import get_provider_ledger
 from app.domain.provider_selector import get_provider_selector
 from app.domain.quota_guard import run_quota_reset_loop
+from app.domain.sse_hub import get_sse_hub
 from app.domain.tier_config import get_tier_config
 from app.utils.crypto import CryptoError
 
@@ -95,6 +98,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     queue = get_job_queue()
     executor = get_job_executor()
     scheduler = get_job_scheduler()
+    # Wire the SSE hub before the scheduler starts so the very first
+    # ``QUEUED → RUNNING`` transition the executor performs already
+    # finds a real fanout target. With the default ``NullBroadcastSink``
+    # the lifecycle would silently drop ``job_state`` events between
+    # process start and whenever we'd otherwise install the sink.
+    sse_hub = get_sse_hub()
+    set_broadcast_sink(sse_hub)
     app.state.metrics = metrics
     app.state.breaker = breaker
     app.state.selector = selector
@@ -102,6 +112,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.queue = queue
     app.state.executor = executor
     app.state.scheduler = scheduler
+    app.state.sse_hub = sse_hub
 
     restored = await restore_queued_jobs(queue)
     if restored:
@@ -178,6 +189,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health_router)
     app.include_router(auth_router)
+    app.include_router(sse_router)
     app.include_router(sessions_router)
     app.include_router(jobs_router)
     app.include_router(admin_adapters_router)
