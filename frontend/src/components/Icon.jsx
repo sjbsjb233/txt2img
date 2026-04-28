@@ -71,6 +71,12 @@ export default function Icon({ name, size = 16, stroke = "currentColor" }) {
     ),
     "double-chevron-left": <path d="M7 4L3 8l4 4M13 4L9 8l4 4" />,
     "double-chevron-right": <path d="M3 4l4 4-4 4M9 4l4 4-4 4" />,
+    logout: (
+      <>
+        <path d="M9 2H3v12h6" />
+        <path d="M7 8h8M11 4l4 4-4 4" />
+      </>
+    ),
   };
   return (
     <svg viewBox="0 0 16 16" style={s}>

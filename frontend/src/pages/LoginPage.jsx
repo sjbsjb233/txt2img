@@ -1,7 +1,9 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import TurnstileModal from "../components/TurnstileModal.jsx";
-import { apiFetch, getApiBase, setApiBase, setToken } from "../api/client.js";
+import * as authApi from "../api/auth.js";
+import { apiFetch, getApiBase, setApiBase } from "../api/client.js";
+import { setSession } from "../store/auth.js";
 
 const CAPTIONS = [
   "issue №004 — apr 2026",
@@ -12,6 +14,7 @@ const CAPTIONS = [
 
 export default function LoginPage() {
   const [showTurnstile, setShowTurnstile] = useState(false);
+  const [siteKey, setSiteKey] = useState(null);
   const [tick, setTick] = useState(0);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -33,14 +36,9 @@ export default function LoginPage() {
   );
 
   const doLogin = async (captchaToken) => {
-    const data = await apiFetch("/api/auth/login", {
-      method: "POST",
-      body: { username, password, captcha_token: captchaToken },
-      auth: false,
-    });
-    setToken(data.access_token);
-    localStorage.setItem("user", JSON.stringify(data.user));
-    navigate("/");
+    const data = await authApi.login({ username, password, captchaToken });
+    setSession({ accessToken: data.access_token, user: data.user });
+    navigate("/dashboard");
   };
 
   const submit = async (e) => {
@@ -53,29 +51,39 @@ export default function LoginPage() {
     }
     setLoading(true);
     try {
-      const { required } = await apiFetch("/api/auth/captcha-check", {
-        method: "POST",
-        body: { username },
-        auth: false,
-      });
-      if (required) {
+      const check = await authApi.captchaCheck(username);
+      if (check && check.captcha_required) {
+        setSiteKey(check.site_key || null);
         setShowTurnstile(true);
       } else {
         await doLogin(null);
       }
     } catch (err) {
+      // CAPTCHA_REQUIRED is the silent signal: precheck said no, but the
+      // backend's rolling counter just crossed the threshold during the
+      // round trip. Open the Turnstile modal instead of showing an error.
+      if (err.code === "CAPTCHA_REQUIRED") {
+        try {
+          const fresh = await authApi.captchaCheck(username);
+          setSiteKey(fresh.site_key || null);
+          setShowTurnstile(true);
+        } catch (e2) {
+          setError(e2.message || "Login failed.");
+        }
+        return;
+      }
       setError(err.message || "Login failed.");
     } finally {
       setLoading(false);
     }
   };
 
-  const completeLogin = async () => {
+  const completeLogin = async (captchaToken) => {
     setShowTurnstile(false);
     setError("");
     setLoading(true);
     try {
-      await doLogin("dev-stub-token");
+      await doLogin(captchaToken);
     } catch (err) {
       setError(err.message || "Login failed.");
     } finally {
@@ -511,8 +519,9 @@ export default function LoginPage() {
 
       <TurnstileModal
         open={showTurnstile}
+        siteKey={siteKey}
         onClose={() => setShowTurnstile(false)}
-        onContinue={completeLogin}
+        onSuccess={completeLogin}
       />
     </div>
   );

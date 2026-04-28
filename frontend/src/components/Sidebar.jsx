@@ -2,16 +2,19 @@ import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import Icon from "./Icon.jsx";
 import { Logo, Wordmark } from "./Logo.jsx";
+import { logout as logoutFlow, useAuth } from "../store/auth.js";
 
 const NAV = [
-  { id: "dashboard", label: "Dashboard", icon: "chart", path: "/" },
+  { id: "dashboard", label: "Dashboard", icon: "chart", path: "/dashboard" },
   { id: "create", label: "Create", icon: "spark", path: "/create" },
   { id: "picker", label: "Picker", icon: "star", path: "/picker" },
   { id: "history", label: "Archive", icon: "archive", path: "/archive" },
 ];
 
+// `admin` is only rendered when the current user's role === "admin".
+// `settings` is open to everyone.
 const BOTTOM = [
-  { id: "admin", label: "Admin", icon: "user", path: "/admin" },
+  { id: "admin", label: "Admin", icon: "user", path: "/admin", adminOnly: true },
   { id: "settings", label: "Settings", icon: "gear", path: "/settings" },
 ];
 
@@ -23,12 +26,23 @@ export default function Sidebar({ defaultMode = "expanded" }) {
 
   const location = useLocation();
   const navigate = useNavigate();
+  const { user, isAdmin } = useAuth();
+  const bottomItems = BOTTOM.filter((it) => !it.adminOnly || isAdmin);
   const active =
     NAV.find((n) => n.path === location.pathname)?.id ||
-    BOTTOM.find((n) => n.path === location.pathname)?.id;
+    bottomItems.find((n) => n.path === location.pathname)?.id;
 
   const expand = () => setMode("expanded");
   const collapse = () => setMode("rail");
+
+  const logout = async () => {
+    await logoutFlow(); // best-effort POST + clearAuth + notify
+    navigate("/login", { replace: true });
+  };
+
+  const displayName = user?.display_name || user?.username || "guest";
+  const initials = (displayName || "??").slice(0, 2).toUpperCase();
+  const roleLabel = (user?.role || "user").toUpperCase();
 
   const NavBtn = ({ it, muted = false }) => {
     const on = active === it.id;
@@ -138,7 +152,7 @@ export default function Sidebar({ defaultMode = "expanded" }) {
           gap: 2,
         }}
       >
-        {BOTTOM.map((it) => (
+        {bottomItems.map((it) => (
           <NavBtn key={it.id} it={it} muted />
         ))}
       </div>
@@ -168,14 +182,41 @@ export default function Sidebar({ defaultMode = "expanded" }) {
               fontFamily: "var(--font-mono)",
             }}
           >
-            LX
+            {initials}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: 12, fontWeight: 700 }}>liuxi</div>
+            <div
+              style={{
+                fontSize: 12,
+                fontWeight: 700,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {displayName}
+            </div>
             <div className="mono" style={{ fontSize: 9, color: "var(--ink-3)" }}>
-              ADMIN
+              {roleLabel}
             </div>
           </div>
+          <button
+            onClick={logout}
+            title="Sign out"
+            style={{
+              width: 22,
+              height: 22,
+              border: "1px solid var(--ink)",
+              background: "#fffdf7",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <Icon name="logout" size={11} />
+          </button>
           <button
             onClick={collapse}
             title="Collapse sidebar"
@@ -233,7 +274,7 @@ export default function Sidebar({ defaultMode = "expanded" }) {
               border: "1px solid var(--ink)",
             }}
           >
-            LX
+            {initials}
           </span>
         </button>
       )}

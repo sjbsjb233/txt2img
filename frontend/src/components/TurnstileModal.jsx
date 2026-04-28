@@ -1,16 +1,83 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import Icon from "./Icon.jsx";
+import { loadTurnstile } from "../api/turnstile.js";
 
-export default function TurnstileModal({ open, onClose, onContinue }) {
+// Cloudflare Turnstile gate.
+//
+// Unlike the previous mockup, this version actually renders the Turnstile
+// widget against the site key the backend hands down via /api/auth/captcha-check.
+// The widget produces a token through its callback; we capture it in local
+// state and forward it to `onSuccess(token)` when the user confirms.
+//
+// `siteKey` may be missing in dev environments where the operator has not
+// configured Turnstile at all — in that case we surface a friendly empty
+// state and disable the Continue button. Production should always pass one.
+export default function TurnstileModal({ open, onClose, onSuccess, siteKey }) {
+  const containerRef = useRef(null);
+  const widgetIdRef = useRef(null);
+  const [token, setToken] = useState("");
+  const [loadError, setLoadError] = useState("");
+
+  // Mount the widget when the modal opens; tear it down when it closes so
+  // the next open gets a fresh challenge. Always clear `token` and
+  // `loadError` on close / on the no-siteKey path so a previously
+  // captured token can't keep Continue enabled across reopens.
+  useEffect(() => {
+    if (!open) {
+      setToken("");
+      setLoadError("");
+      return;
+    }
+    if (!siteKey) {
+      setToken("");
+      setLoadError("Turnstile is not configured on the server.");
+      return undefined;
+    }
+    let cancelled = false;
+    setToken("");
+    setLoadError("");
+
+    loadTurnstile()
+      .then((turnstile) => {
+        if (cancelled || !containerRef.current) return;
+        try {
+          widgetIdRef.current = turnstile.render(containerRef.current, {
+            sitekey: siteKey,
+            theme: "light",
+            callback: (tok) => setToken(tok),
+            "expired-callback": () => setToken(""),
+            "error-callback": () => setToken(""),
+            "timeout-callback": () => setToken(""),
+          });
+        } catch (e) {
+          setLoadError(e?.message || "Failed to render Turnstile widget.");
+        }
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setLoadError(e?.message || "Failed to load Turnstile.");
+      });
+
+    return () => {
+      cancelled = true;
+      const id = widgetIdRef.current;
+      widgetIdRef.current = null;
+      if (id != null && window.turnstile) {
+        try { window.turnstile.remove(id); } catch { /* ignore */ }
+      }
+    };
+  }, [open, siteKey]);
+
+  // Keyboard shortcuts: Esc closes, Enter submits when a token is ready.
   useEffect(() => {
     if (!open) return;
     const onKey = (e) => {
       if (e.key === "Escape") onClose?.();
-      if (e.key === "Enter") onContinue?.();
+      if (e.key === "Enter" && token) onSuccess?.(token);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose, onContinue]);
+  }, [open, onClose, onSuccess, token]);
 
   if (!open) return null;
   return (
@@ -30,7 +97,6 @@ export default function TurnstileModal({ open, onClose, onContinue }) {
       <style>{`
         @keyframes tFade { from { opacity: 0; } to { opacity: 1; } }
         @keyframes tPop { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
-        @keyframes tDashSpin { to { stroke-dashoffset: -32; } }
       `}</style>
       <div
         style={{
@@ -121,61 +187,25 @@ export default function TurnstileModal({ open, onClose, onContinue }) {
           <div
             style={{
               marginTop: 22,
-              padding: "14px 16px",
+              padding: "16px",
               background: "#fffdf7",
               border: "1px solid var(--ink)",
+              minHeight: 80,
               display: "flex",
               alignItems: "center",
-              gap: 14,
+              justifyContent: "center",
             }}
           >
-            <svg width="40" height="40" viewBox="0 0 40 40" style={{ flexShrink: 0 }}>
-              <rect
-                x="3"
-                y="3"
-                width="34"
-                height="34"
-                fill="none"
-                stroke="var(--banana-deep)"
-                strokeWidth="2"
-                strokeDasharray="4 3"
-                style={{ animation: "tDashSpin 1.6s linear infinite" }}
-              />
-            </svg>
-            <div style={{ flex: 1 }}>
-              <div
-                className="display"
-                style={{ fontStyle: "italic", fontSize: 17, fontWeight: 700 }}
-              >
-                Verifying you're human…
-              </div>
+            {loadError ? (
               <div
                 className="mono"
-                style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 3 }}
+                style={{ fontSize: 12, color: "#c0392b", textAlign: "center" }}
               >
-                Cloudflare Turnstile · usually under a second
+                {loadError}
               </div>
-            </div>
-            <div
-              style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}
-            >
-              <span className="mono" style={{ fontSize: 10, color: "var(--ink-3)" }}>
-                CF
-              </span>
-              <span
-                style={{
-                  width: 18,
-                  height: 18,
-                  background: "var(--banana)",
-                  border: "1px solid var(--ink)",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
-              >
-                <span style={{ fontSize: 9, color: "var(--ink)" }}>▶</span>
-              </span>
-            </div>
+            ) : (
+              <div ref={containerRef} />
+            )}
           </div>
 
           <div
@@ -223,9 +253,16 @@ export default function TurnstileModal({ open, onClose, onContinue }) {
             Cancel
           </button>
           <button
-            onClick={onContinue}
+            onClick={() => token && onSuccess?.(token)}
+            disabled={!token}
             className="btn ink shadowed"
-            style={{ height: 44, padding: "0 24px", color: "var(--banana)" }}
+            style={{
+              height: 44,
+              padding: "0 24px",
+              color: "var(--banana)",
+              opacity: token ? 1 : 0.5,
+              cursor: token ? "pointer" : "not-allowed",
+            }}
           >
             Continue →{" "}
             <span
