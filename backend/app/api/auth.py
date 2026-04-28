@@ -53,6 +53,7 @@ router = APIRouter(prefix="/api", tags=["auth"])
 FAILURE_WINDOW_SECONDS = 5 * 60
 FAILURE_THRESHOLD = 3
 FORCE_CAPTCHA_GLOBAL_KEY = "emergency.force_captcha_global"
+BLOCK_NEW_MEMBER_LOGIN_KEY = "emergency.block_new_member_login"
 
 
 # ---------------------------------------------------------------------------
@@ -60,18 +61,18 @@ FORCE_CAPTCHA_GLOBAL_KEY = "emergency.force_captcha_global"
 # ---------------------------------------------------------------------------
 
 
-async def _force_captcha_global() -> bool:
-    """Read the ``emergency.force_captcha_global`` switch from ``config``.
+async def _config_bool(key: str) -> bool:
+    """Read one boolean emergency switch from ``config``.
 
     Returns False if the row is missing or unparseable — admin emergency
     switches must be deliberate. We don't cache here; the lookup is one
-    primary-key hit per login attempt and PR-04 will add the proper
-    ``ConfigCenter`` cache later.
+    primary-key hit per login attempt and keeps tests that mutate config
+    directly through the DB deterministic.
     """
     async with get_session() as session:
         row = (
             await session.execute(
-                select(Config).where(Config.key == FORCE_CAPTCHA_GLOBAL_KEY)
+                select(Config).where(Config.key == key)
             )
         ).scalar_one_or_none()
     if row is None:
@@ -80,6 +81,16 @@ async def _force_captcha_global() -> bool:
         return bool(json.loads(row.value_json))
     except (ValueError, TypeError):
         return False
+
+
+async def _force_captcha_global() -> bool:
+    """Return the global captcha emergency switch."""
+    return await _config_bool(FORCE_CAPTCHA_GLOBAL_KEY)
+
+
+async def _block_new_member_login() -> bool:
+    """Return the login-block emergency switch."""
+    return await _config_bool(BLOCK_NEW_MEMBER_LOGIN_KEY)
 
 
 async def _recent_failed_attempts(username: str) -> int:
@@ -217,6 +228,15 @@ async def login(body: LoginRequest, request: Request) -> LoginResponse:
         await _record_attempt(body.username, ip, success=False)
         raise api_error(401, "UNAUTHORIZED", "Invalid username or password.")
 
+    # ----- emergency login block (admins bypass)
+    assert user is not None  # narrow for type-checker; valid_password implies this
+    if user.role != "admin" and await _block_new_member_login():
+        raise api_error(
+            401,
+            "BLOCKED_BY_EMERGENCY",
+            "Service temporarily paused by admin.",
+        )
+
     # ----- captcha check (only after credentials pass)
     if captcha_was_required:
         if not body.captcha_token:
@@ -232,7 +252,6 @@ async def login(body: LoginRequest, request: Request) -> LoginResponse:
             raise api_error(412, "CAPTCHA_INVALID", "Captcha verification failed.")
 
     # ----- account-status gate (after credentials so we don't leak existence)
-    assert user is not None  # narrow for type-checker; valid_password implies this
     if user.status == "disabled":
         await _record_attempt(body.username, ip, success=False)
         raise api_error(403, "ACCOUNT_DISABLED", "Your account has been disabled.")

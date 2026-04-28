@@ -7,9 +7,11 @@ later PRs as their corresponding domain services come online.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from contextlib import suppress
 from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
@@ -23,12 +25,14 @@ from app.api.admin.providers import router as admin_providers_router
 from app.api.admin.tiers import router as admin_tiers_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
+from app.api.jobs import router as jobs_router
 from app.api.sessions import router as sessions_router
 from app.config import get_settings
 from app.db import engine as db_engine
 from app.db import seed as db_seed
 from app.db.migrate import upgrade_to_head
 from app.domain.config_center import get_config_center
+from app.domain.quota_guard import run_quota_reset_loop
 from app.domain.tier_config import get_tier_config
 from app.utils.crypto import CryptoError
 
@@ -73,11 +77,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # an already-populated registry is a no-op (duplicates are skipped).
     AdapterRegistry.instance().discover()
 
+    app.state.quota_reset_task = asyncio.create_task(run_quota_reset_loop())
+
     try:
         yield
     finally:
         print("[txt2img] closing backend", flush=True)
         logger.info("closing txt2img backend")
+        quota_task = getattr(app.state, "quota_reset_task", None)
+        if quota_task is not None:
+            quota_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await quota_task
         await db_engine.close_engine()
 
 
@@ -123,6 +134,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(sessions_router)
+    app.include_router(jobs_router)
     app.include_router(admin_adapters_router)
     app.include_router(admin_config_router)
     app.include_router(admin_providers_router)
