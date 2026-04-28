@@ -1,4 +1,5 @@
 .venv/
+.codex/
 .pnpm-store/
 __pycache__/
 *.py[cod]
