@@ -1,0 +1,603 @@
+"""Worker execution for queued generation jobs.
+
+The executor is the bridge between the scheduler and the provider stack:
+it moves a job to RUNNING, applies any soft-quota penalty, selects
+providers, tries the fallback chain, stores images, deducts balance, records
+metrics, and lands the terminal lifecycle state.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Mapping
+
+from PIL import Image as PILImage
+from pydantic import ValidationError
+from sqlalchemy import select, update
+
+from app.adapters.base import AdapterRegistry, BaseAdapter
+from app.config import get_settings
+from app.db.engine import get_session
+from app.db.models import Image, Job, User
+from app.domain.circuit_breaker import CircuitBreaker, get_circuit_breaker
+from app.domain.job_lifecycle import (
+    FAILED,
+    RUNNING,
+    SUCCEEDED,
+    InvalidTransition,
+    JobLifecycle,
+    get_job_lifecycle,
+)
+from app.domain.job_queue import QueuedJob
+from app.domain.metrics_engine import MetricsEngine, get_metrics_engine
+from app.domain.provider_ledger import ProviderLedger, get_provider_ledger
+from app.domain.provider_selector import (
+    CandidateProvider,
+    ProviderSelector,
+    ScoredCandidate,
+    get_provider_selector,
+)
+from app.domain.quota_guard import QuotaGuard, get_quota_guard
+from app.domain.runtime_configs import ProviderScoringConfig
+from app.domain.soft_penalty import SoftPenalty, get_soft_penalty, is_soft_quota_job
+from app.schemas.normalized import (
+    NormalizedImage,
+    NormalizedRequest,
+    NormalizedResponse,
+    ProviderConfig,
+    StandardError,
+    StandardErrorKind,
+)
+from app.services import image_io
+from app.utils.crypto import decrypt
+from app.utils.ids import new_image_id
+
+logger = logging.getLogger("txt2img.executor")
+
+SleepFunc = Callable[[float], Awaitable[None]]
+
+
+@dataclass(frozen=True)
+class JobExecutionContext:
+    """Loaded DB snapshot needed to execute a job."""
+
+    job_id: str
+    hash_id: str
+    user: User
+    model: str
+    request: NormalizedRequest
+    flags: dict[str, Any]
+
+
+class JobExecutor:
+    """Execute one queued job to a terminal state."""
+
+    def __init__(
+        self,
+        *,
+        selector: ProviderSelector | None = None,
+        ledger: ProviderLedger | None = None,
+        lifecycle: JobLifecycle | None = None,
+        metrics: MetricsEngine | None = None,
+        breaker: CircuitBreaker | None = None,
+        quota_guard: QuotaGuard | None = None,
+        soft_penalty: SoftPenalty | None = None,
+        registry: AdapterRegistry | None = None,
+        scoring_config: ProviderScoringConfig | None = None,
+        sleep: SleepFunc = asyncio.sleep,
+    ) -> None:
+        self._selector = selector or get_provider_selector()
+        self._ledger = ledger or get_provider_ledger()
+        self._lifecycle = lifecycle or get_job_lifecycle()
+        self._metrics = metrics or get_metrics_engine()
+        self._breaker = breaker or get_circuit_breaker()
+        self._quota_guard = quota_guard or get_quota_guard()
+        self._soft_penalty = soft_penalty or get_soft_penalty()
+        self._registry = registry or AdapterRegistry.instance()
+        self._scoring = scoring_config or ProviderScoringConfig()
+        self._sleep = sleep
+
+    async def execute(self, queued: QueuedJob) -> None:
+        """Run ``queued`` until SUCCEEDED/FAILED or it is no longer runnable."""
+        try:
+            ctx = await self._load_context(queued.hash_id)
+        except Exception:
+            logger.exception("executor: failed to load job=%s", queued.hash_id)
+            return
+
+        if ctx is None:
+            return
+
+        try:
+            await self._mark_running(ctx)
+        except InvalidTransition:
+            # The job was likely cancelled/deleted after being enqueued.
+            logger.info("executor: job=%s no longer QUEUED; skip", queued.hash_id)
+            return
+
+        if is_soft_quota_job(ctx.flags):
+            should_continue = await self._apply_soft_penalty(ctx)
+            if not should_continue:
+                return
+
+        candidates = await self._selector.select(
+            ctx.user,
+            ctx.request,
+            top_k=self._max_retries_per_job(),
+        )
+        if not candidates:
+            await self._fail(ctx, "NO_PROVIDER_AVAILABLE", refund_quota=True)
+            return
+
+        await self._mark_started(ctx.hash_id)
+        await self._try_candidates(ctx, candidates)
+
+    async def _load_context(self, hash_id: str) -> JobExecutionContext | None:
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    select(Job, User)
+                    .join(User, Job.user_id == User.id)
+                    .where(Job.hash_id == hash_id)
+                )
+            ).one_or_none()
+            if row is None:
+                logger.warning("executor: job=%s disappeared before run", hash_id)
+                return None
+            job, user = row
+            flags = _safe_json_dict(job.flags_json)
+            params = _safe_json_dict(job.params_json)
+            params.setdefault("model", job.model)
+            params.setdefault("prompt", "")
+            try:
+                request = NormalizedRequest.model_validate(params)
+            except ValidationError as exc:
+                logger.warning("executor: invalid params for job=%s: %s", hash_id, exc)
+                # Invalid persisted params are a programming error from a
+                # future create-job path. Fail the job if it is still QUEUED.
+                await self._lifecycle.transition(
+                    hash_id,
+                    FAILED,
+                    reason="INVALID_PARAMETER",
+                )
+                return None
+            return JobExecutionContext(
+                job_id=job.id,
+                hash_id=job.hash_id,
+                user=user,
+                model=job.model,
+                request=request,
+                flags=flags,
+            )
+
+    async def _mark_running(self, ctx: JobExecutionContext) -> None:
+        now = datetime.now(timezone.utc)
+        async with get_session() as session:
+            await session.execute(
+                update(Job)
+                .where(Job.hash_id == ctx.hash_id)
+                .values(dispatched_at=now, updated_at=now)
+            )
+            result = await self._lifecycle.transition(
+                ctx.hash_id,
+                RUNNING,
+                session=session,
+                extra_timeline={"worker_id": "local"},
+            )
+        await self._lifecycle.publish_transition(result)
+
+    async def _apply_soft_penalty(self, ctx: JobExecutionContext) -> bool:
+        today_count = await self._quota_guard.today_count(ctx.user.id)
+        plan = self._soft_penalty.plan(
+            ctx.user,
+            ctx.flags,
+            today_count=today_count,
+        )
+
+        if plan.require_turnstile and not plan.captcha_verified:
+            await self._fail(ctx, "CAPTCHA_REQUIRED", refund_quota=False)
+            return False
+
+        if plan.delay_seconds > 0:
+            await self._sleep(plan.delay_seconds)
+
+        if self._soft_penalty.should_fail(plan.fail_probability):
+            await self._fail(ctx, "SOFT_QUOTA_PENALTY", refund_quota=False)
+            return False
+        return True
+
+    async def _try_candidates(
+        self,
+        ctx: JobExecutionContext,
+        candidates: list[ScoredCandidate],
+    ) -> None:
+        max_attempts = self._max_retries_per_job()
+        attempts = candidates[:max_attempts]
+        last_error: StandardError | None = None
+
+        for attempt_no, scored in enumerate(attempts, start=1):
+            provider = scored.provider
+            try:
+                adapter = self._registry.get(provider.adapter_type)
+            except KeyError:
+                last_error = StandardError(
+                    StandardErrorKind.UNSUPPORTED_MODEL,
+                    f"Unknown adapter_type {provider.adapter_type!r}.",
+                )
+                await self._record_attempt_failure(
+                    ctx,
+                    provider,
+                    attempt_no,
+                    last_error,
+                )
+                continue
+            try:
+                response = await self._call_adapter(
+                    adapter,
+                    provider,
+                    ctx.request,
+                    ctx.hash_id,
+                    attempt_no,
+                )
+            except StandardError as exc:
+                last_error = exc
+                await self._record_attempt_failure(
+                    ctx,
+                    provider,
+                    attempt_no,
+                    exc,
+                )
+                continue
+
+            try:
+                image_payloads = await self._store_images(
+                    ctx,
+                    response.images,
+                    provider_id=provider.provider_id,
+                )
+                deduction = await self._ledger.deduct(
+                    provider.provider_id,
+                    ctx.job_id,
+                    image_count=len(response.images),
+                )
+            except Exception:
+                # Storage / ledger failures are internal; falling back to another
+                # provider would risk duplicate outputs or double-spending.
+                logger.exception(
+                    "executor: post-upstream finalisation failed job=%s provider=%s",
+                    ctx.hash_id,
+                    provider.provider_id,
+                )
+                await self._fail(ctx, "INTERNAL_ERROR", refund_quota=False)
+                return
+
+            await self._mark_success(
+                ctx,
+                provider_id=provider.provider_id,
+                retries=attempt_no - 1,
+                cost_cny=deduction.cost_cny,
+            )
+            await self._publish_success_result(
+                ctx,
+                image_payloads=image_payloads,
+                provider_id=provider.provider_id,
+            )
+            await self._lifecycle.transition(ctx.hash_id, SUCCEEDED)
+            return
+
+        reason = "ALL_PROVIDERS_FAILED"
+        if (
+            last_error is not None
+            and last_error.kind == StandardErrorKind.INVALID_PARAMETER
+        ):
+            reason = "INVALID_PARAMETER"
+        await self._fail(ctx, reason, refund_quota=False)
+
+    async def _call_adapter(
+        self,
+        adapter: BaseAdapter,
+        provider: CandidateProvider,
+        request: NormalizedRequest,
+        hash_id: str,
+        attempt_no: int,
+    ) -> NormalizedResponse:
+        provider_config = ProviderConfig(
+            id=provider.provider_id,
+            base_url=provider.base_url,
+            api_key=decrypt(provider.api_key_enc),
+            adapter_type=provider.adapter_type,
+        )
+
+        started = time.perf_counter()
+        self._metrics.lease_concurrency(provider.provider_id)
+        try:
+            response = await adapter.generate(provider_config, request)
+            latency_ms = (time.perf_counter() - started) * 1000.0
+            if not response.images:
+                raise StandardError(
+                    StandardErrorKind.EMPTY_RESPONSE,
+                    "Upstream returned no images.",
+                )
+            self._metrics.record_call(
+                provider.provider_id,
+                request.model,
+                ok=True,
+                latency_ms=latency_ms,
+            )
+            await self._breaker.observe(provider.provider_id, success=True)
+            await asyncio.to_thread(
+                image_io.write_upstream_log,
+                hash_id,
+                attempt_no,
+                {
+                    "provider_id": provider.provider_id,
+                    "ok": True,
+                    "latency_ms": round(latency_ms, 3),
+                    "response": _json_safe(response.raw),
+                    "image_count": len(response.images),
+                },
+            )
+            return response
+        except Exception as exc:
+            latency_ms = (time.perf_counter() - started) * 1000.0
+            normalized = adapter.normalize_error(exc)
+            self._metrics.record_call(
+                provider.provider_id,
+                request.model,
+                ok=False,
+                latency_ms=latency_ms,
+                error_kind=normalized.kind,
+            )
+            await self._breaker.observe(provider.provider_id, success=False)
+            await asyncio.to_thread(
+                image_io.write_upstream_log,
+                hash_id,
+                attempt_no,
+                {
+                    "provider_id": provider.provider_id,
+                    "ok": False,
+                    "latency_ms": round(latency_ms, 3),
+                    "error": normalized.to_dict(),
+                },
+            )
+            raise normalized from exc
+        finally:
+            self._metrics.release_concurrency(provider.provider_id)
+
+    async def _record_attempt_failure(
+        self,
+        ctx: JobExecutionContext,
+        provider: CandidateProvider,
+        attempt_no: int,
+        exc: StandardError,
+    ) -> None:
+        await self._set_retries(ctx.hash_id, attempt_no)
+        logger.info(
+            "executor: job=%s provider=%s attempt=%d failed kind=%s",
+            ctx.hash_id,
+            provider.provider_id,
+            attempt_no,
+            exc.kind.value,
+        )
+
+    async def _store_images(
+        self,
+        ctx: JobExecutionContext,
+        images: list[NormalizedImage],
+        *,
+        provider_id: str,
+    ) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        rows: list[Image] = []
+
+        for idx, img in enumerate(images, start=1):
+            stored = await asyncio.to_thread(
+                _store_one_image,
+                ctx.hash_id,
+                idx,
+                img.data,
+                img.mime,
+            )
+            image_id = new_image_id()
+            rows.append(
+                Image(
+                    id=image_id,
+                    job_id=ctx.job_id,
+                    img_order=idx,
+                    original_path=stored["original_path"],
+                    thumb_path=stored["thumb_path"],
+                    width=stored["width"],
+                    height=stored["height"],
+                    format=stored["format"],
+                    file_size_bytes=stored["file_size_bytes"],
+                )
+            )
+            payloads.append(
+                {
+                    "image_id": image_id,
+                    "order": idx,
+                    "thumb_url": f"/api/jobs/{ctx.hash_id}/images/{idx}/thumb",
+                    "width": stored["width"],
+                    "height": stored["height"],
+                    "format": stored["format"],
+                }
+            )
+
+        async with get_session() as session:
+            session.add_all(rows)
+            await session.execute(
+                update(Job)
+                .where(Job.hash_id == ctx.hash_id)
+                .values(
+                    provider_used=provider_id,
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+        return payloads
+
+    async def _mark_success(
+        self,
+        ctx: JobExecutionContext,
+        *,
+        provider_id: str,
+        retries: int,
+        cost_cny: float,
+    ) -> None:
+        async with get_session() as session:
+            await session.execute(
+                update(Job)
+                .where(Job.hash_id == ctx.hash_id)
+                .values(
+                    provider_used=provider_id,
+                    retries=retries,
+                    cost_cny=cost_cny,
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+
+    async def _set_retries(self, hash_id: str, attempts: int) -> None:
+        async with get_session() as session:
+            await session.execute(
+                update(Job)
+                .where(Job.hash_id == hash_id)
+                .values(
+                    retries=max(0, attempts),
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+
+    async def _mark_started(self, hash_id: str) -> None:
+        async with get_session() as session:
+            await session.execute(
+                update(Job)
+                .where(Job.hash_id == hash_id)
+                .values(
+                    started_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+
+    async def _fail(
+        self,
+        ctx: JobExecutionContext,
+        reason: str,
+        *,
+        refund_quota: bool,
+    ) -> None:
+        try:
+            await self._lifecycle.transition(ctx.hash_id, FAILED, reason=reason)
+        except InvalidTransition:
+            logger.info("executor: job=%s could not fail as %s", ctx.hash_id, reason)
+            return
+        if refund_quota:
+            await self._quota_guard.refund_usage(ctx.user.id)
+
+    async def _publish_success_result(
+        self,
+        ctx: JobExecutionContext,
+        *,
+        image_payloads: list[dict[str, Any]],
+        provider_id: str,
+    ) -> None:
+        """Best-effort richer result event for the future SSE hub."""
+        try:
+            await self._lifecycle.sink.broadcast_to_user(
+                ctx.user.id,
+                "job_state",
+                {
+                    "hash_id": ctx.hash_id,
+                    "from": RUNNING,
+                    "to": SUCCEEDED,
+                    "ts": datetime.now(timezone.utc)
+                    .isoformat(timespec="seconds")
+                    .replace("+00:00", "Z"),
+                    "result": {
+                        "images": image_payloads,
+                        "provider_used": provider_id,
+                    },
+                },
+            )
+        except Exception:
+            logger.exception("executor: success-result broadcast failed")
+
+    def _max_retries_per_job(self) -> int:
+        try:
+            return max(1, int(self._scoring.max_retries_per_job))
+        except KeyError:
+            return 3
+
+
+def _store_one_image(
+    hash_id: str,
+    order: int,
+    data: bytes,
+    mime: str,
+) -> dict[str, Any]:
+    rel_original = image_io.save_original(hash_id, order, data, mime)
+    original_abs = image_io.path_for_output_original(
+        hash_id,
+        order,
+        image_io.mime_to_ext(mime),
+    )
+    thumb_abs = image_io.path_for_output_thumb(hash_id, order)
+    image_io.make_thumbnail(original_abs, thumb_abs)
+    width, height = _read_dimensions(original_abs)
+    data_root = Path(get_settings().DATA_ROOT).resolve()
+    return {
+        "original_path": rel_original,
+        "thumb_path": str(thumb_abs.relative_to(data_root)),
+        "width": width,
+        "height": height,
+        "format": image_io.mime_to_ext(mime),
+        "file_size_bytes": original_abs.stat().st_size,
+    }
+
+
+def _read_dimensions(path: Path) -> tuple[int, int]:
+    with PILImage.open(path) as img:
+        return img.size
+
+
+def _safe_json_dict(raw: str | None) -> dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return value if len(value) <= 200 else value[:200] + "..."
+    if isinstance(value, bytes):
+        return f"<bytes:{len(value)}>"
+    if isinstance(value, Mapping):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    return str(value)
+
+
+_instance: JobExecutor | None = None
+
+
+def get_job_executor() -> JobExecutor:
+    global _instance
+    if _instance is None:
+        _instance = JobExecutor()
+    return _instance
+
+
+def reset_job_executor_for_tests() -> None:
+    global _instance
+    _instance = None

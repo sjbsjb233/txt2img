@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import cast
 
 from fastapi import APIRouter, Request
 from sqlalchemy import select
@@ -130,7 +131,14 @@ async def patch_tier(
         for field in set_fields:
             merged[field] = getattr(body, field)
 
-        if merged["hard_quota"] < merged["soft_quota"]:
+        weight = cast(int, merged["weight"])
+        max_concurrency = cast(int, merged["max_concurrency"])
+        max_queue = cast(int, merged["max_queue"])
+        soft_quota = cast(int, merged["soft_quota"])
+        hard_quota = cast(int, merged["hard_quota"])
+        slo_p95_ms = cast(int | None, merged["slo_p95_ms"])
+
+        if hard_quota < soft_quota:
             raise api_error(
                 422,
                 "INVALID_PARAMETER",
@@ -158,10 +166,10 @@ async def patch_tier(
 
     return TierResponse(
         tier=tier,
-        weight=merged["weight"],
-        max_concurrency=merged["max_concurrency"],
-        max_queue=merged["max_queue"],
-        soft_quota=merged["soft_quota"],
-        hard_quota=merged["hard_quota"],
-        slo_p95_ms=merged["slo_p95_ms"],
+        weight=weight,
+        max_concurrency=max_concurrency,
+        max_queue=max_queue,
+        soft_quota=soft_quota,
+        hard_quota=hard_quota,
+        slo_p95_ms=slo_p95_ms,
     )

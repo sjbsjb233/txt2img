@@ -31,7 +31,18 @@ from app.config import get_settings
 from app.db import engine as db_engine
 from app.db import seed as db_seed
 from app.db.migrate import upgrade_to_head
+from app.domain.circuit_breaker import get_circuit_breaker
 from app.domain.config_center import get_config_center
+from app.domain.job_executor import get_job_executor
+from app.domain.job_queue import get_job_queue
+from app.domain.job_scheduler import (
+    get_job_scheduler,
+    list_provider_ids,
+    restore_queued_jobs,
+)
+from app.domain.metrics_engine import get_metrics_engine, run_metrics_snapshot_loop
+from app.domain.provider_ledger import get_provider_ledger
+from app.domain.provider_selector import get_provider_selector
 from app.domain.quota_guard import run_quota_reset_loop
 from app.domain.tier_config import get_tier_config
 from app.utils.crypto import CryptoError
@@ -77,13 +88,47 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # an already-populated registry is a no-op (duplicates are skipped).
     AdapterRegistry.instance().discover()
 
+    metrics = get_metrics_engine()
+    breaker = get_circuit_breaker()
+    selector = get_provider_selector()
+    ledger = get_provider_ledger()
+    queue = get_job_queue()
+    executor = get_job_executor()
+    scheduler = get_job_scheduler()
+    app.state.metrics = metrics
+    app.state.breaker = breaker
+    app.state.selector = selector
+    app.state.ledger = ledger
+    app.state.queue = queue
+    app.state.executor = executor
+    app.state.scheduler = scheduler
+
+    restored = await restore_queued_jobs(queue)
+    if restored:
+        logger.info("restored %d queued job(s) into scheduler", restored)
+
     app.state.quota_reset_task = asyncio.create_task(run_quota_reset_loop())
+    app.state.metrics_snapshot_task = asyncio.create_task(
+        run_metrics_snapshot_loop(metrics, list_provider_ids)
+    )
+    app.state.scheduler_task = asyncio.create_task(scheduler.run_forever(executor))
 
     try:
         yield
     finally:
         print("[txt2img] closing backend", flush=True)
         logger.info("closing txt2img backend")
+        await scheduler.drain(timeout=30)
+        scheduler_task = getattr(app.state, "scheduler_task", None)
+        if scheduler_task is not None:
+            scheduler_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await scheduler_task
+        metrics_task = getattr(app.state, "metrics_snapshot_task", None)
+        if metrics_task is not None:
+            metrics_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await metrics_task
         quota_task = getattr(app.state, "quota_reset_task", None)
         if quota_task is not None:
             quota_task.cancel()

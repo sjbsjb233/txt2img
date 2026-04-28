@@ -388,9 +388,9 @@ class CircuitBreaker:
         finally:
             if acquired:
                 async with self._lock_for(provider_id):
-                    st = self._states.get(provider_id)
-                    if st is not None and st.probes_inflight > 0:
-                        st.probes_inflight -= 1
+                    current = self._states.get(provider_id)
+                    if current is not None and current.probes_inflight > 0:
+                        current.probes_inflight -= 1
 
     # -- balance-driven transitions ---------------------------------------
 

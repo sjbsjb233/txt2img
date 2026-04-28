@@ -25,7 +25,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from app.db.engine import get_session
 from app.db.models import Session as SessionRow
@@ -264,7 +264,7 @@ async def delete_session(
         from app.db.models import Job
 
         await session.execute(
-            Job.__table__.update()
+            update(Job)
             .where(Job.session_id == session_id, Job.user_id == user.id)
             .values(session_id=None)
         )
