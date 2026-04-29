@@ -14,7 +14,7 @@
 // 404 is treated as "file no longer on the server" and surfaces as an
 // `onMissing` callback so the parent can drop the local cache row.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchImageBlob } from "../api/archive.js";
 
 export default function AuthorizedImage({
@@ -27,6 +27,11 @@ export default function AuthorizedImage({
 }) {
   const [blobUrl, setBlobUrl] = useState(null);
   const [missing, setMissing] = useState(false);
+  const onMissingRef = useRef(onMissing);
+
+  useEffect(() => {
+    onMissingRef.current = onMissing;
+  }, [onMissing]);
 
   useEffect(() => {
     if (!src) {
@@ -46,7 +51,9 @@ export default function AuthorizedImage({
         if (cancelled) return;
         if (blob === null) {
           setMissing(true);
-          if (typeof onMissing === "function") onMissing();
+          if (typeof onMissingRef.current === "function") {
+            onMissingRef.current();
+          }
           return;
         }
         url = URL.createObjectURL(blob);
@@ -68,7 +75,7 @@ export default function AuthorizedImage({
       cancelled = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [src, onMissing]);
+  }, [src]);
 
   if (missing) {
     return fallback;
