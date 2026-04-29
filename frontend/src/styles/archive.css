@@ -700,6 +700,16 @@
   to { transform: rotate(360deg); }
 }
 
+/* Empty-state keyframes — used by ArchiveEmptyHero */
+@keyframes emptyDrift {
+  from { background-position: 0 0; }
+  to   { background-position: 56px -56px; }
+}
+@keyframes emptyPulse {
+  0%, 100% { opacity: 0.25; transform: scale(0.85); }
+  50%      { opacity: 1;    transform: scale(1.1); }
+}
+
 /* 尊重用户的减弱动画偏好 */
 @media (prefers-reduced-motion: reduce) {
   .arch-run-thumb::before,
@@ -710,7 +720,8 @@
   .arch-glyph-q::after,
   .arch-chip-running .arch-glyph,
   .arch-chip-running-set .arch-glyph,
-  .arch-cell-running .arch-spin {
+  .arch-cell-running .arch-spin,
+  .arch-empty-hatch {
     animation: none;
   }
 }
