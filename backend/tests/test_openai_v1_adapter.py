@@ -575,27 +575,30 @@ async def test_b64_takes_precedence_over_url(monkeypatch) -> None:
 @pytest.mark.parametrize(
     "url",
     [
-        # AWS / GCP metadata endpoint
+        # AWS / GCP metadata endpoint (link-local).
         "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-        # Loopback
+        # Loopback.
         "http://127.0.0.1:8080/api/internal",
         "http://localhost/admin",
-        # RFC1918 private ranges
-        "http://10.0.0.5/x.png",
-        "http://192.168.1.10/image.png",
-        "http://172.16.0.1/secret",
-        # IPv6 loopback
+        # IPv6 loopback.
         "http://[::1]/x",
-        # Bad scheme
+        # Bad scheme.
         "file:///etc/passwd",
         "ftp://cdn.example.com/x",
-        # Malformed
+        # Malformed.
         "not a url",
         "",
     ],
 )
 async def test_is_safe_url_blocks_unsafe(url: str) -> None:
-    """Defense in depth: all of these must be rejected before fetching."""
+    """Defense in depth: all of these must be rejected before fetching.
+
+    Narrowed in PR-13 follow-up: RFC1918 / 198.18.0.0/15 are intentionally
+    allowed because Mainland China transparent-proxy setups hand them out
+    as fake-IP anchors that route to real public CDNs (see comment on
+    ``_is_blocked_ip``). The truly dangerous targets — loopback, link-local
+    cloud metadata, unspecified — remain blocked.
+    """
     from app.adapters.openai_v1 import _is_safe_url
 
     assert await _is_safe_url(url) is False
@@ -608,6 +611,32 @@ async def test_is_safe_url_accepts_public_ip() -> None:
 
     # Cloudflare's documentation IP — public, not private.
     assert await _is_safe_url("https://1.1.1.1/img.png") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        # RFC1918 — proxy / split-DNS legitimate use case.
+        "http://10.0.0.5/x.png",
+        "http://192.168.1.10/image.png",
+        "http://172.16.0.1/secret.png",
+        # 198.18.0.0/15 (RFC2544 benchmark range) — fake-IP anchor for
+        # transparent proxy deployments.
+        "http://198.18.2.251/cdn/img.png",
+    ],
+)
+async def test_is_safe_url_accepts_proxy_anchored_private(url: str) -> None:
+    """RFC1918 and 198.18.0.0/15 must NOT be blocked.
+
+    Mainland China VPN / transparent-proxy stacks rewrite legitimate CDN
+    hostnames into these ranges and route them through the proxy to the
+    real upstream. Blocking them would have broken every relay whose
+    hostname the local resolver maps that way.
+    """
+    from app.adapters.openai_v1 import _is_safe_url
+
+    assert await _is_safe_url(url) is True
 
 
 @pytest.mark.asyncio

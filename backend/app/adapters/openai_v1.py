@@ -683,44 +683,58 @@ def _mime_for_format(fmt: str) -> str:
 # at internal HTTP services if it ever gets compromised. We defend in depth
 # by validating the URL before fetching:
 #
-# - Scheme must be http or https
-# - Hostname must not be a private / loopback / link-local IP literal
-# - Hostname (if a name, not an IP) is resolved and the same checks applied
-#   to every resulting address
+# - Scheme must be http or https.
+# - Hostname (literal IP or resolved) must not match the narrow danger list
+#   in :func:`_is_blocked_ip`: loopback, link-local (incl. cloud metadata),
+#   multicast, unspecified, 0.0.0.0/8.
 #
-# DNS rebinding is still possible in theory (the IP can change between the
-# resolve and the actual fetch), but the common SSRF vectors — IP literals
-# pointing at 127.0.0.1, AWS metadata at 169.254.169.254, or RFC1918
-# ranges — are blocked here.
+# RFC1918 (10/8, 172.16/12, 192.168/16) and 198.18.0.0/15 are
+# intentionally NOT blocked — they're the IP ranges Mainland China
+# transparent-proxy / VPN setups use as fake-IP anchors that route
+# through the proxy to a real public CDN. Blocking them would refuse
+# legitimate downloads for any user whose local resolver hands those
+# back. The API key we already entrust to the relay is the actual
+# security boundary; refusing one extra GET buys us little against an
+# attacker who can already see the key.
+#
+# DNS rebinding is still possible in theory (the IP can change between
+# the resolve and the actual fetch); we accept that risk because the
+# alternative is breaking the proxy use case above.
 # ---------------------------------------------------------------------------
 
 
 _MAX_DOWNLOAD_CONCURRENCY = 8
-_RESERVED_IPV4_NETS = (
+
+# Narrow blocklist — only the IPs that genuinely target an attacker's
+# preferred pivots when SSRF'd:
+#
+#   - 127.0.0.0/8 + IPv6 ::1     loopback to our own server
+#   - 169.254.0.0/16 + fe80::/10 link-local (catches AWS/GCP/Azure metadata
+#                                at 169.254.169.254 and friends)
+#   - 0.0.0.0/8                  unspecified
+#   - multicast / reserved       not a valid HTTP target
+#
+# RFC1918 (10/8, 172.16/12, 192.168/16) and the benchmark range
+# 198.18.0.0/15 are intentionally NOT blocked: many legitimate Mainland
+# China network setups (transparent proxies, VPN split-DNS, corporate
+# proxies) hand out IPs in those ranges as fake-IP anchors that the OS
+# routes through the proxy to a real public CDN. Blocking them would
+# break image downloads from relays whose CDN hostnames the local
+# resolver maps into those ranges, while the API key we already entrust
+# to the relay is the actual security boundary.
+_RESERVED_IPV4_NETS_BLOCKED = (
     ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("169.254.0.0/16"),
 )
 
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    """Return True if ``ip`` is a private, loopback, or otherwise unsafe IP.
-
-    ``ipaddress.is_private`` already covers RFC1918, loopback, link-local
-    (which catches 169.254.169.254 — AWS / GCP metadata), reserved, and
-    multicast for both v4 and v6. We add explicit nets for clarity and
-    in case the host stdlib classification ever drifts.
-    """
-    if (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    ):
+    """Return True if ``ip`` is one of the blocked dangerous ranges."""
+    if ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified:
         return True
     if isinstance(ip, ipaddress.IPv4Address):
-        for net in _RESERVED_IPV4_NETS:
+        for net in _RESERVED_IPV4_NETS_BLOCKED:
             if ip in net:
                 return True
     return False
