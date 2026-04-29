@@ -1,5 +1,7 @@
 .venv/
 .codex/
+.claude/
+.DS_Store
 .python/
 .tools/
 .uv-cache/
