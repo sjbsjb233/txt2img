@@ -13,9 +13,10 @@ import {
   disconnect as disconnectSSE,
   useConnectionState,
 } from "./store/sse.js";
+import * as archiveStore from "./store/archive.js";
 
 export default function App() {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, user } = useAuth();
   const conn = useConnectionState();
 
   // Open the SSE connection whenever the user has a token, close it
@@ -32,6 +33,19 @@ export default function App() {
     disconnectSSE();
     return undefined;
   }, [isAuthenticated]);
+
+  // Mount the archive store at the App level so optimistic inserts from
+  // Create work regardless of whether ArchivePage is currently rendered.
+  // The store hydrates from IndexedDB, runs a delta sync, and starts
+  // listening to SSE events — so by the time the user navigates to
+  // /archive (or hits Generate from /create) everything is already warm.
+  useEffect(() => {
+    if (isAuthenticated && user?.id) {
+      void archiveStore.mount(user.id);
+    } else {
+      archiveStore.unmount();
+    }
+  }, [isAuthenticated, user?.id]);
 
   // Show the full-screen "connection lost" overlay only after the SSE
   // client has tried at least 5 times in a row to reconnect. It hides
