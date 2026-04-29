@@ -193,6 +193,7 @@ function SingleImageCard({ row, focused, onClick }) {
   const ratio = aspectFromImage(img);
   return (
     <div
+      data-testid="archive-card"
       onClick={onClick}
       className={focused ? "arch-focused" : ""}
       style={{
@@ -412,6 +413,7 @@ function JobDrawer({ row, onClose, onPrev, onNext, width }) {
 
   return (
     <aside
+      data-testid="job-drawer"
       style={{
         position: "absolute", top: 0, right: 0, bottom: 0, width,
         background: "var(--paper)", borderLeft: "1px solid var(--ink)",
@@ -753,9 +755,6 @@ export default function ArchivePage() {
   const drawerOpen = !!drawerRow;
   const drawerWidth = 460;
 
-  const baseCols = 4;
-  const cols = drawerOpen ? Math.max(3, baseCols - 1) : baseCols;
-
   const onItemClick = useCallback((item) => {
     if (item.kind === "set") {
       setDrawerHash(null);
@@ -1014,11 +1013,11 @@ export default function ArchivePage() {
 
           {!showEmpty && (
             <div
+              data-testid="archive-grid"
               style={{
                 marginTop: 28, display: "grid",
-                gridTemplateColumns: `repeat(${cols}, 1fr)`,
+                gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
                 gap: 12,
-                transition: "grid-template-columns 360ms cubic-bezier(.22,.85,.22,1)",
               }}
             >
               {items.map((item) => {
