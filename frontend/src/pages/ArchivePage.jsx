@@ -32,6 +32,7 @@ import {
   ArchiveSetDetail,
 } from "../components/archive";
 import {
+  downloadImageFile,
   imageOriginalUrl,
   imageThumbUrl,
   referenceThumbUrl,
@@ -482,15 +483,19 @@ function JobDrawer({ row, onClose, onPrev, onNext, width }) {
 
         <div style={{ marginTop: 16, display: "flex", gap: 6, flexWrap: "wrap" }}>
           {img && (
-            <a
-              href={imageOriginalUrl(it.hash_id, img.order)}
-              download
+            <button
+              onClick={() =>
+                downloadImageFile(
+                  imageOriginalUrl(it.hash_id, img.order),
+                  `${it.hash_id}_${String(img.order).padStart(2, "0")}.${img.format || "bin"}`
+                )
+              }
               className="btn sm ink"
               style={{ padding: "0 12px", textDecoration: "none" }}
             >
               <Icon name="download" size={11} stroke="var(--banana)" />
               <span style={{ color: "var(--banana)" }}>download</span>
-            </a>
+            </button>
           )}
           {img && (
             <button
@@ -836,7 +841,9 @@ export default function ArchivePage() {
           prompt={firstRow?.prompt || ""}
           panelCount={allImages.length}
           panels={allImages.map((img) => ({
-            src: imageThumbUrl(img._ownerHash, img.order),
+            src:
+              blobByUrl[imageThumbUrl(img._ownerHash, img.order)] ||
+              imageThumbUrl(img._ownerHash, img.order),
             title: `#${img._ownerSeq}`,
             starred: !!img.starred,
           }))}

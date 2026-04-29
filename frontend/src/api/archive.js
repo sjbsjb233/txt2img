@@ -187,3 +187,38 @@ export async function fetchImageBlob(url) {
   }
   return await res.blob();
 }
+
+/**
+ * Download an authenticated image endpoint.
+ *
+ * Native <a href download> cannot attach the bearer token, so it gets
+ * rejected by the backend. This helper performs the user-initiated fetch
+ * with Authorization, then hands a temporary object URL to the browser's
+ * download path.
+ */
+export async function downloadImageFile(url, fallbackName = "image") {
+  const headers = {};
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(url, { headers });
+  if (!res.ok) {
+    throw new Error(`downloadImageFile: HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("content-disposition") || "";
+  const match = disposition.match(/filename="?([^";]+)"?/i);
+  const filename = match?.[1] || fallbackName;
+  const objUrl = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement("a");
+    a.href = objUrl;
+    a.download = filename;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(objUrl), 1000);
+  }
+  return { filename, bytes: blob.size };
+}
