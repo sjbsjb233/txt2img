@@ -156,3 +156,47 @@ textarea.inp { height: auto; padding: 12px; line-height: 1.55; font-family: var(
 @media (prefers-reduced-motion: reduce) {
   .route-stage { animation: none; }
 }
+
+/* ---------------------------------------------------------------------
+ * Model strip — single horizontally-scrolling row used by the Create
+ * page. Scrollbar hides at rest and fades in on hover/focus, themed in
+ * the project's ink-on-paper palette so it reads as an extension of
+ * the brutalist 1px borders elsewhere.
+ * ------------------------------------------------------------------- */
+.model-strip {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* Reserve space for the scrollbar so the layout doesn't reflow when
+     it appears on hover. 6px = the width we set below. */
+  padding-bottom: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 160ms ease;
+}
+.model-strip:hover,
+.model-strip:focus-within {
+  scrollbar-color: var(--ink-3) transparent;
+}
+/* WebKit / Blink — style the scrollbar to match the design language */
+.model-strip::-webkit-scrollbar {
+  height: 6px;
+}
+.model-strip::-webkit-scrollbar-track {
+  background: transparent;
+  border-top: 1px solid var(--rule);
+}
+.model-strip::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 0;
+  transition: background 160ms ease;
+}
+.model-strip:hover::-webkit-scrollbar-thumb,
+.model-strip:focus-within::-webkit-scrollbar-thumb {
+  background: var(--ink-3);
+}
+.model-strip::-webkit-scrollbar-thumb:hover {
+  background: var(--ink);
+}

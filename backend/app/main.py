@@ -26,6 +26,7 @@ from app.api.admin.tiers import router as admin_tiers_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
+from app.api.models import router as models_router
 from app.api.sessions import router as sessions_router
 from app.api.sse import router as sse_router
 from app.config import get_settings
@@ -191,6 +192,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(sse_router)
     app.include_router(sessions_router)
+    app.include_router(models_router)
     app.include_router(jobs_router)
     app.include_router(admin_adapters_router)
     app.include_router(admin_config_router)

@@ -13,6 +13,10 @@ python-jose[cryptography]==3.3.*
 # on it directly so we pin it explicitly.
 cryptography>=42,<46
 httpx==0.27.*
+# Starlette pulls multipart in lazily for ``UploadFile`` parsing; FastAPI's
+# Form() and request.form() both need it installed. PR-13's POST /api/jobs
+# is the first multipart route we own; older PRs didn't depend on it.
+python-multipart==0.0.*
 
 # --- test-only ---
 # Kept in the same file so the dev image runs the suite without a separate

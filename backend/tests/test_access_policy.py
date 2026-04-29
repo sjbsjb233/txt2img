@@ -248,18 +248,9 @@ async def test_login_block_new_member_login_allows_admin_but_blocks_user(
     await _login_admin(seeded_app)
 
 
-@pytest.mark.asyncio
-async def test_dryrun_access_is_admin_only(seeded_app: httpx.AsyncClient) -> None:
-    no_auth = await seeded_app.post(
-        "/api/jobs/_dryrun_access", json={"model": "gpt-image-2"}
-    )
-    assert no_auth.status_code == 401
-
-    token = await _login_admin(seeded_app)
-    ok = await seeded_app.post(
-        "/api/jobs/_dryrun_access",
-        json={"model": "gpt-image-2"},
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert ok.status_code == 200
-    assert ok.json()["passed"] is True
+# NOTE: ``POST /api/jobs/_dryrun_access`` was a PR-09 placeholder so the
+# admission gate could be exercised through HTTP before PR-13's job
+# routes existed. PR-13 owns the user-facing job endpoints and the
+# dryrun shim is gone; ``test_access_policy_*`` above already covers
+# the admission gate at the domain layer. End-to-end coverage of the
+# 403/429 paths through HTTP lives in ``test_jobs_api.py``.
