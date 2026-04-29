@@ -77,6 +77,24 @@ export default function Icon({ name, size = 16, stroke = "currentColor" }) {
         <path d="M7 8h8M11 4l4 4-4 4" />
       </>
     ),
+    refresh: (
+      <>
+        <path d="M2 8a6 6 0 0 1 10-4l2 2M14 2v4h-4M14 8a6 6 0 0 1-10 4l-2-2M2 14v-4h4" />
+      </>
+    ),
+    eye: (
+      <>
+        <path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z" />
+        <circle cx="8" cy="8" r="2" />
+      </>
+    ),
+    more: (
+      <>
+        <circle cx="3" cy="8" r="1" fill="currentColor" stroke="none" />
+        <circle cx="8" cy="8" r="1" fill="currentColor" stroke="none" />
+        <circle cx="13" cy="8" r="1" fill="currentColor" stroke="none" />
+      </>
+    ),
   };
   return (
     <svg viewBox="0 0 16 16" style={s}>
