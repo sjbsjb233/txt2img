@@ -23,6 +23,7 @@ from app.api.admin.adapters import router as admin_adapters_router
 from app.api.admin.config import router as admin_config_router
 from app.api.admin.providers import router as admin_providers_router
 from app.api.admin.tiers import router as admin_tiers_router
+from app.api.archive import router as archive_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
@@ -194,6 +195,13 @@ def create_app() -> FastAPI:
     app.include_router(sessions_router)
     app.include_router(models_router)
     app.include_router(jobs_router)
+    # Archive routes share the ``/api/jobs`` URL prefix with jobs_router.
+    # Both routers register distinct paths (jobs.py owns the action
+    # routes — POST/cancel/delete; archive.py owns the read paths —
+    # GET detail / index / batch / image streams / star). Register
+    # archive *after* jobs so the more specific patterns from jobs
+    # (e.g. POST /api/jobs/precheck) win first-match.
+    app.include_router(archive_router)
     app.include_router(admin_adapters_router)
     app.include_router(admin_config_router)
     app.include_router(admin_providers_router)

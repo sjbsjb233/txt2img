@@ -7,7 +7,7 @@ import { getModels } from "../api/models.js";
 import { createJob, precheck as precheckJob } from "../api/jobs.js";
 import { createSession } from "../api/sessions.js";
 import * as sseStore from "../store/sse.js";
-import { pushOptimisticJob } from "../store/archiveOptimistic.js";
+import * as archiveStore from "../store/archive.js";
 
 // ---------------------------------------------------------------------------
 // Visual atoms
@@ -312,7 +312,10 @@ export default function CreatePage() {
         const response = await createJob({ payload, references: refs });
         // Hand off to Archive synchronously — Archive prepends from
         // sessionStorage on mount before any SSE event arrives.
-        pushOptimisticJob(response);
+        // FE-04: feed the response straight into the archive store so the
+        // page we navigate to renders the QUEUED card immediately.
+        // The store also persists it to IndexedDB so a reload survives.
+        await archiveStore.insertOptimistic(response);
         // Reset the request id so the next Generate gets a fresh one.
         clientRequestIdRef.current = null;
         navigate("/archive");
@@ -386,7 +389,10 @@ export default function CreatePage() {
         setSubmitting(true);
         try {
           const response = await createJob({ payload: enriched, references: refs });
-          pushOptimisticJob(response);
+          // FE-04: feed the response straight into the archive store so the
+        // page we navigate to renders the QUEUED card immediately.
+        // The store also persists it to IndexedDB so a reload survives.
+        await archiveStore.insertOptimistic(response);
           clientRequestIdRef.current = null;
           navigate("/archive");
         } catch (err) {
