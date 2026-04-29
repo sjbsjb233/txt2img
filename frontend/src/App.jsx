@@ -4,6 +4,7 @@ import LoginPage from "./pages/LoginPage.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
 import CreatePage from "./pages/CreatePage.jsx";
 import ArchivePage from "./pages/ArchivePage.jsx";
+import AdminPage from "./pages/AdminPage.jsx";
 import Layout from "./components/Layout.jsx";
 import RequireAuth from "./components/RequireAuth.jsx";
 import ConnectionLost from "./components/ConnectionLost.jsx";
@@ -69,6 +70,7 @@ export default function App() {
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/create" element={<CreatePage />} />
           <Route path="/archive" element={<ArchivePage />} />
+          <Route path="/admin" element={<AdminPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>
