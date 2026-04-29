@@ -753,9 +753,6 @@ export default function ArchivePage() {
   const drawerOpen = !!drawerRow;
   const drawerWidth = 460;
 
-  const baseCols = 4;
-  const cols = drawerOpen ? Math.max(3, baseCols - 1) : baseCols;
-
   const onItemClick = useCallback((item) => {
     if (item.kind === "set") {
       setDrawerHash(null);
@@ -1016,9 +1013,8 @@ export default function ArchivePage() {
             <div
               style={{
                 marginTop: 28, display: "grid",
-                gridTemplateColumns: `repeat(${cols}, 1fr)`,
+                gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
                 gap: 12,
-                transition: "grid-template-columns 360ms cubic-bezier(.22,.85,.22,1)",
               }}
             >
               {items.map((item) => {
