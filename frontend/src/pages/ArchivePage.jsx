@@ -30,6 +30,7 @@ import {
   FailCard,
   ArchiveSetCard,
   ArchiveSetDetail,
+  ArchiveEmptyHero,
 } from "../components/archive";
 import {
   downloadImageFile,
@@ -893,7 +894,10 @@ export default function ArchivePage() {
                 willChange: "transform",
               }}
             >
-              Everything you've made.
+              {showEmpty
+                ? <>Nothing in the archive <span style={{ fontStyle: "italic" }}>yet.</span></>
+                : "Everything you've made."
+              }
             </h1>
           </div>
 
@@ -991,23 +995,7 @@ export default function ArchivePage() {
             </div>
           </div>
 
-          {showEmpty && (
-            <div
-              className="mono"
-              style={{
-                marginTop: 80,
-                padding: "40px 0",
-                textAlign: "center",
-                color: "var(--ink-3)",
-                fontSize: 14,
-              }}
-            >
-              <div style={{ fontFamily: "var(--font-display)", fontSize: 28, marginBottom: 8 }}>
-                No jobs yet.
-              </div>
-              <div>Hit Create to make your first one.</div>
-            </div>
-          )}
+          {showEmpty && <ArchiveEmptyHero />}
 
           {!showEmpty && (
             <div
