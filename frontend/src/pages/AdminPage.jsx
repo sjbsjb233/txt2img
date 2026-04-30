@@ -10,9 +10,13 @@ import CleanupTab from "./admin/CleanupTab.jsx";
 import AnnouncementsTab from "./admin/AnnouncementsTab.jsx";
 import AuditTab from "./admin/AuditTab.jsx";
 
+// `count` is no longer hardcoded for tabs that have live data on the
+// backend — UsersTab queries `/api/admin/users` itself; the others
+// will follow as their own backend slices land. We leave the prop on
+// the tab definitions so the rendering pipeline stays unchanged.
 const TABS = [
   { id: "overview", label: "Overview", Component: OverviewTab },
-  { id: "users", label: "Users", count: 142, Component: UsersTab },
+  { id: "users", label: "Users", Component: UsersTab },
   { id: "tiers", label: "Tiers", Component: TiersTab },
   { id: "providers", label: "Providers", count: 4, Component: ProvidersTab },
   { id: "config", label: "Config", Component: ConfigTab },

@@ -35,17 +35,41 @@ export function setApiBase(value) {
   }
 }
 
+// Token storage. Two layers:
+//   - localStorage (default): persists across tabs and reloads. Used for
+//     normal logins.
+//   - sessionStorage (override): per-tab. Used by the impersonation
+//     flow so the new window doesn't trample the admin tab's token.
+//     When sessionStorage holds a token, it wins on this tab; the
+//     admin tab still reads its localStorage admin token.
+//
+// All getters / setters go through these helpers so the override
+// rule lives in exactly one place.
+
 export function getToken() {
+  const session = sessionStorage.getItem(TOKEN_KEY);
+  if (session) return session;
   return localStorage.getItem(TOKEN_KEY);
 }
 
 export function setToken(token) {
+  // Default writes go to localStorage so a normal login survives a
+  // tab refresh / reopen. Use ``setSessionToken`` for the per-tab
+  // impersonation flow.
   if (token) localStorage.setItem(TOKEN_KEY, token);
   else localStorage.removeItem(TOKEN_KEY);
 }
 
+export function setSessionToken(token) {
+  if (token) sessionStorage.setItem(TOKEN_KEY, token);
+  else sessionStorage.removeItem(TOKEN_KEY);
+}
+
 export function clearToken() {
+  // Clear both layers so any logout pathway (force-logout interceptor,
+  // explicit logout, impersonation exit) releases everything.
   localStorage.removeItem(TOKEN_KEY);
+  sessionStorage.removeItem(TOKEN_KEY);
 }
 
 export async function apiFetch(path, { method = "GET", body, auth = true, headers = {} } = {}) {
@@ -141,9 +165,14 @@ export async function apiFetch(path, { method = "GET", body, auth = true, header
 
 const USER_KEY = "user";
 
+// Same per-tab override rule as the token: sessionStorage wins so the
+// impersonation flow's user object overrides the admin's cached
+// identity *only* on the impersonation tab.
+
 export function getCurrentUser() {
   try {
-    const raw = localStorage.getItem(USER_KEY);
+    const raw =
+      sessionStorage.getItem(USER_KEY) || localStorage.getItem(USER_KEY);
     if (!raw) return null;
     const u = JSON.parse(raw);
     if (u && typeof u === "object" && typeof u.id === "string") return u;
@@ -158,7 +187,13 @@ export function setCurrentUser(user) {
   else localStorage.removeItem(USER_KEY);
 }
 
+export function setSessionUser(user) {
+  if (user) sessionStorage.setItem(USER_KEY, JSON.stringify(user));
+  else sessionStorage.removeItem(USER_KEY);
+}
+
 export function clearAuth() {
   clearToken();
   setCurrentUser(null);
+  setSessionUser(null);
 }

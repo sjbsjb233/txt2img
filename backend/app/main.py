@@ -23,6 +23,7 @@ from app.api.admin.adapters import router as admin_adapters_router
 from app.api.admin.config import router as admin_config_router
 from app.api.admin.providers import router as admin_providers_router
 from app.api.admin.tiers import router as admin_tiers_router
+from app.api.admin.users import router as admin_users_router
 from app.api.archive import router as archive_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
@@ -206,6 +207,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_config_router)
     app.include_router(admin_providers_router)
     app.include_router(admin_tiers_router)
+    app.include_router(admin_users_router)
     return app
 
 

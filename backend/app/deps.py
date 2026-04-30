@@ -18,6 +18,7 @@ layer (``app.domain.access_policy``, added in PR-09).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import Depends, Header
@@ -28,6 +29,35 @@ from app.db.models import User
 from app.domain.runtime_configs import EmergencyConfig
 from app.utils.errors import api_error
 from app.utils.security import TokenError, decode_access_token
+
+
+# ---------------------------------------------------------------------------
+# Auth context — caller-visible bundle of "who is acting & on whose behalf"
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AuthContext:
+    """The fully-resolved auth state for one authenticated request.
+
+    Most route handlers don't need this — they just take ``CurrentUser``
+    and behave as that user. Admin handlers that emit audit log rows
+    use ``CurrentAdminContext`` instead so they can record the original
+    admin id even when the request was signed by an impersonate token.
+    """
+
+    user: User
+    """The user the request is acting *as*. ``token.sub``-based."""
+
+    impersonator_id: str | None
+    """Admin id from the JWT ``impersonator`` claim, or ``None`` for a
+    plain login token. When set, ``user`` is the *target* of the
+    impersonation, not the original actor.
+    """
+
+    @property
+    def is_impersonating(self) -> bool:
+        return self.impersonator_id is not None
 
 
 # ---------------------------------------------------------------------------
@@ -53,14 +83,21 @@ def _extract_bearer(authorization: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def get_current_user(
+async def get_auth_context(
     authorization: Annotated[str | None, Header()] = None,
-) -> User:
-    """Return the authenticated user or raise 401/403.
+) -> AuthContext:
+    """Decode the bearer token and resolve the request's auth context.
 
-    The token's ``sub`` is the user's primary key. Tier / quota / status
-    are read fresh from the DB on every call — never trust JWT claims
-    beyond identity (design doc §2.1).
+    Returns an :class:`AuthContext` carrying both the acting user (the
+    ``sub`` claim's user row) and, when present, the admin id from the
+    ``impersonator`` claim. Status checks live here so every
+    authenticated path inherits them.
+
+    Raises 401/403 with the §17 error codes:
+    - missing / malformed / invalid / expired bearer → 401 UNAUTHORIZED
+    - account disabled → 403 ACCOUNT_DISABLED
+    - account soft-deleted → 401 UNAUTHORIZED (we deliberately don't
+      leak the soft-delete distinction to an anonymous-ish caller)
     """
     token = _extract_bearer(authorization)
 
@@ -72,6 +109,13 @@ async def get_current_user(
     user_id = payload.get("sub")
     if not isinstance(user_id, str) or not user_id:
         raise api_error(401, "UNAUTHORIZED", "Token missing subject claim.")
+
+    impersonator_raw = payload.get("impersonator")
+    impersonator_id: str | None
+    if isinstance(impersonator_raw, str) and impersonator_raw:
+        impersonator_id = impersonator_raw
+    else:
+        impersonator_id = None
 
     async with get_session() as session:
         user = (
@@ -89,10 +133,25 @@ async def get_current_user(
         # don't accidentally leak the soft-delete distinction.
         raise api_error(401, "UNAUTHORIZED", "Account not found.")
 
-    return user
+    return AuthContext(user=user, impersonator_id=impersonator_id)
+
+
+async def get_current_user(
+    ctx: Annotated[AuthContext, Depends(get_auth_context)],
+) -> User:
+    """Return the authenticated user or raise 401/403.
+
+    The token's ``sub`` is the user's primary key. Tier / quota / status
+    are read fresh from the DB on every call — never trust JWT claims
+    beyond identity (design doc §2.1). Routes that need to know whether
+    the request was signed by an impersonate token should depend on
+    :func:`get_auth_context` directly instead.
+    """
+    return ctx.user
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
+CurrentContext = Annotated[AuthContext, Depends(get_auth_context)]
 
 
 # ---------------------------------------------------------------------------
@@ -101,15 +160,51 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
 async def get_current_admin(
-    user: Annotated[User, Depends(get_current_user)],
+    ctx: Annotated[AuthContext, Depends(get_auth_context)],
 ) -> User:
-    """Variant of ``get_current_user`` that additionally requires admin role."""
-    if user.role != "admin":
+    """Variant of ``get_current_user`` that additionally requires admin role.
+
+    Critically, we reject **impersonate tokens** here regardless of the
+    target's role: an admin who impersonates another user must not also
+    retain admin privileges through the impersonate token, otherwise
+    ``/api/admin/*`` writes during impersonation would skirt the audit
+    chain (the actor would resolve to whatever user owns the impersonate
+    session, not the admin who started it).
+    """
+    if ctx.impersonator_id is not None:
+        raise api_error(
+            403,
+            "FORBIDDEN",
+            "Admin endpoints are not available while impersonating a user.",
+        )
+    if ctx.user.role != "admin":
         raise api_error(403, "FORBIDDEN", "Admin privileges required.")
-    return user
+    return ctx.user
+
+
+async def get_current_admin_context(
+    ctx: Annotated[AuthContext, Depends(get_auth_context)],
+) -> AuthContext:
+    """Like :func:`get_current_admin` but exposes the full context.
+
+    Currently identical to ``get_current_admin`` because impersonation
+    is forbidden at the admin boundary, but admin handlers that want
+    to assert / log on the IP or audit chain can take this dependency
+    directly without re-deriving the context.
+    """
+    if ctx.impersonator_id is not None:
+        raise api_error(
+            403,
+            "FORBIDDEN",
+            "Admin endpoints are not available while impersonating a user.",
+        )
+    if ctx.user.role != "admin":
+        raise api_error(403, "FORBIDDEN", "Admin privileges required.")
+    return ctx
 
 
 CurrentAdmin = Annotated[User, Depends(get_current_admin)]
+CurrentAdminContext = Annotated[AuthContext, Depends(get_current_admin_context)]
 
 
 # ---------------------------------------------------------------------------

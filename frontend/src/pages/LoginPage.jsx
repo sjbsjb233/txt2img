@@ -2,8 +2,15 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import TurnstileModal from "../components/TurnstileModal.jsx";
 import * as authApi from "../api/auth.js";
-import { apiFetch, getApiBase, setApiBase } from "../api/client.js";
-import { setSession } from "../store/auth.js";
+import {
+  apiFetch,
+  getApiBase,
+  setApiBase,
+  setSessionToken,
+  setSessionUser,
+} from "../api/client.js";
+import { notify as notifyAuth, setSession } from "../store/auth.js";
+import { decodeJwtPayload } from "../utils/jwt.js";
 
 const CAPTIONS = [
   "issue №004 — apr 2026",
@@ -28,6 +35,38 @@ export default function LoginPage() {
     const id = setInterval(() => setTick((t) => t + 1), 100);
     return () => clearInterval(id);
   }, []);
+
+  // Impersonation handoff. The admin's UsersTab opens this page with
+  // `#impersonate=<jwt>` in a new window so the original admin tab
+  // keeps its admin session intact. We parse the hash, swap in the
+  // impersonate token + a synthetic user row, and bounce to /create.
+  // The impersonator banner reads the JWT directly so it'll appear
+  // immediately on the next render.
+  useEffect(() => {
+    const hash = window.location.hash || "";
+    if (!hash.startsWith("#impersonate=")) return;
+    const token = decodeURIComponent(hash.slice("#impersonate=".length));
+    if (!token) return;
+    const payload = decodeJwtPayload(token);
+    if (!payload || !payload.sub || !payload.impersonator) {
+      setError("Invalid impersonation token.");
+      window.history.replaceState(null, "", window.location.pathname);
+      return;
+    }
+    // Per-tab storage so we don't overwrite the admin's localStorage
+    // token in their original tab — both tabs share localStorage but
+    // sessionStorage is per-tab, and the apiFetch helpers prefer it.
+    setSessionToken(token);
+    setSessionUser({
+      id: payload.sub,
+      username: payload.u || "(impersonated)",
+      role: payload.r || "user",
+      display_name: null,
+    });
+    notifyAuth();
+    window.history.replaceState(null, "", window.location.pathname);
+    navigate("/create", { replace: true });
+  }, [navigate]);
 
   const cap = CAPTIONS[Math.floor(tick / 60) % CAPTIONS.length];
   const visible = cap.slice(
