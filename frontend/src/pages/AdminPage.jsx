@@ -1,24 +1,27 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Icon from "../components/Icon.jsx";
 import { StatusDot } from "./admin/atoms.jsx";
 import OverviewTab from "./admin/OverviewTab.jsx";
 import UsersTab from "./admin/UsersTab.jsx";
 import TiersTab from "./admin/TiersTab.jsx";
 import ProvidersTab from "./admin/ProvidersTab.jsx";
+import AdaptersTab from "./admin/AdaptersTab.jsx";
 import ConfigTab from "./admin/ConfigTab.jsx";
 import CleanupTab from "./admin/CleanupTab.jsx";
 import AnnouncementsTab from "./admin/AnnouncementsTab.jsx";
 import AuditTab from "./admin/AuditTab.jsx";
+import * as adminConfig from "../api/admin/config.js";
 
-// `count` is no longer hardcoded for tabs that have live data on the
-// backend — UsersTab queries `/api/admin/users` itself; the others
-// will follow as their own backend slices land. We leave the prop on
-// the tab definitions so the rendering pipeline stays unchanged.
+// `count` was hardcoded in the mock; we drop it on backend-wired tabs
+// because the real numbers vary and the chip looked stale. The
+// rendering pipeline still tolerates a `count` prop for tabs that
+// haven't been wired yet.
 const TABS = [
   { id: "overview", label: "Overview", Component: OverviewTab },
   { id: "users", label: "Users", Component: UsersTab },
   { id: "tiers", label: "Tiers", Component: TiersTab },
-  { id: "providers", label: "Providers", count: 4, Component: ProvidersTab },
+  { id: "providers", label: "Providers", Component: ProvidersTab },
+  { id: "adapters", label: "Adapters", Component: AdaptersTab },
   { id: "config", label: "Config", Component: ConfigTab },
   { id: "cleanup", label: "Cleanup", Component: CleanupTab },
   { id: "announcements", label: "Announcements", count: 2, Component: AnnouncementsTab },
@@ -68,12 +71,47 @@ function AdminTab({ id, label, count, active, onClick }) {
   );
 }
 
+// Map of emergency keys → human label for the top-of-page banner.
+const EMERGENCY_LABELS = {
+  "emergency.pause_generation": "pause_generation",
+  "emergency.pause_image_access": "pause_image_access",
+  "emergency.block_new_member_login": "block_new_member_login",
+  "emergency.force_captcha_global": "force_captcha_global",
+};
+
 export default function AdminPage({ initialTab = "overview" }) {
   const [tab, setTab] = useState(initialTab);
+  const [activeEmergencies, setActiveEmergencies] = useState([]);
   const Active = TABS.find((t) => t.id === tab)?.Component || OverviewTab;
-  // Only the Config tab carries an emergency banner in the design; reproducing
-  // the same trigger so the banner shows up when an admin lands on Config.
-  const alert = tab === "config" ? "force_captcha_global is ON" : null;
+
+  // Pull current config once so the emergency banner reflects live
+  // state — the previous mock hard-coded the banner. Refreshes on
+  // tab change so flipping a switch in Config and bouncing tabs
+  // shows the result.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const cfg = await adminConfig.getConfig();
+        if (!alive) return;
+        const out = [];
+        for (const k of Object.keys(EMERGENCY_LABELS)) {
+          if (cfg[k]) out.push(EMERGENCY_LABELS[k]);
+        }
+        setActiveEmergencies(out);
+      } catch {
+        // Non-fatal — banner just stays empty if the call fails.
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [tab]);
+
+  const alert =
+    activeEmergencies.length > 0
+      ? `${activeEmergencies.join(" · ")} ON`
+      : null;
 
   return (
     <div

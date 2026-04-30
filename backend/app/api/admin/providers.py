@@ -24,8 +24,10 @@ Security
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -41,15 +43,27 @@ from app.db.models import (
     ProviderTierAccess,
 )
 from app.deps import CurrentAdmin
+from app.domain.circuit_breaker import get_circuit_breaker
+from app.domain.metrics_engine import get_metrics_engine
 from app.domain.provider_ledger import LedgerError, get_provider_ledger
+from app.schemas.normalized import (
+    NormalizedRequest,
+    ProviderConfig,
+    StandardError,
+)
 from app.schemas.provider import (
     ProviderCreate,
+    ProviderListItem,
+    ProviderMetricsView,
     ProviderModelEntry,
     ProviderModelPatch,
     ProviderModelUpdateResponse,
     ProviderModelView,
     ProviderPatch,
+    ProviderResetCircuitResponse,
     ProviderResponse,
+    ProviderTestRequest,
+    ProviderTestResponse,
     ProviderTierAccessUpdate,
     ProviderTopup,
     ProviderTopupResponse,
@@ -171,18 +185,17 @@ def _isoformat(value: datetime | None) -> str | None:
     return value.isoformat()
 
 
-def _view_from_parts(
+def _base_view_kwargs(
     provider: Provider,
     models: list[ProviderModel],
     tiers: list[str],
-) -> ProviderResponse:
-    """Pure assembly of ``ProviderResponse`` from already-fetched parts.
+) -> dict[str, Any]:
+    """Shared field set for both ``ProviderResponse`` and ``ProviderListItem``.
 
-    Decoupled from the DB so ``list_providers`` (which bulk-fetches
-    every provider's models + tier-access in two queries) and
-    ``get_provider`` (which fetches per-row) share a single layout
-    function. Decryption + masking happens here because it is
-    consistent regardless of how the rows were fetched.
+    Decryption + masking lives here so the two response shapes can never
+    drift on the masking rule. Returning a dict (rather than a base
+    response object the caller would copy fields out of) keeps the call
+    sites short.
     """
     try:
         masked = mask_api_key(decrypt(provider.api_key_enc))
@@ -199,22 +212,22 @@ def _view_from_parts(
         )
         raise
 
-    return ProviderResponse(
-        id=provider.id,
-        label=provider.label,
-        adapter_type=provider.adapter_type,
-        base_url=provider.base_url,
-        api_key_masked=masked,
-        cost_per_image_cny=float(provider.cost_per_image_cny),
-        balance_cny=float(provider.balance_cny),
-        initial_balance_cny=float(provider.initial_balance_cny),
-        enabled=bool(provider.enabled),
-        note=provider.note,
-        max_concurrency=provider.max_concurrency,
-        rpm_limit=provider.rpm_limit,
-        circuit_state=provider.circuit_state,
-        cooldown_until=_isoformat(provider.cooldown_until),
-        supported_models=[
+    return {
+        "id": provider.id,
+        "label": provider.label,
+        "adapter_type": provider.adapter_type,
+        "base_url": provider.base_url,
+        "api_key_masked": masked,
+        "cost_per_image_cny": float(provider.cost_per_image_cny),
+        "balance_cny": float(provider.balance_cny),
+        "initial_balance_cny": float(provider.initial_balance_cny),
+        "enabled": bool(provider.enabled),
+        "note": provider.note,
+        "max_concurrency": provider.max_concurrency,
+        "rpm_limit": provider.rpm_limit,
+        "circuit_state": provider.circuit_state,
+        "cooldown_until": _isoformat(provider.cooldown_until),
+        "supported_models": [
             ProviderModelView(
                 model_id=m.model_id,
                 enabled=bool(m.enabled),
@@ -222,7 +235,61 @@ def _view_from_parts(
             )
             for m in sorted(models, key=lambda m: m.model_id)
         ],
-        tier_access=sorted(tiers),
+        "tier_access": sorted(tiers),
+    }
+
+
+def _view_from_parts(
+    provider: Provider,
+    models: list[ProviderModel],
+    tiers: list[str],
+) -> ProviderResponse:
+    """Build the basic single-item response (no live metrics)."""
+    return ProviderResponse(**_base_view_kwargs(provider, models, tiers))
+
+
+def _list_item_from_parts(
+    provider: Provider,
+    models: list[ProviderModel],
+    tiers: list[str],
+    *,
+    rpm_60s: int,
+) -> ProviderListItem:
+    """Build the list-row response, attaching live MetricsEngine summary.
+
+    Reads from the in-process :class:`MetricsEngine`; no DB hit. The
+    snapshot the engine flushes into ``providers.recent_calls_json``
+    every 60s is intentionally NOT used here — admin lists should show
+    the freshest numbers possible, not whatever the snapshot loop last
+    persisted. The persisted snapshot is for cold-start admin views
+    *after* a process restart (a future PR), not for the live admin
+    page.
+    """
+    metrics = get_metrics_engine()
+    base = _base_view_kwargs(provider, models, tiers)
+    metric_views: list[ProviderMetricsView] = []
+    window_seconds = max(1, metrics.window_seconds())
+    for m in sorted(models, key=lambda m: m.model_id):
+        # ``qps * window`` reconstructs the per-(provider, model) call
+        # count to one decimal of precision. We round up to the nearest
+        # int because admins expect "calls in last 5 min" to be a
+        # positive integer when traffic happened.
+        qps = metrics.qps(provider.id, m.model_id)
+        calls = int(round(qps * window_seconds))
+        metric_views.append(
+            ProviderMetricsView(
+                model_id=m.model_id,
+                calls=calls,
+                success_rate=metrics.success_rate(provider.id, m.model_id),
+                p50_ms=metrics.p50_ms(provider.id, m.model_id),
+                p95_ms=metrics.p95_ms(provider.id, m.model_id),
+            )
+        )
+    return ProviderListItem(
+        **base,
+        current_concurrency=metrics.current_concurrency(provider.id),
+        recent_calls_60s=rpm_60s,
+        metrics=metric_views,
     )
 
 
@@ -270,9 +337,9 @@ def _capabilities_to_json(capabilities: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-@router.get("", response_model=list[ProviderResponse])
-async def list_providers(_admin: CurrentAdmin) -> list[ProviderResponse]:
-    """Return every provider, sorted by id for deterministic UI ordering.
+@router.get("", response_model=list[ProviderListItem])
+async def list_providers(_admin: CurrentAdmin) -> list[ProviderListItem]:
+    """Return every provider with live runtime telemetry.
 
     Bulk-fetches ``provider_models`` and ``provider_tier_access`` in two
     extra queries and groups them in Python so the route stays at three
@@ -280,10 +347,11 @@ async def list_providers(_admin: CurrentAdmin) -> list[ProviderResponse]:
     variant would be N+1 (one for models + one for tier-access per
     provider) and noticeable as the catalog grows.
 
-    Real-time metrics (``metrics_5min``) and richer ``circuit_state``
-    transitions arrive in PR-10 / PR-16; today the row is the source of
-    truth for the static fields and ``circuit_state`` is whatever was
-    last persisted (``healthy`` for fresh rows).
+    Live metrics (PR-16): ``metrics`` carries a per-model summary over
+    the rolling :class:`MetricsEngine` window (currently 5 minutes by
+    default), and ``current_concurrency`` / ``recent_calls_60s`` reflect
+    in-flight load. Admin UIs that want a "freshness" check should
+    refresh on a 5–15s timer.
     """
     async with get_session() as session:
         providers = (
@@ -317,11 +385,18 @@ async def list_providers(_admin: CurrentAdmin) -> list[ProviderResponse]:
     for pid, tier in tier_rows:
         tiers_by_pid.setdefault(pid, []).append(tier)
 
+    # One bulk pass over the metrics engine for all providers — the
+    # ``recent_calls_in_60s_by_provider`` helper avoids the quadratic
+    # walk we'd get with per-provider lookups.
+    metrics = get_metrics_engine()
+    rpm_by_pid = metrics.recent_calls_in_60s_by_provider()
+
     return [
-        _view_from_parts(
+        _list_item_from_parts(
             p,
             models_by_pid.get(p.id, []),
             tiers_by_pid.get(p.id, []),
+            rpm_60s=rpm_by_pid.get(p.id, 0),
         )
         for p in providers
     ]
@@ -744,3 +819,234 @@ async def topup_provider(
             balance_after=result.balance_after,
             promoted_from_drained=result.promoted_from_drained,
         )
+
+
+# ---------------------------------------------------------------------------
+# Reset-circuit (PR-16)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/{provider_id}/reset-circuit",
+    response_model=ProviderResetCircuitResponse,
+)
+async def reset_circuit(
+    provider_id: str,
+    admin: CurrentAdmin,
+    request: Request,
+) -> ProviderResetCircuitResponse:
+    """Force the provider's circuit back to ``HEALTHY``.
+
+    Use this when an upstream you know is fixed is still in cooldown
+    (e.g. you fixed the API key, paid a bill, the relay is back). The
+    breaker forgets its consecutive-failure count and clears
+    ``cooldown_until`` so the next call goes through normally.
+
+    Has no effect on ``DRAINED`` (use topup) or ``DISABLED`` directly,
+    but the breaker's :meth:`reset_to_healthy` is intentionally
+    unconditional — admin reset is the override hatch and forcing
+    ``DRAINED`` back to healthy when balance is genuinely zero will
+    immediately re-DRAIN on the next selector pass anyway.
+    """
+    async with get_session() as session:
+        provider = await _load_provider(session, provider_id)
+
+    breaker = get_circuit_breaker()
+    new_state = await breaker.reset_to_healthy(provider_id)
+
+    async with get_session() as session:
+        await write_audit(
+            session,
+            actor_user_id=admin.id,
+            action="provider.reset_circuit",
+            target_kind="provider",
+            target_id=provider_id,
+            payload={"prior_state": provider.circuit_state},
+            ip=_client_ip(request),
+        )
+
+    return ProviderResetCircuitResponse(
+        provider_id=provider_id,
+        circuit_state=new_state,
+        cooldown_until=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test ping (PR-16)
+# ---------------------------------------------------------------------------
+
+
+# A short, deterministic prompt the test endpoint defaults to. Kept tiny
+# so it doesn't burn ledger / produce huge bills, even though we
+# explicitly skip the ledger below — the upstream may still bill us.
+_TEST_PROMPT_DEFAULT = "A small flat-vector mockup of a yellow banana on white."
+
+
+@router.post(
+    "/{provider_id}/test",
+    response_model=ProviderTestResponse,
+)
+async def test_provider(
+    provider_id: str,
+    body: ProviderTestRequest,
+    admin: CurrentAdmin,
+    request: Request,
+) -> ProviderTestResponse:
+    """Issue exactly one upstream call against ``provider_id``.
+
+    The test endpoint is a *probe*: it tells the admin whether the
+    provider answers a real request right now. We deliberately skip:
+
+    * the ledger — successful tests still cost upstream money but we
+      don't double-bill the provider's local balance row, and we don't
+      record the call in ``billing_ledger``. This is consistent with
+      design doc §13.4 ("test → does not count in ledger").
+    * the metrics engine — the test result has poor signal-to-noise
+      relative to real traffic and we'd rather not pollute the rolling
+      success-rate window with an admin-initiated probe.
+    * the breaker — see above; we don't want a single admin probe to
+      trigger HEALTHY → OPEN even though we DO want admins to *learn*
+      the provider just failed. They get the failure in the response.
+
+    A request body is optional: with no ``model_id`` we pick the first
+    enabled supported model on the provider; with no ``prompt`` we use
+    a tiny built-in default. The response includes the upstream
+    latency so admin UIs can flag slow providers.
+    """
+    async with get_session() as session:
+        provider = await _load_provider(session, provider_id)
+        models = await _load_models(session, provider_id)
+
+    enabled_models = [m for m in models if m.enabled]
+    if not enabled_models:
+        raise api_error(
+            422,
+            "INVALID_PARAMETER",
+            "Provider has no enabled supported_models to test.",
+            field="model_id",
+        )
+
+    if body.model_id is not None:
+        chosen = next(
+            (m for m in enabled_models if m.model_id == body.model_id),
+            None,
+        )
+        if chosen is None:
+            raise api_error(
+                422,
+                "INVALID_PARAMETER",
+                f"Model {body.model_id!r} is not enabled on this provider.",
+                field="model_id",
+            )
+    else:
+        chosen = sorted(enabled_models, key=lambda m: m.model_id)[0]
+
+    prompt = body.prompt or _TEST_PROMPT_DEFAULT
+
+    registry = get_registry()
+    if not registry.has(provider.adapter_type):
+        # Should be impossible (creation validates this), but treat as
+        # a 500-class state if a manual DB edit landed an unknown adapter.
+        raise api_error(
+            500,
+            "INVALID_PARAMETER",
+            f"Provider has unknown adapter_type {provider.adapter_type!r}.",
+            field="adapter_type",
+        )
+    adapter = registry.get(provider.adapter_type)
+
+    try:
+        cleartext_key = decrypt(provider.api_key_enc)
+    except CryptoError:
+        # Same handling as ``_view_from_parts`` — propagate as 500 via
+        # the global exception handler in main.py.
+        logger.exception(
+            "test: provider %s has unreadable api_key_enc", provider_id
+        )
+        raise
+
+    config = ProviderConfig(
+        id=provider.id,
+        base_url=provider.base_url,
+        api_key=cleartext_key,
+        adapter_type=provider.adapter_type,
+        # Short timeout for test pings: admins waiting on the modal
+        # don't want to stare at a 2-minute spinner.
+        timeout_seconds=30.0,
+    )
+
+    norm_request = NormalizedRequest(
+        model=chosen.model_id,
+        prompt=prompt,
+        n=1,
+    )
+
+    started = time.monotonic()
+    try:
+        result = await asyncio.wait_for(
+            adapter.generate(config, norm_request),
+            timeout=config.timeout_seconds + 5,
+        )
+        latency_ms = (time.monotonic() - started) * 1000
+        ok = result.image_count > 0
+        response = ProviderTestResponse(
+            provider_id=provider_id,
+            model_id=chosen.model_id,
+            ok=ok,
+            latency_ms=round(latency_ms, 2),
+            image_count=result.image_count,
+            error_kind=None if ok else "EMPTY_RESPONSE",
+            error_message=None if ok else "Upstream returned no image data.",
+        )
+    except asyncio.TimeoutError:
+        latency_ms = (time.monotonic() - started) * 1000
+        response = ProviderTestResponse(
+            provider_id=provider_id,
+            model_id=chosen.model_id,
+            ok=False,
+            latency_ms=round(latency_ms, 2),
+            image_count=0,
+            error_kind="UPSTREAM_TIMEOUT",
+            error_message=f"Test request exceeded {config.timeout_seconds:.0f}s.",
+        )
+    except StandardError as exc:
+        latency_ms = (time.monotonic() - started) * 1000
+        response = ProviderTestResponse(
+            provider_id=provider_id,
+            model_id=chosen.model_id,
+            ok=False,
+            latency_ms=round(latency_ms, 2),
+            image_count=0,
+            error_kind=exc.kind.value,
+            error_message=exc.message,
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        latency_ms = (time.monotonic() - started) * 1000
+        logger.exception("test: unexpected error for %s", provider_id)
+        response = ProviderTestResponse(
+            provider_id=provider_id,
+            model_id=chosen.model_id,
+            ok=False,
+            latency_ms=round(latency_ms, 2),
+            image_count=0,
+            error_kind="OTHER",
+            error_message=f"{type(exc).__name__}: {exc}",
+        )
+
+    async with get_session() as session:
+        await write_audit(
+            session,
+            actor_user_id=admin.id,
+            action="provider.test",
+            target_kind="provider",
+            target_id=provider_id,
+            payload={
+                "model_id": chosen.model_id,
+                "ok": response.ok,
+                "latency_ms": response.latency_ms,
+                "error_kind": response.error_kind,
+            },
+            ip=_client_ip(request),
+        )
+    return response
