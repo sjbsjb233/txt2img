@@ -287,3 +287,67 @@ class ProviderModelUpdateResponse(BaseModel):
     model_id: str
     enabled: bool
     capabilities: dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
+# PR-16 additions: live metrics, test ping, reset-circuit
+# ---------------------------------------------------------------------------
+
+
+class ProviderMetricsView(BaseModel):
+    """Per-(provider, model) rolling-window summary surfaced to admin.
+
+    All fields are over the same ``provider_scoring.metric_window_seconds``
+    window the selector reads, so the admin UI shows the numbers the
+    scheduler is actually scoring against.
+    """
+
+    model_id: str
+    calls: int
+    success_rate: float
+    p50_ms: float | None
+    p95_ms: float | None
+
+
+class ProviderListItem(ProviderResponse):
+    """Provider list row.
+
+    Extends :class:`ProviderResponse` with live runtime telemetry that
+    only makes sense on the list view. Single-item GET still returns the
+    plain :class:`ProviderResponse` so the wire format there stays
+    backward-compatible with PR-06 callers.
+    """
+
+    current_concurrency: int
+    recent_calls_60s: int
+    metrics: list[ProviderMetricsView] = Field(default_factory=list)
+
+
+class ProviderResetCircuitResponse(BaseModel):
+    provider_id: str
+    circuit_state: str
+    cooldown_until: str | None = None
+
+
+class ProviderTestRequest(BaseModel):
+    """Body for ``POST /api/admin/providers/<id>/test``.
+
+    Both fields optional: with no body we use the first model attached
+    to the provider and a short generic prompt. The test does NOT touch
+    the ledger or metrics — it's a side-effect-free probe.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_id: str | None = Field(default=None, min_length=1, max_length=128)
+    prompt: str | None = Field(default=None, min_length=1, max_length=4000)
+
+
+class ProviderTestResponse(BaseModel):
+    provider_id: str
+    model_id: str
+    ok: bool
+    latency_ms: float
+    image_count: int = 0
+    error_kind: str | None = None
+    error_message: str | None = None

@@ -20,8 +20,10 @@ from fastapi.responses import JSONResponse
 
 from app.adapters.base import AdapterRegistry
 from app.api.admin.adapters import router as admin_adapters_router
+from app.api.admin.cleanup import router as admin_cleanup_router
 from app.api.admin.config import router as admin_config_router
 from app.api.admin.providers import router as admin_providers_router
+from app.api.admin.sse import router as admin_sse_router
 from app.api.admin.tiers import router as admin_tiers_router
 from app.api.admin.users import router as admin_users_router
 from app.api.archive import router as archive_router
@@ -35,6 +37,12 @@ from app.config import get_settings
 from app.db import engine as db_engine
 from app.db import seed as db_seed
 from app.db.migrate import upgrade_to_head
+from app.domain.admin_broadcaster import (
+    collect_worker_pool_snapshot,
+    run_provider_metrics_loop,
+    run_worker_pool_loop,
+)
+from app.domain.cache_keeper import run_disk_usage_loop
 from app.domain.circuit_breaker import get_circuit_breaker
 from app.domain.config_center import get_config_center
 from app.domain.job_executor import get_job_executor
@@ -126,6 +134,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         run_metrics_snapshot_loop(metrics, list_provider_ids)
     )
     app.state.scheduler_task = asyncio.create_task(scheduler.run_forever(executor))
+    # PR-16: periodic disk-usage rollup so the cleanup suggestions
+    # surface fresh numbers without an admin manually triggering a
+    # walk; admin metrics + worker-pool fanout so admin dashboards
+    # stay live without polling. All three are best-effort and never
+    # die on transient errors — the loops swallow exceptions.
+    app.state.disk_usage_task = asyncio.create_task(run_disk_usage_loop())
+    app.state.admin_metrics_task = asyncio.create_task(
+        run_provider_metrics_loop(metrics, sse_hub)
+    )
+    app.state.admin_pool_task = asyncio.create_task(
+        run_worker_pool_loop(collect_worker_pool_snapshot, sse_hub)
+    )
 
     try:
         yield
@@ -148,6 +168,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             quota_task.cancel()
             with suppress(asyncio.CancelledError):
                 await quota_task
+        for attr in (
+            "disk_usage_task",
+            "admin_metrics_task",
+            "admin_pool_task",
+        ):
+            t = getattr(app.state, attr, None)
+            if t is not None:
+                t.cancel()
+                with suppress(asyncio.CancelledError):
+                    await t
         await db_engine.close_engine()
 
 
@@ -204,8 +234,10 @@ def create_app() -> FastAPI:
     # (e.g. POST /api/jobs/precheck) win first-match.
     app.include_router(archive_router)
     app.include_router(admin_adapters_router)
+    app.include_router(admin_cleanup_router)
     app.include_router(admin_config_router)
     app.include_router(admin_providers_router)
+    app.include_router(admin_sse_router)
     app.include_router(admin_tiers_router)
     app.include_router(admin_users_router)
     return app

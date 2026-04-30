@@ -1,45 +1,164 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as adminCleanup from "../../api/admin/cleanup.js";
 import { Hair } from "./atoms.jsx";
 
-const SUGGESTIONS = [
-  {
-    label: "Older than 7 days",
-    cutoff: "2026-04-22",
-    jobs: 421,
-    images: 1380,
-    bytes: "2.0 GB",
-  },
-  {
-    label: "Older than 30 days",
-    cutoff: "2026-03-30",
-    jobs: 1820,
-    images: 6210,
-    bytes: "8.8 GB",
-    recommended: true,
-  },
-  {
-    label: "Older than 90 days",
-    cutoff: "2026-01-29",
-    jobs: 4120,
-    images: 12480,
-    bytes: "21.4 GB",
-  },
-  {
-    label: "Failed jobs older than 1 day",
-    cutoff: "—",
-    jobs: 88,
-    images: 0,
-    bytes: "12 MB",
-  },
-  {
-    label: "Cancelled jobs · any age",
-    cutoff: "—",
-    jobs: 142,
-    images: 0,
-    bytes: "—",
-  },
-];
+const STATUS_OPTIONS = ["SUCCEEDED", "FAILED", "CANCELLED", "DELETED"];
+
+function humanBytes(n) {
+  if (n == null) return "—";
+  if (n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let val = n;
+  let i = 0;
+  while (val >= 1024 && i < units.length - 1) {
+    val /= 1024;
+    i += 1;
+  }
+  return i === 0 ? `${Math.round(val)} ${units[i]}` : `${val.toFixed(1)} ${units[i]}`;
+}
+
+function formatCutoff(cutoff) {
+  if (!cutoff) return "—";
+  try {
+    return new Date(cutoff).toISOString().slice(0, 10);
+  } catch {
+    return cutoff;
+  }
+}
+
+function describeRule(rule) {
+  if (rule.kind === "older_than_days") {
+    if (rule.statuses?.length) {
+      return `${rule.statuses.join("/")} older than ${rule.days}d`;
+    }
+    return `Older than ${rule.days}d`;
+  }
+  return `${(rule.statuses || []).join("/")} · any age`;
+}
 
 export default function CleanupTab() {
+  // Server data
+  const [suggestions, setSuggestions] = useState([]);
+  const [diskUsage, setDiskUsage] = useState({});
+  const [refreshedAt, setRefreshedAt] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  // Custom rule local state
+  const [customDays, setCustomDays] = useState("30");
+  const [customStatuses, setCustomStatuses] = useState(
+    () => new Set(["SUCCEEDED", "FAILED"]),
+  );
+  const [exemptStarred, setExemptStarred] = useState(true);
+
+  // Async dry-run / execute output
+  const [dryRunResult, setDryRunResult] = useState(null);
+  const [activeTask, setActiveTask] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [confirmTarget, setConfirmTarget] = useState(null); // {label, rules}
+  const pollTimer = useRef(null);
+
+  const loadSuggestions = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await adminCleanup.getSuggestions();
+      setSuggestions(res.suggestions || []);
+      setDiskUsage(res.disk_usage || {});
+      setRefreshedAt(res.refreshed_at);
+    } catch (err) {
+      setError(err.message || "Failed to load cleanup suggestions.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSuggestions();
+  }, [loadSuggestions]);
+
+  // Poll the active task until it's done, then refresh suggestions.
+  useEffect(() => {
+    if (!activeTask?.task_id) return;
+    if (activeTask.status === "done" || activeTask.status === "failed") {
+      void loadSuggestions();
+      return;
+    }
+    pollTimer.current = setTimeout(async () => {
+      try {
+        const next = await adminCleanup.getCleanupTask(activeTask.task_id);
+        setActiveTask(next);
+      } catch (err) {
+        setActiveTask((prev) =>
+          prev
+            ? { ...prev, status: "failed", error: err.message || "poll failed" }
+            : prev,
+        );
+      }
+    }, 600);
+    return () => {
+      if (pollTimer.current) clearTimeout(pollTimer.current);
+    };
+  }, [activeTask, loadSuggestions]);
+
+  const customRule = useMemo(() => {
+    const days = Number.parseInt(customDays, 10);
+    const statuses = Array.from(customStatuses);
+    if (statuses.length === 0) return null;
+    if (Number.isNaN(days) || days < 0) return null;
+    return [
+      {
+        kind: "older_than_days",
+        days,
+        statuses,
+      },
+    ];
+  }, [customDays, customStatuses]);
+
+  const toggleStatus = (status) => {
+    setCustomStatuses((prev) => {
+      const next = new Set(prev);
+      if (next.has(status)) next.delete(status);
+      else next.add(status);
+      return next;
+    });
+  };
+
+  const runDryRun = async (rules) => {
+    setBusy(true);
+    setError(null);
+    setDryRunResult(null);
+    try {
+      const res = await adminCleanup.dryRunCleanup({
+        rules,
+        exemptStarred,
+      });
+      setDryRunResult({ ...res, rules });
+    } catch (err) {
+      setError(err.message || "Dry-run failed.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runExecute = async (rules) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await adminCleanup.executeCleanup({
+        rules,
+        exemptStarred,
+      });
+      setActiveTask(res);
+      setDryRunResult(null);
+    } catch (err) {
+      setError(err.message || "Cleanup failed to start.");
+    } finally {
+      setBusy(false);
+      setConfirmTarget(null);
+    }
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
       <div
@@ -56,17 +175,10 @@ export default function CleanupTab() {
           </div>
           <div
             className="display"
-            style={{
-              fontSize: 32,
-              fontWeight: 800,
-              letterSpacing: "-0.025em",
-              marginTop: 6,
-            }}
+            style={{ fontSize: 32, fontWeight: 800, letterSpacing: "-0.025em", marginTop: 6 }}
           >
             Free up{" "}
-            <span style={{ fontStyle: "italic", color: "var(--banana-deep)" }}>
-              disk.
-            </span>
+            <span style={{ fontStyle: "italic", color: "var(--banana-deep)" }}>disk.</span>
           </div>
           <div
             style={{
@@ -77,8 +189,8 @@ export default function CleanupTab() {
               fontFamily: "var(--font-display)",
             }}
           >
-            DB rows flag DELETED first; then async rm -rf data/jobs/&lt;hash&gt;. SSE
-            task_deleted broadcasts.
+            DB rows flag DELETED first; then async rm -rf data/jobs/&lt;hash&gt;.
+            SSE task_deleted broadcasts.
           </div>
         </div>
         <div
@@ -102,37 +214,116 @@ export default function CleanupTab() {
               marginTop: 6,
             }}
           >
-            13.2{" "}
+            {humanBytes(diskUsage.data_jobs_bytes ?? 0).split(" ")[0]}{" "}
             <span className="mono" style={{ fontSize: 14, color: "var(--ink-3)" }}>
-              GB
+              {humanBytes(diskUsage.data_jobs_bytes ?? 0).split(" ")[1]}
             </span>
           </div>
-          <div
-            style={{
-              height: 6,
-              background: "var(--paper-3)",
-              marginTop: 10,
-              position: "relative",
-            }}
-          >
-            <div
-              style={{
-                position: "absolute",
-                inset: 0,
-                width: "8%",
-                background: "var(--ink)",
-              }}
-            />
-          </div>
-          <div
-            className="mono"
-            style={{ fontSize: 10, color: "var(--ink-3)", marginTop: 6 }}
-          >
-            of 180 GB · 8% used · refreshed 4m ago
+          <div className="mono" style={{ fontSize: 10, color: "var(--ink-3)", marginTop: 8 }}>
+            {diskUsage.job_count ?? 0} jobs · refreshed{" "}
+            {refreshedAt
+              ? new Date(refreshedAt).toLocaleString()
+              : "never"}
           </div>
         </div>
       </div>
 
+      {error && (
+        <div
+          style={{
+            padding: 10,
+            border: "1px solid var(--bad)",
+            color: "var(--bad)",
+            fontSize: 12,
+          }}
+        >
+          {error}
+        </div>
+      )}
+
+      {/* ---------- active task progress ---------- */}
+      {activeTask && (
+        <div
+          style={{
+            border: "2px solid var(--ink)",
+            background: "var(--banana-soft)",
+            padding: "12px 16px",
+            display: "flex",
+            alignItems: "center",
+            gap: 14,
+          }}
+        >
+          <div style={{ flex: 1 }}>
+            <div className="mono caps" style={{ fontSize: 9, color: "var(--ink-3)" }}>
+              CLEANUP TASK · {activeTask.task_id}
+            </div>
+            <div className="mono" style={{ fontSize: 13, fontWeight: 700, marginTop: 2 }}>
+              {activeTask.status.toUpperCase()} · {activeTask.processed_jobs}/
+              {activeTask.total_jobs} jobs · {humanBytes(activeTask.deleted_bytes)} freed
+            </div>
+            {activeTask.error && (
+              <div className="mono" style={{ fontSize: 11, color: "var(--bad)", marginTop: 4 }}>
+                {activeTask.error}
+              </div>
+            )}
+          </div>
+          {(activeTask.status === "done" || activeTask.status === "failed") && (
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => setActiveTask(null)}
+            >
+              Dismiss
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* ---------- dry-run result preview ---------- */}
+      {dryRunResult && (
+        <div
+          style={{
+            border: "1px solid var(--ink)",
+            background: "var(--paper-2)",
+            padding: "12px 16px",
+            display: "flex",
+            alignItems: "center",
+            gap: 14,
+          }}
+        >
+          <div style={{ flex: 1 }}>
+            <div className="mono caps" style={{ fontSize: 9, color: "var(--ink-3)" }}>
+              DRY-RUN PREVIEW
+            </div>
+            <div className="mono" style={{ fontSize: 13, fontWeight: 700, marginTop: 2 }}>
+              would delete {dryRunResult.job_count} jobs ·{" "}
+              {dryRunResult.image_count} images · frees {dryRunResult.disk_human}
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn sm"
+            onClick={() => setDryRunResult(null)}
+          >
+            Dismiss
+          </button>
+          <button
+            type="button"
+            className="btn sm ink"
+            disabled={busy}
+            onClick={() =>
+              setConfirmTarget({
+                label: "this dry-run",
+                rules: dryRunResult.rules,
+              })
+            }
+          >
+            Run for real
+          </button>
+        </div>
+      )}
+
+      {/* ---------- suggestions ---------- */}
       <div>
         <div
           className="mono caps"
@@ -154,97 +345,102 @@ export default function CleanupTab() {
             gap: 10,
           }}
         >
-          {SUGGESTIONS.map((s) => (
+          {loading && (
             <div
-              key={s.label}
-              style={{
-                border: "1px solid var(--ink)",
-                background: s.recommended ? "var(--banana-soft)" : "#fffdf7",
-                padding: "14px 18px",
-                display: "grid",
-                gridTemplateColumns: "minmax(220px, 1.4fr) 1fr 1fr 1fr 160px",
-                gap: 16,
-                alignItems: "center",
-                position: "relative",
-              }}
+              className="mono"
+              style={{ padding: 12, color: "var(--ink-3)", fontStyle: "italic" }}
             >
-              {s.recommended && (
-                <div
-                  style={{
-                    position: "absolute",
-                    top: -1,
-                    left: -1,
-                    padding: "2px 8px",
-                    background: "var(--ink)",
-                    color: "var(--banana)",
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 9,
-                    fontWeight: 700,
-                    letterSpacing: "0.14em",
-                  }}
-                >
-                  RECOMMENDED
-                </div>
-              )}
-              <div>
-                <div
-                  style={{
-                    fontSize: 15,
-                    fontWeight: 700,
-                    marginTop: s.recommended ? 12 : 0,
-                  }}
-                >
-                  {s.label}
-                </div>
-                <div
-                  className="mono"
-                  style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 2 }}
-                >
-                  cutoff · {s.cutoff}
-                </div>
-              </div>
-              <div>
-                <div className="mono caps" style={{ fontSize: 9, color: "var(--ink-3)" }}>
-                  JOBS
-                </div>
-                <div
-                  className="ticker"
-                  style={{ fontSize: 20, fontWeight: 800, letterSpacing: "-0.02em" }}
-                >
-                  {s.jobs.toLocaleString()}
-                </div>
-              </div>
-              <div>
-                <div className="mono caps" style={{ fontSize: 9, color: "var(--ink-3)" }}>
-                  IMAGES
-                </div>
-                <div
-                  className="ticker"
-                  style={{ fontSize: 20, fontWeight: 800, letterSpacing: "-0.02em" }}
-                >
-                  {s.images.toLocaleString()}
-                </div>
-              </div>
-              <div>
-                <div className="mono caps" style={{ fontSize: 9, color: "var(--ink-3)" }}>
-                  FREES
-                </div>
-                <div
-                  className="ticker"
-                  style={{ fontSize: 20, fontWeight: 800, letterSpacing: "-0.02em" }}
-                >
-                  {s.bytes}
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-                <button className="btn sm">Dry-run</button>
-                <button className="btn sm ink">Run cleanup</button>
-              </div>
+              loading suggestions…
             </div>
-          ))}
+          )}
+          {!loading &&
+            suggestions.map((s) => (
+              <div
+                key={`${s.rule.kind}-${s.rule.days}-${(s.rule.statuses || []).join(",")}`}
+                style={{
+                  border: "1px solid var(--ink)",
+                  background: "#fffdf7",
+                  padding: "14px 18px",
+                  display: "grid",
+                  gridTemplateColumns: "minmax(220px, 1.4fr) 1fr 1fr 1fr 200px",
+                  gap: 16,
+                  alignItems: "center",
+                  position: "relative",
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 15, fontWeight: 700 }}>
+                    {s.period_label}
+                  </div>
+                  <div
+                    className="mono"
+                    style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 2 }}
+                  >
+                    cutoff · {formatCutoff(s.cutoff)}
+                  </div>
+                </div>
+                <div>
+                  <div className="mono caps" style={{ fontSize: 9, color: "var(--ink-3)" }}>
+                    JOBS
+                  </div>
+                  <div
+                    className="ticker"
+                    style={{ fontSize: 20, fontWeight: 800, letterSpacing: "-0.02em" }}
+                  >
+                    {s.job_count.toLocaleString()}
+                  </div>
+                </div>
+                <div>
+                  <div className="mono caps" style={{ fontSize: 9, color: "var(--ink-3)" }}>
+                    IMAGES
+                  </div>
+                  <div
+                    className="ticker"
+                    style={{ fontSize: 20, fontWeight: 800, letterSpacing: "-0.02em" }}
+                  >
+                    {s.image_count.toLocaleString()}
+                  </div>
+                </div>
+                <div>
+                  <div className="mono caps" style={{ fontSize: 9, color: "var(--ink-3)" }}>
+                    FREES
+                  </div>
+                  <div
+                    className="ticker"
+                    style={{ fontSize: 20, fontWeight: 800, letterSpacing: "-0.02em" }}
+                  >
+                    {s.disk_human}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                  <button
+                    type="button"
+                    className="btn sm"
+                    disabled={busy || s.job_count === 0}
+                    onClick={() => runDryRun([s.rule])}
+                  >
+                    Dry-run
+                  </button>
+                  <button
+                    type="button"
+                    className="btn sm ink"
+                    disabled={busy || s.job_count === 0}
+                    onClick={() =>
+                      setConfirmTarget({
+                        label: s.period_label,
+                        rules: [s.rule],
+                      })
+                    }
+                  >
+                    Run cleanup
+                  </button>
+                </div>
+              </div>
+            ))}
         </div>
       </div>
 
+      {/* ---------- custom rule ---------- */}
       <div>
         <div
           className="mono caps"
@@ -274,35 +470,32 @@ export default function CleanupTab() {
               flexWrap: "wrap",
             }}
           >
-            <select
-              className="inp"
-              defaultValue="older"
-              style={{ width: 200, fontFamily: "var(--font-mono)", fontSize: 12 }}
-            >
-              <option value="older">kind · older_than_days</option>
-              <option>kind · status_only</option>
-              <option>kind · user_id</option>
-            </select>
+            <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
+              older_than_days ·
+            </span>
             <input
               className="inp"
-              placeholder="days"
-              defaultValue="30"
+              value={customDays}
+              onChange={(e) => setCustomDays(e.target.value)}
               style={{ width: 100, fontFamily: "var(--font-mono)" }}
             />
             <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
               · statuses ·
             </span>
-            {["SUCCEEDED", "FAILED", "CANCELLED", "DELETED"].map((s, i) => (
-              <span
-                key={s}
-                className={`chip ${i < 2 ? "solid" : ""}`}
-                style={{ cursor: "pointer" }}
-              >
-                {s}
-              </span>
-            ))}
-            <div style={{ flex: 1 }} />
-            <button className="btn sm">+ Add rule</button>
+            {STATUS_OPTIONS.map((s) => {
+              const active = customStatuses.has(s);
+              return (
+                <button
+                  key={s}
+                  type="button"
+                  className={`chip ${active ? "solid" : ""}`}
+                  style={{ cursor: "pointer" }}
+                  onClick={() => toggleStatus(s)}
+                >
+                  {s}
+                </button>
+              );
+            })}
           </div>
           <div
             style={{
@@ -322,15 +515,122 @@ export default function CleanupTab() {
                 gap: 8,
               }}
             >
-              <input type="checkbox" defaultChecked /> exempt starred=true images
+              <input
+                type="checkbox"
+                checked={exemptStarred}
+                onChange={(e) => setExemptStarred(e.target.checked)}
+              />
+              exempt starred=true images
             </label>
             <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn">Dry-run</button>
-              <button className="btn ink shadowed">Execute cleanup</button>
+              <button
+                type="button"
+                className="btn"
+                disabled={busy || customRule == null}
+                onClick={() => runDryRun(customRule)}
+              >
+                Dry-run
+              </button>
+              <button
+                type="button"
+                className="btn ink shadowed"
+                disabled={busy || customRule == null}
+                onClick={() =>
+                  setConfirmTarget({
+                    label: "custom rule",
+                    rules: customRule,
+                  })
+                }
+              >
+                Execute cleanup
+              </button>
             </div>
           </div>
         </div>
       </div>
+
+      {/* ---------- confirm modal ---------- */}
+      {confirmTarget && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.35)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 50,
+          }}
+          onClick={() => setConfirmTarget(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              maxWidth: 460,
+              border: "2px solid var(--ink)",
+              background: "var(--paper)",
+              boxShadow: "5px 5px 0 var(--ink)",
+              padding: 22,
+            }}
+          >
+            <div className="display" style={{ fontSize: 22, fontWeight: 800 }}>
+              Confirm cleanup
+            </div>
+            <div
+              className="mono"
+              style={{ fontSize: 12, color: "var(--ink-2)", marginTop: 8 }}
+            >
+              You are about to permanently delete jobs matching:
+            </div>
+            <ul
+              className="mono"
+              style={{ fontSize: 12, marginTop: 6, paddingLeft: 18 }}
+            >
+              {confirmTarget.rules.map((r, i) => (
+                <li key={i}>{describeRule(r)}</li>
+              ))}
+            </ul>
+            <div
+              style={{
+                fontSize: 12,
+                color: "var(--ink-3)",
+                marginTop: 8,
+                fontStyle: "italic",
+                fontFamily: "var(--font-display)",
+              }}
+            >
+              {exemptStarred
+                ? "Starred images will be skipped."
+                : "Even starred images will be deleted."}
+            </div>
+            <div
+              style={{
+                display: "flex",
+                gap: 8,
+                justifyContent: "flex-end",
+                marginTop: 18,
+              }}
+            >
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setConfirmTarget(null)}
+                disabled={busy}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn ink shadowed"
+                disabled={busy}
+                onClick={() => runExecute(confirmTarget.rules)}
+              >
+                {busy ? "Starting…" : "Yes, run cleanup"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
