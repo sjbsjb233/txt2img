@@ -17,8 +17,11 @@ import {
   getToken,
   registerForceLogoutHandler,
   setCurrentUser,
+  setSessionToken,
+  setSessionUser,
   setToken,
 } from "../api/client.js";
+import { decodeJwtPayload } from "../utils/jwt.js";
 
 const listeners = new Set();
 
@@ -27,6 +30,12 @@ function notify() {
     try { fn(); } catch { /* one bad listener shouldn't break the others */ }
   }
 }
+
+// Re-export so the impersonation handoff in LoginPage can poke
+// subscribers after writing per-tab sessionStorage directly. We avoid
+// ``setSession`` there because that writes localStorage and would
+// clobber the admin's session in their original tab.
+export { notify };
 
 export function subscribe(fn) {
   listeners.add(fn);
@@ -69,12 +78,26 @@ export function setSession({ accessToken, user }) {
  * state, then notify subscribers. Failures on the network call are
  * swallowed because the backend is sessionless — clearing the client is
  * what actually logs the user out.
+ *
+ * Special-cases impersonation tabs: if the current tab is using a
+ * per-tab impersonate token (sessionStorage layer), we only clear
+ * sessionStorage so the admin's localStorage session in their original
+ * tab survives. Same routing semantics in the UI — the user lands on
+ * /login afterwards either way.
  */
 export async function logout() {
+  const token = getToken();
+  const payload = token ? decodeJwtPayload(token) : null;
+  const isImpersonating = !!(payload && payload.impersonator);
   try {
     await authApi.logout();
   } catch { /* ignore */ }
-  clearAuth();
+  if (isImpersonating) {
+    setSessionToken(null);
+    setSessionUser(null);
+  } else {
+    clearAuth();
+  }
   notify();
 }
 

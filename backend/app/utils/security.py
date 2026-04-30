@@ -99,6 +99,48 @@ def issue_access_token(
     return jwt.encode(payload, settings.JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
+# Default impersonation lifetime per design doc §13.2: 30 minutes.
+IMPERSONATE_TTL_SECONDS = 30 * 60
+
+
+def issue_impersonate_token(
+    *,
+    target_user_id: str,
+    target_username: str,
+    target_role: str,
+    impersonator_user_id: str,
+    expires_in_seconds: int = IMPERSONATE_TTL_SECONDS,
+) -> tuple[str, int]:
+    """Sign a short-lived JWT that lets an admin act *as* another user.
+
+    The token's ``sub`` claim is the **target** user's id so all
+    downstream auth dependencies see the request as that user. The
+    extra ``impersonator`` claim carries the original admin id so
+    routes that write to the audit log can record both actors
+    correctly (design doc §13.11 requirement: "all impersonate
+    operations in audit_log have actor=admin").
+
+    Returns ``(token, expires_in_seconds)``. The TTL is also encoded
+    in ``exp`` but we hand it back so the impersonate response can
+    surface it without re-decoding.
+    """
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    expires_in_seconds = max(60, min(expires_in_seconds, IMPERSONATE_TTL_SECONDS * 2))
+    payload: dict[str, Any] = {
+        "sub": target_user_id,
+        "u": target_username,
+        "r": target_role,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(seconds=expires_in_seconds)).timestamp()),
+        "impersonator": impersonator_user_id,
+    }
+    return (
+        jwt.encode(payload, settings.JWT_SECRET, algorithm=JWT_ALGORITHM),
+        expires_in_seconds,
+    )
+
+
 class TokenError(Exception):
     """Raised when a JWT cannot be decoded, has expired, or is malformed."""
 
