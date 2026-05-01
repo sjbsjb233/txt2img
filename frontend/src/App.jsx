@@ -15,6 +15,7 @@ import {
   disconnect as disconnectSSE,
   useConnectionState,
 } from "./store/sse.js";
+import * as announcementsStore from "./store/announcements.js";
 import * as archiveStore from "./store/archive.js";
 
 export default function App() {
@@ -46,6 +47,19 @@ export default function App() {
       void archiveStore.mount(user.id);
     } else {
       archiveStore.unmount();
+    }
+  }, [isAuthenticated, user?.id]);
+
+  // Same lifecycle for the announcements store — mounting hydrates the
+  // active list from /api/announcements/active and subscribes to SSE.
+  // Mounting at the App level means the banner stack lives across
+  // route changes and a freshly-published announcement can appear on
+  // any page within milliseconds of the admin clicking Publish.
+  useEffect(() => {
+    if (isAuthenticated && user?.id) {
+      void announcementsStore.mount(user.id);
+    } else {
+      announcementsStore.unmount();
     }
   }, [isAuthenticated, user?.id]);
 

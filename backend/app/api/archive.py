@@ -51,6 +51,7 @@ from app.db.models import (
 )
 from app.deps import CurrentUser
 from app.domain.job_queue import get_job_queue
+from app.domain.runtime_configs import EmergencyConfig
 from app.schemas.archive import (
     JobDetail,
     JobDetailNotFound,
@@ -350,6 +351,7 @@ async def get_image_thumb(
     Long-cache: 30d immutable. ETag is a stable hash of the file path +
     mtime so clients can revalidate cheaply with ``If-None-Match``.
     """
+    _check_image_access_allowed(user)
     job = await _load_owned_job(hash_id, user.id)
     img = await _load_image(job.id, order)
 
@@ -376,6 +378,7 @@ async def get_image_original(
     via :class:`FileResponse` so a 50 MB original doesn't get buffered
     into memory.
     """
+    _check_image_access_allowed(user)
     job = await _load_owned_job(hash_id, user.id)
     img = await _load_image(job.id, order)
 
@@ -416,6 +419,7 @@ async def get_reference_thumb(
     24-MB-cap on uploads applies). The route exists so the frontend
     can use the same shape as output thumbnails.
     """
+    _check_image_access_allowed(user)
     job = await _load_owned_job(hash_id, user.id)
     ref = await _load_reference(job.id, order)
 
@@ -818,6 +822,26 @@ def _display_name_for(model_id: str) -> str:
 # ---------------------------------------------------------------------------
 # Static-file helpers
 # ---------------------------------------------------------------------------
+
+
+def _check_image_access_allowed(user) -> None:
+    """Reject image streams while ``emergency.pause_image_access`` is on.
+
+    Admins bypass — they need to inspect job output during an incident.
+    Everyone else gets 403 ``BLOCKED_BY_EMERGENCY``. The check is here
+    rather than in a FastAPI dependency because the four image-serving
+    routes share enough surface to centralise the guard, but other
+    archive routes (index, details, states) deliberately stay
+    accessible during a pause so the UI doesn't dead-end.
+    """
+    if user.role == "admin":
+        return
+    if EmergencyConfig().pause_image_access:
+        raise api_error(
+            403,
+            "BLOCKED_BY_EMERGENCY",
+            "Image access temporarily paused by admin.",
+        )
 
 
 def _resolve_under_data_root(rel_path: str) -> Path:
