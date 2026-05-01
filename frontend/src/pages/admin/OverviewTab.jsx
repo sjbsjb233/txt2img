@@ -1,80 +1,258 @@
+// Admin overview tab — bound to /api/admin/metrics/overview and the
+// /api/admin/metrics/timeseries endpoint for the bottom chart.
+//
+// The polling cadence is intentionally generous (10 s) so an admin
+// staring at the page sees fresh numbers without burning DB reads.
+// A separate refresh button is offered for impatient operators.
+
+import { useEffect, useMemo, useState } from "react";
 import { Hair, StatusDot, TierPill } from "./atoms.jsx";
+import * as metricsApi from "../../api/admin/metrics.js";
 
-const LANES = [
-  { tier: "vip", queued: 0, running: 1, w: 8 },
-  { tier: "premium", queued: 2, running: 4, w: 4 },
-  { tier: "standard", queued: 12, running: 8, w: 2 },
-  { tier: "free", queued: 31, running: 4, w: 1 },
+// ---------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------
+
+function formatBytes(n) {
+  if (n == null || Number.isNaN(n)) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = Number(n);
+  for (const u of units) {
+    if (value < 1024 || u === units.at(-1)) {
+      return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} ${u}`;
+    }
+    value /= 1024;
+  }
+  return `${value.toFixed(1)} TB`;
+}
+
+function formatPercent(value) {
+  if (value == null || Number.isNaN(value)) return "—";
+  return `${(Number(value) * 100).toFixed(1)}`;
+}
+
+function pillToneForCircuit(state) {
+  if (state === "healthy") return "ok";
+  if (state === "half_open") return "warn";
+  if (state === "open" || state === "drained" || state === "disabled") return "muted";
+  return "muted";
+}
+
+const TIER_ORDER = ["vip", "premium", "standard", "free"];
+const TIER_WEIGHTS = { vip: 8, premium: 4, standard: 2, free: 1 };
+
+const RANGE_LABELS = [
+  { id: "24h", label: "24H" },
+  { id: "7d", label: "7D" },
+  { id: "30d", label: "30D" },
 ];
 
-const STATS = [
-  { label: "ACTIVE USERS · TODAY", value: "42", delta: "+6" },
-  { label: "JOBS · TODAY", value: "1,240", delta: "+184" },
-  { label: "IMAGES · TODAY", value: "3,812", delta: "+412" },
-  { label: "DISK · /APP/DATA", value: "14.3", unit: "GB", sub: "of 180 GB" },
-  { label: "SUCCESS RATE · 24H", value: "98.1", unit: "%" },
-];
+// ---------------------------------------------------------------------
+// Tiny inline bar chart (no external deps; mirrors mock styling)
+// ---------------------------------------------------------------------
 
-const PROVIDERS = [
-  { id: "bltcy", state: "healthy", calls: 142, sr: 98.6, p50: 8.2, balance: 3.42 },
-  { id: "openai_official", state: "healthy", calls: 56, sr: 100, p50: 5.1, balance: 24.18 },
-  { id: "azure_eu", state: "half_open", calls: 0, sr: null, p50: null, balance: 12.0 },
-  { id: "relay_jp", state: "drained", calls: 0, sr: null, p50: null, balance: 0.12 },
-];
+function MiniBarChart({ points }) {
+  const max = Math.max(1, ...points.map((p) => p.value || 0));
+  const len = points.length;
+  return (
+    <div
+      style={{
+        height: 160,
+        border: "1px solid var(--ink)",
+        background: "#fffdf7",
+        padding: "16px 20px",
+        display: "flex",
+        alignItems: "flex-end",
+        gap: 2,
+      }}
+    >
+      {points.map((p, i) => {
+        const v = p.value || 0;
+        const h = max > 0 ? Math.max(2, Math.round((v / max) * 100)) : 2;
+        // Highlight the last 1/6 of the chart with banana so the user
+        // can pick the recent end at a glance.
+        const recent = i >= Math.floor(len * (5 / 6));
+        return (
+          <div
+            key={p.ts}
+            title={`${p.ts}\n${v.toFixed(2)}`}
+            style={{
+              flex: 1,
+              height: `${h}%`,
+              background: recent ? "var(--banana)" : "var(--ink)",
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// Tab
+// ---------------------------------------------------------------------
 
 export default function OverviewTab() {
+  const [overview, setOverview] = useState(null);
+  const [overviewError, setOverviewError] = useState(null);
+  const [overviewLoading, setOverviewLoading] = useState(true);
+
+  const [timeseries, setTimeseries] = useState(null);
+  const [tsError, setTsError] = useState(null);
+  const [range, setRange] = useState("24h");
+
+  // ---- fetchers ------------------------------------------------------
+
+  async function fetchOverview() {
+    setOverviewLoading(true);
+    try {
+      const data = await metricsApi.getOverview();
+      setOverview(data);
+      setOverviewError(null);
+    } catch (err) {
+      setOverviewError(err?.message || "Failed to load overview");
+    } finally {
+      setOverviewLoading(false);
+    }
+  }
+
+  async function fetchTimeseries(r) {
+    try {
+      const data = await metricsApi.getTimeseries({
+        metric: "jobs_count",
+        range: r,
+      });
+      setTimeseries(data);
+      setTsError(null);
+    } catch (err) {
+      setTsError(err?.message || "Failed to load timeseries");
+    }
+  }
+
+  useEffect(() => {
+    fetchOverview();
+    const t = setInterval(fetchOverview, 10_000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    fetchTimeseries(range);
+    const t = setInterval(() => fetchTimeseries(range), 60_000);
+    return () => clearInterval(t);
+  }, [range]);
+
+  // ---- derived -------------------------------------------------------
+
+  const stats = useMemo(() => {
+    if (!overview) return [];
+    return [
+      {
+        label: "ACTIVE USERS · TODAY",
+        value: String(overview.active_users_today),
+      },
+      { label: "JOBS · TODAY", value: String(overview.jobs_today) },
+      { label: "IMAGES · TODAY", value: String(overview.images_today) },
+      {
+        label: "DISK · /APP/DATA",
+        value: formatBytes(overview.disk_usage?.data_jobs_bytes ?? 0).split(" ")[0],
+        unit: formatBytes(overview.disk_usage?.data_jobs_bytes ?? 0).split(" ")[1] || "GB",
+        sub:
+          overview.disk_usage?.free_bytes != null
+            ? `${formatBytes(overview.disk_usage.free_bytes)} free`
+            : null,
+      },
+      {
+        label: "SUCCESS RATE · 24H",
+        value: formatPercent(overview.success_rate_24h),
+        unit: "%",
+      },
+    ];
+  }, [overview]);
+
+  const lanes = useMemo(() => {
+    if (!overview?.queue_state) return [];
+    return TIER_ORDER.map((tier) => ({
+      tier,
+      queued: overview.queue_state[tier]?.queued ?? 0,
+      running: overview.queue_state[tier]?.running ?? 0,
+      w: TIER_WEIGHTS[tier],
+    }));
+  }, [overview]);
+
+  const providers = overview?.providers_summary || [];
+  const healthyCount = providers.filter((p) => p.circuit_state === "healthy").length;
+  const openCount = providers.filter((p) => p.circuit_state === "open").length;
+  const drainedCount = providers.filter((p) => p.circuit_state === "drained").length;
+
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 36 }}>
+      {/* ---------- top stats ---------- */}
       <section style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 12 }}>
-        {STATS.map((s) => (
-          <div
-            key={s.label}
-            style={{ padding: 18, background: "#fffdf7", border: "1px solid var(--ink)" }}
-          >
-            <div
-              className="mono caps"
-              style={{ fontSize: 9, color: "var(--ink-3)", letterSpacing: "0.14em" }}
-            >
-              {s.label}
-            </div>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 8 }}>
-              <span
-                className="ticker"
+        {overviewLoading && stats.length === 0
+          ? Array.from({ length: 5 }).map((_, i) => (
+              <div
+                key={i}
                 style={{
-                  fontSize: 38,
-                  fontWeight: 900,
-                  letterSpacing: "-0.04em",
-                  lineHeight: 1,
+                  padding: 18,
+                  background: "#fffdf7",
+                  border: "1px solid var(--ink)",
+                  height: 96,
                 }}
-              >
-                {s.value}
-              </span>
-              {s.unit && (
-                <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
-                  {s.unit}
-                </span>
-              )}
-            </div>
-            {s.delta && (
+              />
+            ))
+          : stats.map((s) => (
               <div
-                className="mono"
-                style={{ fontSize: 10, color: "var(--ok)", marginTop: 6 }}
+                key={s.label}
+                style={{ padding: 18, background: "#fffdf7", border: "1px solid var(--ink)" }}
               >
-                ↗ {s.delta} vs yesterday
+                <div
+                  className="mono caps"
+                  style={{ fontSize: 9, color: "var(--ink-3)", letterSpacing: "0.14em" }}
+                >
+                  {s.label}
+                </div>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginTop: 8 }}>
+                  <span
+                    className="ticker"
+                    style={{
+                      fontSize: 38,
+                      fontWeight: 900,
+                      letterSpacing: "-0.04em",
+                      lineHeight: 1,
+                    }}
+                  >
+                    {s.value}
+                  </span>
+                  {s.unit && (
+                    <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
+                      {s.unit}
+                    </span>
+                  )}
+                </div>
+                {s.sub && (
+                  <div className="mono" style={{ fontSize: 10, color: "var(--ink-3)", marginTop: 6 }}>
+                    {s.sub}
+                  </div>
+                )}
               </div>
-            )}
-            {s.sub && (
-              <div
-                className="mono"
-                style={{ fontSize: 10, color: "var(--ink-3)", marginTop: 6 }}
-              >
-                {s.sub}
-              </div>
-            )}
-          </div>
-        ))}
+            ))}
       </section>
 
+      {overviewError && (
+        <div
+          className="mono"
+          style={{
+            fontSize: 12,
+            color: "var(--bad)",
+            border: "1px solid var(--bad)",
+            padding: 12,
+          }}
+        >
+          {overviewError}
+        </div>
+      )}
+
+      {/* ---------- lanes + providers ---------- */}
       <section style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
         <div>
           <div
@@ -103,7 +281,7 @@ export default function OverviewTab() {
               background: "#fffdf7",
             }}
           >
-            {LANES.map((l, i) => {
+            {lanes.map((l, i) => {
               const queueWidth = Math.min(100, l.queued * 3);
               const runWidth = Math.min(100, l.running * 6);
               return (
@@ -120,10 +298,7 @@ export default function OverviewTab() {
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <TierPill tier={l.tier} />
-                    <span
-                      className="mono"
-                      style={{ fontSize: 10, color: "var(--ink-3)" }}
-                    >
+                    <span className="mono" style={{ fontSize: 10, color: "var(--ink-3)" }}>
                       w={l.w}
                     </span>
                   </div>
@@ -172,44 +347,6 @@ export default function OverviewTab() {
               );
             })}
           </div>
-          <div
-            className="mono"
-            style={{
-              fontSize: 10,
-              color: "var(--ink-3)",
-              marginTop: 10,
-              display: "flex",
-              gap: 14,
-            }}
-          >
-            <span>
-              <span
-                style={{
-                  display: "inline-block",
-                  width: 10,
-                  height: 10,
-                  background: "var(--banana)",
-                  marginRight: 5,
-                  verticalAlign: "middle",
-                }}
-              />
-              running
-            </span>
-            <span>
-              <span
-                style={{
-                  display: "inline-block",
-                  width: 10,
-                  height: 10,
-                  background:
-                    "repeating-linear-gradient(135deg, var(--ink-3), var(--ink-3) 3px, transparent 3px, transparent 6px)",
-                  marginRight: 5,
-                  verticalAlign: "middle",
-                }}
-              />
-              queued
-            </span>
-          </div>
         </div>
 
         <div>
@@ -228,70 +365,81 @@ export default function OverviewTab() {
               PROVIDERS · 5MIN WINDOW
             </div>
             <div className="mono" style={{ fontSize: 10, color: "var(--ink-3)" }}>
-              4 healthy · 0 open · 0 drained
+              {healthyCount} healthy · {openCount} open · {drainedCount} drained
             </div>
           </div>
           <Hair thick />
           <div
             style={{ marginTop: 10, border: "1px solid var(--ink)", background: "#fffdf7" }}
           >
-            {PROVIDERS.map((p, i) => (
+            {providers.length === 0 ? (
               <div
-                key={p.id}
+                className="mono"
                 style={{
-                  display: "grid",
-                  gridTemplateColumns: "120px 90px 60px 50px 70px 70px",
-                  gap: 10,
-                  alignItems: "center",
-                  padding: "12px 16px",
-                  borderTop: i ? "1px solid var(--rule)" : "none",
+                  fontSize: 11,
+                  color: "var(--ink-3)",
+                  padding: 18,
+                  textAlign: "center",
                 }}
               >
-                <div className="mono" style={{ fontSize: 12, fontWeight: 700 }}>
-                  {p.id}
-                </div>
-                <StatusDot
-                  tone={
-                    p.state === "healthy"
-                      ? "ok"
-                      : p.state === "half_open"
-                        ? "warn"
-                        : "muted"
-                  }
-                  label={p.state.toUpperCase()}
-                />
-                <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
-                  {p.calls} calls
-                </span>
-                <span
-                  className="mono"
-                  style={{
-                    fontSize: 11,
-                    color: p.sr != null ? "var(--ink)" : "var(--ink-4)",
-                    fontWeight: 700,
-                  }}
-                >
-                  {p.sr != null ? `${p.sr}%` : "—"}
-                </span>
-                <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
-                  {p.p50 != null ? `${p.p50}s` : "—"}
-                </span>
-                <span
-                  className="mono"
-                  style={{
-                    fontSize: 11,
-                    color: p.balance < 0.5 ? "var(--bad)" : "var(--ink-3)",
-                    textAlign: "right",
-                  }}
-                >
-                  ¥{p.balance.toFixed(2)}
-                </span>
+                no providers configured
               </div>
-            ))}
+            ) : (
+              providers.map((p, i) => (
+                <div
+                  key={p.id}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "120px 90px 60px 50px 70px 70px",
+                    gap: 10,
+                    alignItems: "center",
+                    padding: "12px 16px",
+                    borderTop: i ? "1px solid var(--rule)" : "none",
+                  }}
+                >
+                  <div className="mono" style={{ fontSize: 12, fontWeight: 700 }}>
+                    {p.id}
+                  </div>
+                  <StatusDot
+                    tone={pillToneForCircuit(p.circuit_state)}
+                    label={p.circuit_state.toUpperCase()}
+                  />
+                  <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
+                    {p.calls_5min} calls
+                  </span>
+                  <span
+                    className="mono"
+                    style={{
+                      fontSize: 11,
+                      color: "var(--ink)",
+                      fontWeight: 700,
+                    }}
+                  >
+                    {p.success_rate_5min != null
+                      ? `${(p.success_rate_5min * 100).toFixed(1)}%`
+                      : "—"}
+                  </span>
+                  <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
+                    {p.p50_ms_5min != null ? `${(p.p50_ms_5min / 1000).toFixed(1)}s` : "—"}
+                  </span>
+                  <span
+                    className="mono"
+                    style={{
+                      fontSize: 11,
+                      color: p.balance_cny < 0.5 ? "var(--bad)" : "var(--ink-3)",
+                      textAlign: "right",
+                    }}
+                  >
+                    ¥{Number(p.balance_cny || 0).toFixed(2)}
+                  </span>
+                </div>
+              ))
+            )}
           </div>
         </div>
       </section>
 
+      {/* ---------- timeseries chart ---------- */}
       <section>
         <div
           style={{
@@ -305,62 +453,56 @@ export default function OverviewTab() {
             className="mono caps"
             style={{ fontSize: 10, color: "var(--ink-3)", letterSpacing: "0.16em" }}
           >
-            JOBS · 24H
+            JOBS · {range.toUpperCase()}
           </div>
           <div style={{ display: "flex", gap: 6 }}>
-            {["24H", "7D", "30D"].map((r, i) => (
+            {RANGE_LABELS.map((r) => (
               <button
-                key={r}
-                className={`chip ${i === 0 ? "solid" : ""}`}
+                key={r.id}
+                className={`chip ${range === r.id ? "solid" : ""}`}
                 style={{ cursor: "pointer" }}
+                onClick={() => setRange(r.id)}
               >
-                {r}
+                {r.label}
               </button>
             ))}
           </div>
         </div>
         <Hair thick />
-        <div
-          style={{
-            marginTop: 12,
-            height: 160,
-            border: "1px solid var(--ink)",
-            background: "#fffdf7",
-            padding: "16px 20px",
-            display: "flex",
-            alignItems: "flex-end",
-            gap: 4,
-          }}
-        >
-          {Array.from({ length: 48 }, (_, i) => {
-            const h = 20 + Math.sin(i * 0.4) * 20 + Math.cos(i * 0.7) * 18 + 50;
-            return (
-              <div
-                key={i}
-                style={{
-                  flex: 1,
-                  height: `${h}%`,
-                  background: i > 40 ? "var(--banana)" : "var(--ink)",
-                }}
-              />
-            );
-          })}
-        </div>
-        <div
-          className="mono"
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            fontSize: 10,
-            color: "var(--ink-3)",
-            marginTop: 6,
-          }}
-        >
-          <span>00:00</span>
-          <span>06:00</span>
-          <span>12:00</span>
-          <span>18:00</span>
-          <span style={{ color: "var(--ink)" }}>now</span>
+        {tsError && (
+          <div
+            className="mono"
+            style={{
+              marginTop: 12,
+              fontSize: 12,
+              color: "var(--bad)",
+              border: "1px solid var(--bad)",
+              padding: 8,
+            }}
+          >
+            {tsError}
+          </div>
+        )}
+        <div style={{ marginTop: 12 }}>
+          {timeseries?.points?.length ? (
+            <MiniBarChart points={timeseries.points} />
+          ) : (
+            <div
+              style={{
+                height: 160,
+                border: "1px solid var(--ink)",
+                background: "#fffdf7",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "var(--ink-3)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 12,
+              }}
+            >
+              no data
+            </div>
+          )}
         </div>
       </section>
     </div>

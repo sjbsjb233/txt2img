@@ -1,4 +1,5 @@
 import { Outlet, useLocation } from "react-router-dom";
+import AnnouncementsBanner from "./AnnouncementsBanner.jsx";
 import ImpersonateBanner from "./ImpersonateBanner.jsx";
 import Sidebar from "./Sidebar.jsx";
 
@@ -18,6 +19,11 @@ export default function Layout() {
       }}
     >
       <ImpersonateBanner />
+      {/* Top-of-page announcement banners stack just under the impersonate
+          banner so they're visible everywhere inside the authenticated
+          shell. The high-priority modal variant (priority >= 5) renders
+          itself as a fixed overlay on top of the route content. */}
+      <AnnouncementsBanner />
       <div
         style={{
           flex: 1,

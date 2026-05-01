@@ -20,12 +20,16 @@ from fastapi.responses import JSONResponse
 
 from app.adapters.base import AdapterRegistry
 from app.api.admin.adapters import router as admin_adapters_router
+from app.api.admin.announcements import router as admin_announcements_router
+from app.api.admin.audit import router as admin_audit_router
 from app.api.admin.cleanup import router as admin_cleanup_router
 from app.api.admin.config import router as admin_config_router
+from app.api.admin.metrics import router as admin_metrics_router
 from app.api.admin.providers import router as admin_providers_router
 from app.api.admin.sse import router as admin_sse_router
 from app.api.admin.tiers import router as admin_tiers_router
 from app.api.admin.users import router as admin_users_router
+from app.api.announcements import router as announcements_router
 from app.api.archive import router as archive_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
@@ -233,9 +237,13 @@ def create_app() -> FastAPI:
     # archive *after* jobs so the more specific patterns from jobs
     # (e.g. POST /api/jobs/precheck) win first-match.
     app.include_router(archive_router)
+    app.include_router(announcements_router)
     app.include_router(admin_adapters_router)
+    app.include_router(admin_announcements_router)
+    app.include_router(admin_audit_router)
     app.include_router(admin_cleanup_router)
     app.include_router(admin_config_router)
+    app.include_router(admin_metrics_router)
     app.include_router(admin_providers_router)
     app.include_router(admin_sse_router)
     app.include_router(admin_tiers_router)
