@@ -49,6 +49,7 @@ from app.domain.admin_broadcaster import (
 from app.domain.cache_keeper import run_disk_usage_loop
 from app.domain.circuit_breaker import get_circuit_breaker
 from app.domain.config_center import get_config_center
+from app.domain.graceful_shutdown import force_fail_running_jobs
 from app.domain.job_executor import get_job_executor
 from app.domain.job_lifecycle import set_broadcast_sink
 from app.domain.job_queue import get_job_queue
@@ -133,6 +134,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if restored:
         logger.info("restored %d queued job(s) into scheduler", restored)
 
+    # Reconcile any RUNNING rows left behind by a previous unclean exit.
+    # Without this sweep, jobs that were mid-flight when the process was
+    # killed would stay RUNNING forever — no executor task owns them
+    # anymore, so they would never reach a terminal state on their own.
+    # The sweep refunds quota for each forced FAILED, so a user who lost
+    # an in-flight job to a crash isn't punished for it. Per design doc
+    # §20 problem 7.
+    crashed = await force_fail_running_jobs()
+    if crashed:
+        logger.warning(
+            "startup: reconciled %d RUNNING job(s) from previous unclean exit",
+            crashed,
+        )
+
     app.state.quota_reset_task = asyncio.create_task(run_quota_reset_loop())
     app.state.metrics_snapshot_task = asyncio.create_task(
         run_metrics_snapshot_loop(metrics, list_provider_ids)
@@ -157,6 +172,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         print("[txt2img] closing backend", flush=True)
         logger.info("closing txt2img backend")
         await scheduler.drain(timeout=30)
+        # Anything still in RUNNING after drain is a job whose worker
+        # did not finish in the 30s window. We force-fail those rows
+        # so users do not see their counters held forever and so the
+        # archive UI eventually shows a terminal state instead of a
+        # spinner that never resolves. Refund happens inside the
+        # helper, clamped at zero by QuotaGuard.
+        try:
+            forced = await force_fail_running_jobs()
+            if forced:
+                logger.warning(
+                    "shutdown: force-failed %d still-RUNNING job(s) "
+                    "after drain timeout",
+                    forced,
+                )
+        except Exception:
+            logger.exception("shutdown: force-fail sweep failed; continuing")
         scheduler_task = getattr(app.state, "scheduler_task", None)
         if scheduler_task is not None:
             scheduler_task.cancel()
