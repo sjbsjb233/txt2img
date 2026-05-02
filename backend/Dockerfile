@@ -19,11 +19,13 @@ RUN mkdir -p /app/data
 
 FROM base AS dev
 COPY app ./app
+COPY alembic.ini ./
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "debug"]
 
 FROM base AS prod
 COPY app ./app
+COPY alembic.ini ./
 EXPOSE 8000
 # Single worker: the in-process job queue, SSE hub, scheduler and metrics
 # engine are not designed to be shared across workers. See design doc §1.4.
