@@ -1,4 +1,16 @@
+import { useEffect, useState } from "react";
 import Icon from "../components/Icon.jsx";
+import OnboardingTutorial from "../components/OnboardingTutorial.jsx";
+import { useAuth } from "../store/auth.js";
+
+// Per-user localStorage flag — once a user has completed or dismissed
+// the walkthrough we never auto-open it again on login. Keyed by user
+// id so impersonation / shared machines don't carry the flag across
+// accounts.
+const TUTORIAL_SEEN_PREFIX = "txt2img_tutorial_seen_";
+function tutorialSeenKey(userId) {
+  return `${TUTORIAL_SEEN_PREFIX}${userId}`;
+}
 
 function ProgBar({ value, max = 100, color = "var(--ink)", track = "var(--paper-3)", height = 8 }) {
   return (
@@ -62,14 +74,80 @@ const PICKS = [
 ];
 
 export default function Dashboard() {
+  const { user, isAdmin } = useAuth();
+  const [tourOpen, setTourOpen] = useState(false);
+
+  // Auto-open the walkthrough the first time a non-admin user lands
+  // here. Admins skip the tour entirely (they tend to hit the dashboard
+  // for spot-checks, not onboarding). The flag is per-user in
+  // localStorage; manual replay via the "? Walkthrough" link bypasses
+  // it without touching the seen state.
+  useEffect(() => {
+    if (!user?.id || isAdmin) return;
+    try {
+      const seen = localStorage.getItem(tutorialSeenKey(user.id));
+      if (!seen) setTourOpen(true);
+    } catch {
+      /* localStorage unavailable — silently skip */
+    }
+  }, [user?.id, isAdmin]);
+
+  const finishTour = () => {
+    setTourOpen(false);
+    if (user?.id) {
+      try { localStorage.setItem(tutorialSeenKey(user.id), "1"); } catch { /* ignore */ }
+    }
+  };
+
+  const replayTour = () => setTourOpen(true);
+
   return (
     <div style={{ flex: 1, overflowY: "auto", background: "var(--paper)" }}>
+      <OnboardingTutorial
+        open={tourOpen}
+        onClose={finishTour}
+        onMinimise={finishTour}
+      />
       <div style={{ maxWidth: 1080, margin: "0 auto", padding: "44px 56px 80px" }}>
         <div
-          className="mono caps"
-          style={{ fontSize: 11, color: "var(--ink-3)", letterSpacing: "0.18em" }}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            fontSize: 11,
+            color: "var(--ink-3)",
+            letterSpacing: "0.18em",
+          }}
         >
-          TXT2IMG · WED 24 APR · GOOD AFTERNOON, LIUXI
+          <span
+            className="mono caps"
+            style={{ fontSize: 11, letterSpacing: "0.18em" }}
+          >
+            TXT2IMG · WED 24 APR · GOOD AFTERNOON, LIUXI
+          </span>
+          <span style={{ flex: 1 }} />
+          <button
+            type="button"
+            onClick={replayTour}
+            data-testid="dashboard-replay-tour"
+            className="mono caps"
+            title="Replay onboarding walkthrough"
+            style={{
+              background: "transparent",
+              border: "none",
+              padding: "4px 0",
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: "0.18em",
+              color: "var(--ink-3)",
+              textTransform: "uppercase",
+              cursor: "pointer",
+              borderBottom: "1px dashed var(--ink-4)",
+            }}
+          >
+            ? Walkthrough
+          </button>
         </div>
 
         <h1
