@@ -139,6 +139,17 @@ class ModelUIField(BaseModel):
     """For ``number`` controls: which preset buttons to render
     (e.g. ``[1, 2, 4, 8]`` for Output count)."""
 
+    value_key: str | None = None
+    """Optional override: the *request param* this field writes to in
+    ``POST /api/jobs``, when it differs from ``k``.
+
+    The Output count slider is the canonical case — its capability lives
+    under ``n_max`` (the ceiling) but it writes the chosen batch size to
+    ``n``. Without this indirection a click on a preset would pollute the
+    payload with ``{"n_max": 4}`` (a capability key the backend doesn't
+    accept) and leave ``n`` at its default. ``None`` means *use ``k`` as
+    the param key*."""
+
 
 class ModelDescriptor(BaseModel):
     """One entry in the ``/api/models`` ``models`` list."""

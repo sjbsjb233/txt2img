@@ -163,6 +163,7 @@ class OpenAIV1Adapter(BaseAdapter):
         return [
             ModelUIField(
                 k="n_max",
+                value_key="n",
                 control="number",
                 label="Output count",
                 hint="per generation",

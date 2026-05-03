@@ -11,22 +11,6 @@ import * as archiveStore from "../store/archive.js";
 import { usePreferences } from "../store/preferences.js";
 
 // ---------------------------------------------------------------------------
-// PR-2 skeleton: schema-driven params renderer.
-//
-// Off by default. Append `?schemaDrivenParams=1` to the URL to flip into the
-// new code path for visual QA without touching production behaviour. PR-3
-// flips the default and deletes the legacy JSX.
-// ---------------------------------------------------------------------------
-const USE_SCHEMA_DRIVEN_PARAMS = (() => {
-  if (typeof window === "undefined") return false;
-  try {
-    return new URLSearchParams(window.location.search).get("schemaDrivenParams") === "1";
-  } catch {
-    return false;
-  }
-})();
-
-// ---------------------------------------------------------------------------
 // Visual atoms
 //
 // Logos are keyed off the `logo` string the backend sends in each model
@@ -140,54 +124,80 @@ function aspectBoxSize(ratio) {
 // OpenAI-only `size` field into the gemini payload and trigger 422.
 // ---------------------------------------------------------------------------
 
-function valueAllowed(caps, key, value) {
-  if (value === null || value === undefined || value === false) return true;
-  const allowed = caps?.[key];
-  if (Array.isArray(allowed)) {
-    if (typeof value === "string") return allowed.includes(value);
-  }
-  if (typeof allowed === "number") {
-    if (typeof value === "number") return value <= allowed;
-  }
-  if (typeof allowed === "boolean") {
-    if (typeof value === "boolean") return value === false || allowed === true;
-  }
-  // No opinion at this layer → allowed.
-  if (allowed === undefined || allowed === null) {
-    // For boolean toggles a missing capability means "user must not opt in".
-    if (typeof value === "boolean") return value === false;
-    // For string fields we drop unconditionally.
-    if (typeof value === "string") return false;
-    // For numbers, leaving them at their default is fine.
-    return true;
-  }
-  return true;
+// ---------------------------------------------------------------------------
+// Param helpers — schema-driven. Walk every field declared by the model's
+// ui_schema and drop / clamp values that fall outside the merged
+// capabilities. Without this, switching from gpt-image-2 (size=1024x1024)
+// to gemini-3.1-flash would leak the OpenAI-only `size` field into the
+// gemini payload and trigger 422.
+//
+// `value_key` indirection: a field's `k` names the *capability* the cell
+// reads from (e.g. n_max), but the actual *param* it writes to may be a
+// different key (n). The fallback is `k` for the common case where they
+// match (size, aspect_ratio, quality, …).
+//
+// Field-key universe: anything outside the schema's value_keys plus a
+// hard-coded set of submission-glue keys (model / prompt / etc.) is
+// considered junk left over from a previous model and gets dropped on
+// reconcile. Without this gate, default user-prefs like
+// `aspect_ratio="1:1"` survive a switch to gpt-image-2 (which has no
+// aspect_ratio field) and leak into the request payload.
+// ---------------------------------------------------------------------------
+
+const SUBMISSION_GLUE_KEYS = new Set([
+  "model",
+  "prompt",
+  "session_id",
+  "client_request_id",
+  "captcha_token",
+]);
+
+function paramKey(field) {
+  return field.value_key || field.k;
 }
 
-function reconcileParams(params, caps) {
+function reconcileParams(params, capabilities, uiSchema) {
   const next = { ...params };
-  // String fields — drop if not in the capability list.
-  ["size", "aspect_ratio", "image_size", "quality", "output_format", "background", "moderation", "thinking_level"].forEach(
-    (key) => {
-      if (next[key] !== undefined && !valueAllowed(caps, key, next[key])) {
-        next[key] = undefined;
+  const allowedParamKeys = new Set(SUBMISSION_GLUE_KEYS);
+  for (const field of uiSchema || []) {
+    allowedParamKeys.add(paramKey(field));
+  }
+
+  // Drop any param that no longer corresponds to a schema field — this
+  // is what kills the gpt-image-2 ← gemini aspect_ratio leak.
+  for (const k of Object.keys(next)) {
+    if (!allowedParamKeys.has(k)) {
+      delete next[k];
+    }
+  }
+
+  for (const field of uiSchema || []) {
+    const cap = capabilities?.[field.k];
+    const pk = paramKey(field);
+    const cur = next[pk];
+
+    if (
+      field.control === "chip-grid" ||
+      field.control === "chip-row" ||
+      field.control === "select"
+    ) {
+      if (cur != null && Array.isArray(cap) && !cap.includes(cur)) {
+        delete next[pk];
+      }
+    } else if (field.control === "number") {
+      if (typeof cur === "number" && typeof cap === "number" && cur > cap) {
+        next[pk] = cap;
+      }
+    } else if (field.control === "toggle") {
+      if (cur === true && cap !== true) {
+        next[pk] = false;
       }
     }
-  );
-  // Booleans — scrub when the cap flips from true to false.
-  ["include_thoughts", "google_search", "image_search", "stream"].forEach(
-    (key) => {
-      if (next[key] === true && caps?.[key] !== true) next[key] = false;
-    }
-  );
-  // n must be ≤ n_max.
-  if (typeof caps?.n_max === "number" && typeof next.n === "number") {
-    if (next.n > caps.n_max) next.n = caps.n_max;
   }
   return next;
 }
 
-function applyDefaults(defaults, params, caps) {
+function applyDefaults(defaults, params, capabilities, uiSchema) {
   // Apply backend-recommended defaults only when the field is unset
   // *or* the previous value is no longer allowed. We lean to "preserve
   // user intent" so switching models keeps the prompt et al intact.
@@ -198,46 +208,7 @@ function applyDefaults(defaults, params, caps) {
   Object.entries(defaults || {}).forEach(([k, v]) => {
     if (v !== null && v !== undefined) setIfMissing(k, v);
   });
-  return reconcileParams(next, caps);
-}
-
-// ---------------------------------------------------------------------------
-// PR-2 skeleton helpers — schema-driven counterparts to the legacy
-// hard-coded helpers above. These are invoked only by the new render
-// path (gated on USE_SCHEMA_DRIVEN_PARAMS); the legacy path is untouched
-// so production behaviour is unchanged.
-// ---------------------------------------------------------------------------
-
-// Walk every field declared by the model's ui_schema and drop / clamp
-// values that fall outside the merged capabilities. Mirrors §5.2 step 4
-// of the design doc — same behaviour as legacy `reconcileParams` for
-// the current field set, but driven by the schema so future fields
-// don't need to be added to a hard-coded list.
-function reconcileParamsFromSchema(params, capabilities, uiSchema) {
-  const next = { ...params };
-  for (const field of uiSchema || []) {
-    const cap = capabilities?.[field.k];
-    const cur = next[field.k];
-
-    if (
-      field.control === "chip-grid" ||
-      field.control === "chip-row" ||
-      field.control === "select"
-    ) {
-      if (cur != null && Array.isArray(cap) && !cap.includes(cur)) {
-        next[field.k] = undefined;
-      }
-    } else if (field.control === "number") {
-      if (typeof cur === "number" && typeof cap === "number" && cur > cap) {
-        next[field.k] = cap;
-      }
-    } else if (field.control === "toggle") {
-      if (cur === true && cap !== true) {
-        next[field.k] = false;
-      }
-    }
-  }
-  return next;
+  return reconcileParams(next, capabilities, uiSchema);
 }
 
 // Build a render plan from (uiSchema, capabilities). For each field,
@@ -259,7 +230,7 @@ function useFieldRenderPlan(uiSchema, capabilities) {
       ) {
         if (!Array.isArray(cap) || cap.length === 0) {
           fieldDisabled = true;
-          disabledReason = "您当前 tier 下无中转站支持此参数";
+          disabledReason = "Not available on your current tier.";
           allowedOptions = new Set();
         } else {
           allowedOptions = new Set(cap);
@@ -272,7 +243,7 @@ function useFieldRenderPlan(uiSchema, capabilities) {
           // bound → still interactive but driven by the schema's max.
           if (max != null && max < lowerBound) {
             fieldDisabled = true;
-            disabledReason = "当前路径下不可调";
+            disabledReason = "Not adjustable for this model.";
           } else if (max != null && max === lowerBound && (field.presets?.length ?? 0) <= 1) {
             // Locked to a single value (e.g. Gemini n=1) — still
             // render so the layout is stable, but no presets to pick.
@@ -284,8 +255,8 @@ function useFieldRenderPlan(uiSchema, capabilities) {
           fieldDisabled = true;
           disabledReason =
             cap === false
-              ? "中转站未启用此特性"
-              : "您当前 tier 下无中转站支持此参数";
+              ? "Provider has not enabled this feature."
+              : "Not available on your current tier.";
         }
       }
 
@@ -306,17 +277,6 @@ function useFieldRenderPlan(uiSchema, capabilities) {
 // ---------------------------------------------------------------------------
 // CreatePage
 // ---------------------------------------------------------------------------
-
-const N_PRESETS = [1, 2, 4, 6, 8, 12];
-
-// Static descriptor copy for the IMAGE SIZE section (Gemini values).
-// Matches the original mockup: short tag under each value chip.
-const IMAGE_SIZE_NOTES = {
-  "512": "preview",
-  "1K": "balanced",
-  "2K": "print",
-  "4K": "max",
-};
 
 export default function CreatePage() {
   const navigate = useNavigate();
@@ -405,7 +365,12 @@ export default function CreatePage() {
   useEffect(() => {
     if (!selectedModel) return;
     setParams((prev) =>
-      applyDefaults(selectedModel.defaults, prev, selectedModel.capabilities)
+      applyDefaults(
+        selectedModel.defaults,
+        prev,
+        selectedModel.capabilities,
+        selectedModel.ui_schema
+      )
     );
   }, [selectedModel?.model_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -590,23 +555,16 @@ export default function CreatePage() {
 
   // -----------------------------------------------------------------
   // Derived view-model
+  //
+  // Param-panel fields are now driven entirely by the model's ui_schema
+  // (see useFieldRenderPlan / SchemaParamsPanel below). The few caps we
+  // still pluck inline are page-chrome bits the schema doesn't cover:
+  // the Output count ticker shown in the Generate button, the Reference
+  // upload limit, and the Prompt textarea cap.
   // -----------------------------------------------------------------
 
   const caps = selectedModel?.capabilities || {};
-  const maxN =
-    typeof caps.n_max === "number" ? caps.n_max : 1;
-  const showN = maxN > 1;
-  const aspectOptions = Array.isArray(caps.aspect_ratio) ? caps.aspect_ratio : null;
-  const sizeOptions = Array.isArray(caps.size) ? caps.size : null;
-  const imageSizeOptions = Array.isArray(caps.image_size) ? caps.image_size : null;
-  const qualityOptions = Array.isArray(caps.quality) ? caps.quality : null;
-  const outputFormatOptions = Array.isArray(caps.output_format) ? caps.output_format : null;
-  const backgroundOptions = Array.isArray(caps.background) ? caps.background : null;
-  const moderationOptions = Array.isArray(caps.moderation) ? caps.moderation : null;
-  const thinkingOptions = Array.isArray(caps.thinking_level) ? caps.thinking_level : null;
-  const includeThoughtsAvail = caps.include_thoughts === true;
-  const googleSearchAvail = caps.google_search === true;
-  const imageSearchAvail = caps.image_search === true;
+  const maxN = typeof caps.n_max === "number" ? caps.n_max : 1;
   const promptCharCap =
     typeof caps.max_prompt_chars === "number" ? caps.max_prompt_chars : 32_000;
 
@@ -616,18 +574,16 @@ export default function CreatePage() {
   const sessions = catalog?.sessions || [];
   const isEmpty = refs.length === 0;
   const generateCount = useMemo(() => {
-    if (!showN) return 1;
-    return params.n || 1;
-  }, [showN, params.n]);
+    if (maxN <= 1) return 1;
+    const n = params.n || 1;
+    return n > maxN ? maxN : n;
+  }, [maxN, params.n]);
 
   const errorMessage = submitError
     ? submitError.message || "Generation failed."
     : null;
 
-  // PR-2 skeleton: schema-driven render plan. Always computed (cheap
-  // memo), but only consumed when the feature flag is on. Once PR-3
-  // flips the default and deletes the legacy JSX this becomes the
-  // only consumer of params on the right rail.
+  // Schema-driven render plan for the right-rail param panel.
   const fieldPlan = useFieldRenderPlan(
     selectedModel?.ui_schema || [],
     selectedModel?.capabilities || {}
@@ -1259,339 +1215,12 @@ export default function CreatePage() {
               padding: "20px 22px",
             }}
           >
-            {USE_SCHEMA_DRIVEN_PARAMS ? (
-              <SchemaParamsPanel
-                plan={fieldPlan}
-                params={params}
-                setParam={setParam}
-                capabilities={selectedModel?.capabilities || {}}
-              />
-            ) : (
-              <>
-            {/* Output count — always shown. Standard preset list mirrors
-                the original mockup; chips above ``n_max`` are rendered
-                disabled instead of hidden so the row width is stable
-                across model switches. */}
-            <div
-              className="mono caps"
-              style={{ fontSize: 10, color: "var(--ink-3)", marginBottom: 8 }}
-            >
-              Output count
-            </div>
-            <div style={{ border: "1px solid var(--ink)", padding: 12, background: "#fffdf7" }}>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "baseline",
-                }}
-              >
-                <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
-                  per generation
-                </span>
-                <div
-                  className="ticker"
-                  style={{ fontSize: 24, fontWeight: 900, letterSpacing: "-0.03em" }}
-                >
-                  ×{generateCount}
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: 4, marginTop: 8 }}>
-                {N_PRESETS.map((n) => {
-                  const allowed = n <= maxN;
-                  const on = generateCount === n;
-                  return (
-                    <button
-                      key={n}
-                      onClick={() => allowed && setParam("n", n)}
-                      disabled={!allowed}
-                      title={
-                        allowed
-                          ? undefined
-                          : `${selectedModel?.display_name || "model"} caps n at ${maxN}`
-                      }
-                      style={{
-                        flex: 1,
-                        height: 30,
-                        background: on
-                          ? "var(--banana)"
-                          : allowed
-                          ? "transparent"
-                          : "var(--paper-3)",
-                        border: "1px solid var(--ink)",
-                        cursor: allowed ? "pointer" : "not-allowed",
-                        fontFamily: "var(--font-mono)",
-                        fontSize: 12,
-                        fontWeight: 700,
-                        color: allowed ? "var(--ink)" : "var(--ink-4)",
-                        opacity: allowed ? 1 : 0.5,
-                      }}
-                    >
-                      {n}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="hair" style={{ margin: "18px 0" }} />
-
-            {/* Shape (aspect ratio) — 3-column tall cells, matches the
-                original mockup exactly. Each cell carries a proportional
-                preview and the ratio label below. */}
-            {aspectOptions ? (
-              <>
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "baseline",
-                    justifyContent: "space-between",
-                    marginBottom: 10,
-                  }}
-                >
-                  <div className="mono caps" style={{ fontSize: 10, color: "var(--ink-3)" }}>
-                    Shape
-                  </div>
-                  <div className="mono" style={{ fontSize: 9, color: "var(--ink-3)" }}>
-                    aspect ratio
-                  </div>
-                </div>
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-                    gap: 6,
-                  }}
-                >
-                  {aspectOptions.map((r) => {
-                    const on = (params.aspect_ratio || null) === r;
-                    const { w, h } = aspectBoxSize(r);
-                    return (
-                      <button
-                        key={r}
-                        onClick={() => setParam("aspect_ratio", r)}
-                        style={{
-                          padding: "10px 8px",
-                          background: on ? "var(--ink)" : "#fffdf7",
-                          border: "1px solid var(--ink)",
-                          cursor: "pointer",
-                          display: "flex",
-                          flexDirection: "column",
-                          alignItems: "center",
-                          gap: 6,
-                          color: on ? "var(--banana)" : "var(--ink)",
-                        }}
-                      >
-                        <div
-                          style={{
-                            width: w,
-                            height: h,
-                            background: on ? "var(--banana)" : "var(--paper-3)",
-                            border: "1px solid currentColor",
-                          }}
-                        />
-                        <div className="mono" style={{ fontSize: 10, fontWeight: 700 }}>
-                          {r}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="hair" style={{ margin: "18px 0" }} />
-              </>
-            ) : null}
-
-            {/* Size (gpt-image-2 only) — 2-column because labels like
-                ``1024x1024`` are too long to fit 4 across in a 360px panel. */}
-            {sizeOptions ? (
-              <ChipGroup
-                label="Size"
-                hint="output dimensions"
-                options={sizeOptions}
-                value={params.size || null}
-                onChange={(v) => setParam("size", v)}
-              />
-            ) : null}
-
-            {/* Image size (gemini) — 4-column, big numeric + descriptor. */}
-            {imageSizeOptions ? (
-              <>
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "baseline",
-                    justifyContent: "space-between",
-                    marginBottom: 10,
-                  }}
-                >
-                  <div className="mono caps" style={{ fontSize: 10, color: "var(--ink-3)" }}>
-                    Image size
-                  </div>
-                  <div className="mono" style={{ fontSize: 9, color: "var(--ink-3)" }}>
-                    longest edge
-                  </div>
-                </div>
-                <div
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-                    gap: 6,
-                  }}
-                >
-                  {imageSizeOptions.map((s) => {
-                    const on = (params.image_size || null) === s;
-                    return (
-                      <button
-                        key={s}
-                        onClick={() => setParam("image_size", s)}
-                        style={{
-                          padding: "10px 6px",
-                          background: on ? "var(--ink)" : "#fffdf7",
-                          border: "1px solid var(--ink)",
-                          color: on ? "var(--banana)" : "var(--ink)",
-                          cursor: "pointer",
-                          textAlign: "center",
-                        }}
-                      >
-                        <div
-                          className="ticker"
-                          style={{
-                            fontSize: 20,
-                            fontWeight: 900,
-                            letterSpacing: "-0.03em",
-                            lineHeight: 1,
-                          }}
-                        >
-                          {s}
-                        </div>
-                        <div
-                          className="mono"
-                          style={{
-                            fontSize: 9,
-                            marginTop: 4,
-                            opacity: on ? 0.8 : 0.6,
-                          }}
-                        >
-                          {IMAGE_SIZE_NOTES[s] || ""}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="hair" style={{ margin: "18px 0" }} />
-              </>
-            ) : null}
-
-            {/* Advanced — collapsed by default to match the original
-                mockup. Holds every secondary knob: provider-specific
-                Quality / Output format / Background / Moderation, plus
-                Gemini's Thinking level and search-grounding toggles. We
-                only render the section if at least one knob has a
-                capability surface; otherwise it would appear as an
-                empty disclosure. */}
-            {(qualityOptions ||
-              outputFormatOptions ||
-              backgroundOptions ||
-              moderationOptions ||
-              thinkingOptions ||
-              includeThoughtsAvail ||
-              googleSearchAvail ||
-              imageSearchAvail) ? (
-              <details>
-                <summary
-                  className="mono caps"
-                  style={{
-                    fontSize: 10,
-                    color: "var(--ink-3)",
-                    cursor: "pointer",
-                    outline: "none",
-                    userSelect: "none",
-                  }}
-                >
-                  ◢ Advanced
-                </summary>
-                <div
-                  style={{
-                    marginTop: 12,
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 14,
-                  }}
-                >
-                  {thinkingOptions ? (
-                    <ChipGroup
-                      label="Thinking level"
-                      hint="latency vs. care"
-                      options={thinkingOptions}
-                      value={params.thinking_level || null}
-                      onChange={(v) => setParam("thinking_level", v)}
-                    />
-                  ) : null}
-                  {qualityOptions ? (
-                    <ChipGroup
-                      label="Quality"
-                      hint="render fidelity"
-                      options={qualityOptions}
-                      value={params.quality || null}
-                      onChange={(v) => setParam("quality", v)}
-                    />
-                  ) : null}
-                  {outputFormatOptions ? (
-                    <ChipGroup
-                      label="Output format"
-                      hint="encoded as"
-                      options={outputFormatOptions}
-                      value={params.output_format || null}
-                      onChange={(v) => setParam("output_format", v)}
-                    />
-                  ) : null}
-                  {backgroundOptions ? (
-                    <ChipGroup
-                      label="Background"
-                      hint=""
-                      options={backgroundOptions}
-                      value={params.background || null}
-                      onChange={(v) => setParam("background", v)}
-                    />
-                  ) : null}
-                  {moderationOptions ? (
-                    <ChipGroup
-                      label="Moderation"
-                      hint="content filter"
-                      options={moderationOptions}
-                      value={params.moderation || null}
-                      onChange={(v) => setParam("moderation", v)}
-                    />
-                  ) : null}
-                  {includeThoughtsAvail ? (
-                    <Toggle
-                      label="Include thoughts"
-                      hint="surface intermediate reasoning"
-                      value={!!params.include_thoughts}
-                      onChange={(v) => setParam("include_thoughts", v)}
-                    />
-                  ) : null}
-                  {googleSearchAvail ? (
-                    <Toggle
-                      label="Google search grounding"
-                      hint="ground on web facts"
-                      value={!!params.google_search}
-                      onChange={(v) => setParam("google_search", v)}
-                    />
-                  ) : null}
-                  {imageSearchAvail ? (
-                    <Toggle
-                      label="Image search grounding"
-                      hint="use search images as context"
-                      value={!!params.image_search}
-                      onChange={(v) => setParam("image_search", v)}
-                    />
-                  ) : null}
-                </div>
-              </details>
-            ) : null}
-              </>
-            )}
+            <SchemaParamsPanel
+              plan={fieldPlan}
+              params={params}
+              setParam={setParam}
+              capabilities={selectedModel?.capabilities || {}}
+            />
           </div>
 
           <div
@@ -1671,8 +1300,6 @@ function ChipGroup({
   onChange,
   renderOption,
   smallTopMargin = false,
-  // PR-2 skeleton extensions — all default to "no opinion" so the
-  // existing legacy call sites keep their behaviour unchanged.
   isOptionAllowed,
   fieldDisabled = false,
   disabledReason = null,
@@ -1756,7 +1383,7 @@ function ChipGroup({
                   ? disabledReason || undefined
                   : allowed
                   ? undefined
-                  : "您当前 tier 下无中转站支持此选项"
+                  : "Not available on your current tier."
               }
               style={{
                 padding: "10px 6px",
@@ -1870,11 +1497,7 @@ function Toggle({
 }
 
 // ---------------------------------------------------------------------------
-// PR-2 skeleton: NumberPresets / FieldRenderer / SchemaParamsPanel.
-//
-// These are the schema-driven counterparts to the legacy JSX in the right
-// rail. They are wired in only when USE_SCHEMA_DRIVEN_PARAMS is true; the
-// legacy path remains the default until PR-3.
+// Schema-driven param panel — NumberPresets / FieldRenderer / SchemaParamsPanel.
 //
 // NumberPresets is intentionally "Output count specific" rather than a
 // generic number input: it carries the ticker (×N) visual the original
@@ -2124,19 +1747,22 @@ function SchemaParamsPanel({ plan, params, setParam, capabilities }) {
   }
   return (
     <>
-      {plan.primary.map((p, idx) => (
-        <Fragment key={p.field.k}>
-          <FieldRenderer
-            plan={p}
-            value={params[p.field.k]}
-            onChange={(v) => setParam(p.field.k, v)}
-            capabilities={capabilities}
-          />
-          {idx < plan.primary.length - 1 ? (
-            <div className="hair" style={{ margin: "18px 0" }} />
-          ) : null}
-        </Fragment>
-      ))}
+      {plan.primary.map((p, idx) => {
+        const pk = paramKey(p.field);
+        return (
+          <Fragment key={p.field.k}>
+            <FieldRenderer
+              plan={p}
+              value={params[pk]}
+              onChange={(v) => setParam(pk, v)}
+              capabilities={capabilities}
+            />
+            {idx < plan.primary.length - 1 ? (
+              <div className="hair" style={{ margin: "18px 0" }} />
+            ) : null}
+          </Fragment>
+        );
+      })}
       {plan.advanced.length > 0 ? (
         <>
           <div className="hair" style={{ margin: "18px 0" }} />
@@ -2161,15 +1787,18 @@ function SchemaParamsPanel({ plan, params, setParam, capabilities }) {
                 gap: 14,
               }}
             >
-              {plan.advanced.map((p) => (
-                <FieldRenderer
-                  key={p.field.k}
-                  plan={p}
-                  value={params[p.field.k]}
-                  onChange={(v) => setParam(p.field.k, v)}
-                  capabilities={capabilities}
-                />
-              ))}
+              {plan.advanced.map((p) => {
+                const pk = paramKey(p.field);
+                return (
+                  <FieldRenderer
+                    key={p.field.k}
+                    plan={p}
+                    value={params[pk]}
+                    onChange={(v) => setParam(pk, v)}
+                    capabilities={capabilities}
+                  />
+                );
+              })}
             </div>
           </details>
         </>
