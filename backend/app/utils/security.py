@@ -14,6 +14,7 @@ to audit:
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -71,20 +72,35 @@ def verify_password(plaintext: str, hashed: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def new_jti() -> str:
+    """Return a fresh, URL-safe random ``jti`` claim value.
+
+    Tokens use the ``jti`` claim to bind to one row in ``auth_sessions``
+    so admin-side / self-service revocation has somewhere to write.
+    """
+    return secrets.token_urlsafe(16)
+
+
 def issue_access_token(
     user_id: str,
     username: str,
     role: str,
     *,
     expires_in_days: int | None = None,
+    jti: str | None = None,
 ) -> str:
     """Sign a fresh JWT for ``user_id``.
 
     Payload shape (design doc §2.1):
 
-        {"sub": user_id, "u": username, "r": role, "iat": ..., "exp": ...}
+        {"sub": user_id, "u": username, "r": role, "iat": ..., "exp": ...,
+         "jti": ...}
 
     No tier / quota / display_name — those are read from DB on demand.
+    The ``jti`` claim is included so the auth dependency can look up
+    the session row in ``auth_sessions`` and reject revoked tokens.
+    Callers either pass an explicit jti (when they're also creating the
+    matching ``auth_sessions`` row) or accept the default fresh value.
     """
     settings = get_settings()
     days = expires_in_days if expires_in_days is not None else settings.JWT_EXPIRES_DAYS
@@ -95,6 +111,7 @@ def issue_access_token(
         "r": role,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(days=days)).timestamp()),
+        "jti": jti if jti is not None else new_jti(),
     }
     return jwt.encode(payload, settings.JWT_SECRET, algorithm=JWT_ALGORITHM)
 

@@ -33,10 +33,12 @@ async def test_all_tables_exist(initialized_db: None) -> None:
     actual = {r[0] for r in rows}
 
     expected = {
+        "account_deletion_requests",
         "alembic_version",
         "announcement_reads",
         "announcements",
         "audit_log",
+        "auth_sessions",
         "billing_ledger",
         "config",
         "disk_usage",
@@ -51,6 +53,7 @@ async def test_all_tables_exist(initialized_db: None) -> None:
         "session_jobs",
         "sessions",
         "tiers",
+        "user_preferences",
         "users",
     }
     assert actual == expected

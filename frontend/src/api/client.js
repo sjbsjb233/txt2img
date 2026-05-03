@@ -10,6 +10,11 @@ const TOKEN_KEY = "token";
 // in the hot path is cheap.
 const FORCE_LOGOUT_CODES = new Set(["ACCOUNT_DISABLED", "BLOCKED_BY_EMERGENCY"]);
 
+// 401 codes that come from validation logic *inside* an authenticated
+// route — the bearer token is fine, only one form field is wrong.
+// These must not trigger the auto-logout interceptor.
+const HARMLESS_401_CODES = new Set(["WRONG_CURRENT_PASSWORD"]);
+
 // Hook that lets `api/auth` register itself for the force-logout path.
 // We use late binding (instead of importing the store directly) to keep
 // `api/client.js` free of circular dependencies — store/auth.js depends
@@ -136,7 +141,7 @@ export async function apiFetch(path, { method = "GET", body, auth = true, header
     // not "session gone".
     if (auth) {
       const shouldKick =
-        res.status === 401 ||
+        (res.status === 401 && !(code && HARMLESS_401_CODES.has(code))) ||
         (res.status === 403 && code && FORCE_LOGOUT_CODES.has(code));
       if (shouldKick) {
         if (typeof _onForceLogout === "function") {

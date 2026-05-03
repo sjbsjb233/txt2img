@@ -30,11 +30,14 @@ def test_jwt_round_trip_payload_shape(fresh_env: None) -> None:
 
     token = issue_access_token("u_abc1234567890", "alice", "user")
     payload = decode_access_token(token)
-    assert set(payload.keys()) == {"sub", "u", "r", "iat", "exp"}
+    # ``jti`` was added with auth_sessions tracking — the §2.1 payload
+    # now carries it so the auth dependency can revoke a single device.
+    assert set(payload.keys()) == {"sub", "u", "r", "iat", "exp", "jti"}
     assert payload["sub"] == "u_abc1234567890"
     assert payload["u"] == "alice"
     assert payload["r"] == "user"
     assert payload["exp"] > payload["iat"]
+    assert isinstance(payload["jti"], str) and payload["jti"]
 
 
 def test_jwt_decode_rejects_tampered_token(fresh_env: None) -> None:

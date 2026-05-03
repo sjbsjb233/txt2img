@@ -8,6 +8,7 @@ import { createJob, precheck as precheckJob } from "../api/jobs.js";
 import { createSession } from "../api/sessions.js";
 import * as sseStore from "../store/sse.js";
 import * as archiveStore from "../store/archive.js";
+import { usePreferences } from "../store/preferences.js";
 
 // ---------------------------------------------------------------------------
 // Visual atoms
@@ -201,15 +202,35 @@ const IMAGE_SIZE_NOTES = {
 
 export default function CreatePage() {
   const navigate = useNavigate();
+  const { prefs: userPrefs } = usePreferences();
+  // Snapshot the user's "default ratio / batch size / model" once on
+  // mount so changing them in /settings while the page is open does
+  // not silently reset whatever the user has already configured here.
+  const initialPrefsRef = useRef(null);
+  if (initialPrefsRef.current === null) {
+    initialPrefsRef.current = {
+      aspect_ratio: userPrefs?.generation?.default_aspect_ratio || null,
+      batch_size: userPrefs?.generation?.default_batch_size || 1,
+      model_id: userPrefs?.generation?.default_model_id || null,
+    };
+  }
 
   // Catalog state (from /api/models). `null` while we wait for the first load.
   const [catalog, setCatalog] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [selectedModel, setSelectedModel] = useState(null);
 
-  // Form state.
+  // Form state. Seed params with the user's preferred defaults so a
+  // power user with "ratio=3:2, batch=2" set never has to re-pick
+  // them on every visit.
   const [prompt, setPrompt] = useState("");
-  const [params, setParams] = useState({});
+  const [params, setParams] = useState(() => {
+    const seed = {};
+    const initial = initialPrefsRef.current;
+    if (initial.aspect_ratio) seed.aspect_ratio = initial.aspect_ratio;
+    if (initial.batch_size && initial.batch_size > 1) seed.n = initial.batch_size;
+    return seed;
+  });
   const [refs, setRefs] = useState([]); // array of File objects (insertion order)
   const [sessionId, setSessionId] = useState(null);
 
@@ -229,14 +250,19 @@ export default function CreatePage() {
       lastFetchAtRef.current = Date.now();
       setLoadError("");
       // If the currently-selected model disappeared (admin disabled a
-      // provider), fall back to the first available one.
+      // provider), fall back to the user's preferred default — and
+      // then to the first available model when that's unavailable.
       const all = data?.models || [];
       const stillThere = all.find(
         (m) => m.model_id === (selectedModel?.model_id || "")
       );
       if (!stillThere) {
+        const preferredId = initialPrefsRef.current?.model_id;
+        const preferred = preferredId
+          ? all.find((m) => m.model_id === preferredId && m.available)
+          : null;
         const firstOk = all.find((m) => m.available) || all[0] || null;
-        setSelectedModel(firstOk);
+        setSelectedModel(preferred || firstOk);
       } else {
         setSelectedModel(stillThere);
       }

@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from app.adapters.base import AdapterRegistry
 from app.api.admin.adapters import router as admin_adapters_router
 from app.api.admin.announcements import router as admin_announcements_router
+from app.api.admin.approvals import router as admin_approvals_router
 from app.api.admin.audit import router as admin_audit_router
 from app.api.admin.cleanup import router as admin_cleanup_router
 from app.api.admin.config import router as admin_config_router
@@ -34,6 +35,7 @@ from app.api.archive import router as archive_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
+from app.api.me import router as me_router
 from app.api.models import router as models_router
 from app.api.sessions import router as sessions_router
 from app.api.sse import router as sse_router
@@ -46,6 +48,7 @@ from app.domain.admin_broadcaster import (
     run_provider_metrics_loop,
     run_worker_pool_loop,
 )
+from app.domain.account_lifecycle import run_account_lifecycle_loop
 from app.domain.cache_keeper import run_disk_usage_loop
 from app.domain.circuit_breaker import get_circuit_breaker
 from app.domain.config_center import get_config_center
@@ -159,6 +162,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # stay live without polling. All three are best-effort and never
     # die on transient errors — the loops swallow exceptions.
     app.state.disk_usage_task = asyncio.create_task(run_disk_usage_loop())
+    # Account-deletion lifecycle: T+7 → soft delete, T+30 → purge.
+    # Runs every 6h; cheap on a tiny SQLite. See
+    # ``app.domain.account_lifecycle`` for the policy.
+    app.state.account_lifecycle_task = asyncio.create_task(
+        run_account_lifecycle_loop()
+    )
     app.state.admin_metrics_task = asyncio.create_task(
         run_provider_metrics_loop(metrics, sse_hub)
     )
@@ -207,6 +216,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "disk_usage_task",
             "admin_metrics_task",
             "admin_pool_task",
+            "account_lifecycle_task",
         ):
             t = getattr(app.state, attr, None)
             if t is not None:
@@ -257,6 +267,7 @@ def create_app() -> FastAPI:
 
     app.include_router(health_router)
     app.include_router(auth_router)
+    app.include_router(me_router)
     app.include_router(sse_router)
     app.include_router(sessions_router)
     app.include_router(models_router)
@@ -271,6 +282,7 @@ def create_app() -> FastAPI:
     app.include_router(announcements_router)
     app.include_router(admin_adapters_router)
     app.include_router(admin_announcements_router)
+    app.include_router(admin_approvals_router)
     app.include_router(admin_audit_router)
     app.include_router(admin_cleanup_router)
     app.include_router(admin_config_router)

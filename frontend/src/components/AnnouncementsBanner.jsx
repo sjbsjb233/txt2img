@@ -10,6 +10,7 @@
 
 import { coverUrl } from "../api/announcements.js";
 import * as announcementsStore from "../store/announcements.js";
+import { usePreferences } from "../store/preferences.js";
 
 // ---------------------------------------------------------------------
 // Markdown-lite renderer for text announcements
@@ -249,14 +250,27 @@ function BannerCard({ ann, variant }) {
 
 export default function AnnouncementsBanner() {
   const list = announcementsStore.useAnnouncements();
-  if (!list || list.length === 0) return null;
+  const { prefs } = usePreferences();
+  // Respect the user's "Show admin announcements" preference. Non-
+  // dismissable announcements (those an admin marked must-read) and
+  // priority >= 5 modals always show — the user setting is for
+  // routine messaging, not emergency comms.
+  const level = prefs?.notifications?.announcements_level || "all";
+  const filtered = (list || []).filter((a) => {
+    if (level === "all") return true;
+    if (a.dismissable === false) return true;
+    if ((a.priority ?? 0) >= 5) return true;
+    if (level === "important") return (a.priority ?? 0) >= 3;
+    return false; // 'none' silences the rest
+  });
+  if (!filtered.length) return null;
 
   // Modals (priority >= 5) render first so their backdrop covers the
   // banner stack behind them. Only one modal at a time — the highest-
   // priority entry wins; the rest stack as banners until the user
   // dismisses the modal.
-  const modals = list.filter((a) => (a.priority ?? 0) >= 5);
-  const banners = list.filter((a) => (a.priority ?? 0) < 5);
+  const modals = filtered.filter((a) => (a.priority ?? 0) >= 5);
+  const banners = filtered.filter((a) => (a.priority ?? 0) < 5);
 
   const top = modals[0] || null;
   const restAsBanners = modals.slice(1).concat(banners);

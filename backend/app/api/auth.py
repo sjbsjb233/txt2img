@@ -30,8 +30,8 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.db.engine import get_session
-from app.db.models import Config, LoginAttempt, User
-from app.deps import CurrentUser
+from app.db.models import AuthSession, Config, LoginAttempt, User
+from app.deps import CurrentContext
 from app.schemas.auth import (
     CaptchaCheckRequest,
     CaptchaCheckResponse,
@@ -42,7 +42,8 @@ from app.schemas.auth import (
 )
 from app.services import turnstile
 from app.utils.errors import api_error
-from app.utils.security import issue_access_token, verify_password
+from app.utils.ids import new_auth_session_id
+from app.utils.security import issue_access_token, new_jti, verify_password
 
 logger = logging.getLogger("txt2img.auth")
 
@@ -189,6 +190,35 @@ async def captcha_check(body: CaptchaCheckRequest) -> CaptchaCheckResponse:
     return CaptchaCheckResponse(captcha_required=False)
 
 
+def _user_agent(request: Request) -> str | None:
+    raw = request.headers.get("user-agent")
+    if not raw:
+        return None
+    return raw[:512]
+
+
+def _ip_hint(ip: str | None) -> str | None:
+    """Coarsen an IPv4 / IPv6 address before storing it.
+
+    The Active Sessions UI shows ``121.43.x.x`` rather than the precise
+    address — enough to recognise "I logged in from home" without
+    revealing precise location to anyone who reads the audit log.
+    """
+    if not ip:
+        return None
+    if ":" in ip:
+        # IPv6 — keep first two hextets only.
+        parts = ip.split(":")
+        cleaned = [p for p in parts if p]
+        if len(cleaned) >= 2:
+            return f"{cleaned[0]}:{cleaned[1]}::/32"
+        return ip
+    parts = ip.split(".")
+    if len(parts) == 4:
+        return f"{parts[0]}.{parts[1]}.x.x"
+    return ip
+
+
 @router.post("/auth/login", response_model=LoginResponse)
 async def login(body: LoginRequest, request: Request) -> LoginResponse:
     """Verify credentials, optionally validate captcha, return a JWT.
@@ -258,6 +288,9 @@ async def login(body: LoginRequest, request: Request) -> LoginResponse:
 
     # ----- success
     await _record_attempt(body.username, ip, success=True)
+    jti = new_jti()
+    ua = _user_agent(request)
+    ip_hint = _ip_hint(ip)
     async with get_session() as session:
         # Refresh inside its own session so the timestamp update is committed.
         # We re-fetch by id to avoid carrying a detached instance from above.
@@ -265,8 +298,21 @@ async def login(body: LoginRequest, request: Request) -> LoginResponse:
             await session.execute(select(User).where(User.id == user.id))
         ).scalar_one()
         fresh.last_login_at = datetime.now(timezone.utc)
+        # Track this session server-side so the user can see and revoke
+        # it from /settings → Security. The id format (``as_…``) is
+        # distinct from the archive ``sessions`` table (``sess_…``) so
+        # the two tables can never be confused.
+        session.add(
+            AuthSession(
+                id=new_auth_session_id(),
+                user_id=user.id,
+                jti=jti,
+                user_agent=ua,
+                ip=ip_hint,
+            )
+        )
 
-    token = issue_access_token(user.id, user.username, user.role)
+    token = issue_access_token(user.id, user.username, user.role, jti=jti)
     return LoginResponse(
         access_token=token,
         token_type="bearer",
@@ -280,22 +326,42 @@ async def login(body: LoginRequest, request: Request) -> LoginResponse:
 
 
 @router.post("/auth/logout")
-async def logout(_user: CurrentUser) -> dict[str, bool]:
-    """Sessionless logout; the frontend just discards its cached token."""
+async def logout(ctx: CurrentContext) -> dict[str, bool]:
+    """Revoke the current session's auth_sessions row.
+
+    The frontend still discards the token client-side; this server-side
+    flip is what makes "I want to actually log this device out" stick
+    even when the JWT is still cryptographically valid for days.
+    """
+    if ctx.jti is not None and ctx.impersonator_id is None:
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    select(AuthSession).where(AuthSession.jti == ctx.jti)
+                )
+            ).scalar_one_or_none()
+            if row is not None and row.revoked_at is None:
+                row.revoked_at = datetime.now(timezone.utc)
     return {"ok": True}
 
 
 @router.get("/me", response_model=MeResponse)
-async def me(user: CurrentUser) -> MeResponse:
+async def me(ctx: CurrentContext) -> MeResponse:
     """Return identity-only profile.
 
-    Tier, today_count, soft_quota, hard_quota, last_login_at are
-    deliberately absent — the frontend never gets to read them
-    (design doc §3.3).
+    Tier, today_count, soft_quota, hard_quota are deliberately absent —
+    the frontend never gets to read them (design doc §3.3). ``email``,
+    ``created_at``, ``last_login_at``, ``password_changed_at`` were
+    added with the /settings page and are safe profile metadata.
     """
+    user = ctx.user
     return MeResponse(
         id=user.id,
         username=user.username,
         role=user.role,
         display_name=user.display_name,
+        email=user.email,
+        created_at=user.created_at,
+        last_login_at=user.last_login_at,
+        password_changed_at=user.password_changed_at,
     )

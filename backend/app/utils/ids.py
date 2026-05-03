@@ -109,3 +109,13 @@ def new_session_id() -> str:
 def new_announcement_id() -> str:
     """Return ``ann_`` + 10 chars."""
     return f"ann_{_random_suffix(10)}"
+
+
+def new_auth_session_id() -> str:
+    """Return ``as_`` + 12 chars — id for one row in ``auth_sessions``."""
+    return f"as_{_random_suffix(12)}"
+
+
+def new_deletion_request_id() -> str:
+    """Return ``adr_`` + 12 chars — id for ``account_deletion_requests``."""
+    return f"adr_{_random_suffix(12)}"

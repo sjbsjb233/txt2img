@@ -4,6 +4,7 @@
   --paper: #f4efe6;
   --paper-2: #ede6d6;
   --paper-3: #e3dac5;
+  --card: var(--card);
   --ink: #191714;
   --ink-2: #3a3631;
   --ink-3: #6b6459;
@@ -33,6 +34,31 @@
   --shadow-lift: 0 2px 0 var(--ink), 0 10px 30px -10px #19171433;
 }
 
+/* Dark mode — flip the warm paper palette to a deep-ink page while
+   keeping the banana accent and 1px-rule treatment intact. The rest
+   of the tokens (font stacks, semantic colours) are already dark-mode
+   friendly so we only override the paper / ink / rule channels. */
+:root[data-theme="dark"] {
+  --paper:   #15140f;
+  --paper-2: #1d1c16;
+  --paper-3: #25241d;
+  --card:    #1f1e18;
+  --ink:     #f4efe6;
+  --ink-2:   #d6d0c0;
+  --ink-3:   #9c9488;
+  --ink-4:   #6b6459;
+  --rule:    #f4efe61a;
+  --rule-2:  #f4efe633;
+  --banana:  #e6b423;
+  --banana-deep: #c9990d;
+  --banana-soft: #6e5a14;
+  --shadow-card: 0 1px 0 #00000033, 0 10px 32px -12px #00000088;
+  --shadow-lift: 0 2px 0 var(--ink), 0 10px 30px -10px #00000088;
+}
+:root[data-theme="dark"] body {
+  color-scheme: dark;
+}
+
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
 body {
@@ -52,7 +78,7 @@ body {
 
 /* Brutal card */
 .card-brutal {
-  background: #fffdf7;
+  background: var(--card);
   border: 1px solid var(--ink);
   border-radius: 0;
   position: relative;
@@ -67,7 +93,7 @@ body {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 2px 8px; border: 1px solid var(--ink);
   font-family: var(--font-mono); font-size: 11px;
-  background: #fffdf7; text-transform: uppercase; letter-spacing: 0.08em;
+  background: var(--card); text-transform: uppercase; letter-spacing: 0.08em;
 }
 .chip.solid { background: var(--ink); color: var(--paper); }
 .chip.banana { background: var(--banana); }
@@ -80,7 +106,7 @@ body {
   display: inline-flex; align-items: center; justify-content: center;
   gap: 8px; height: 38px; padding: 0 16px;
   font-family: var(--font-sans); font-size: 13px; font-weight: 600;
-  border: 1px solid var(--ink); background: #fffdf7; color: var(--ink);
+  border: 1px solid var(--ink); background: var(--card); color: var(--ink);
   cursor: pointer; position: relative;
   transition: transform 80ms ease, background 80ms ease;
 }
@@ -106,7 +132,7 @@ body {
 /* Input */
 .inp {
   width: 100%; height: 38px; padding: 0 12px;
-  border: 1px solid var(--ink); background: #fffdf7;
+  border: 1px solid var(--ink); background: var(--card);
   font-family: var(--font-sans); font-size: 13px; color: var(--ink);
 }
 .inp:focus { outline: 2px solid var(--banana); outline-offset: -2px; }
@@ -120,7 +146,7 @@ textarea.inp { height: auto; padding: 12px; line-height: 1.55; font-family: var(
 .kbd {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 20px; height: 20px; padding: 0 6px;
-  border: 1px solid var(--ink); background: #fffdf7;
+  border: 1px solid var(--ink); background: var(--card);
   font-family: var(--font-mono); font-size: 10px;
   box-shadow: 0 2px 0 var(--ink);
 }
@@ -155,6 +181,331 @@ textarea.inp { height: auto; padding: 12px; line-height: 1.55; font-family: var(
 }
 @media (prefers-reduced-motion: reduce) {
   .route-stage { animation: none; }
+}
+/* Toggling reduce-motion via the user preference flips an attribute on
+   <html>; respect it the same way as the CSS media query so an opt-in
+   user gets the same flat behaviour without rebooting their OS. */
+:root[data-reduced-motion="true"] .route-stage,
+:root[data-reduced-motion="true"] * {
+  animation-duration: 0ms !important;
+  transition-duration: 0ms !important;
+}
+
+/* ---------------------------------------------------------------------
+ * Settings primitives — toggle switch, segmented picker, setting row.
+ * Shared by every section card in /settings so the visual language is
+ * consistent and the section components can stay declarative. We also
+ * surface a couple of one-off classes (cardgrid, ratio button) used
+ * by the Generation defaults card.
+ * ------------------------------------------------------------------- */
+.toggle {
+  position: relative;
+  display: inline-flex;
+  width: 44px;
+  height: 22px;
+  border: 1px solid var(--ink);
+  background: var(--card);
+  cursor: pointer;
+  flex-shrink: 0;
+  padding: 0;
+  transition: background 120ms ease;
+}
+.toggle:disabled { cursor: not-allowed; opacity: 0.5; }
+.toggle::after {
+  content: "";
+  position: absolute;
+  left: 2px; top: 2px;
+  width: 16px; height: 16px;
+  border: 1px solid var(--ink);
+  background: var(--ink);
+  transition: left 140ms cubic-bezier(.22,.85,.22,1), background 120ms ease;
+}
+.toggle[data-on="true"] { background: var(--banana); }
+.toggle[data-on="true"]::after { left: 24px; background: var(--ink); }
+.toggle:focus-visible { outline: 2px solid var(--banana); outline-offset: 2px; }
+
+/* Segmented control — multi-button picker with one selected at a time. */
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--ink);
+  background: var(--card);
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.segmented > button {
+  height: 28px;
+  padding: 0 12px;
+  border: none;
+  background: transparent;
+  border-left: 1px solid var(--ink);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+.segmented > button:first-child { border-left: none; }
+.segmented > button[data-on="true"] {
+  background: var(--ink);
+  color: var(--paper);
+}
+.segmented > button:not([data-on="true"]):hover {
+  background: var(--paper-2);
+}
+.segmented > button:disabled { cursor: not-allowed; opacity: 0.5; }
+.segmented > button:focus-visible {
+  outline: 2px solid var(--banana);
+  outline-offset: -2px;
+  position: relative;
+  z-index: 1;
+}
+
+/* One row inside a settings card. ``compact`` density tightens
+   vertical rhythm; we apply via a root attribute so any nested row
+   reads it. */
+.set-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
+  border-top: 1px solid var(--rule);
+}
+.set-row:first-child { border-top: none; }
+.set-row > .set-row-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.set-row > .set-row-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.set-row .label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.set-row .hint {
+  font-size: 11px;
+  color: var(--ink-3);
+  line-height: 1.45;
+}
+
+:root[data-density="compact"] .set-row {
+  padding: 10px 18px;
+}
+:root[data-density="compact"] .card-brutal .set-section-head {
+  padding: 12px 18px;
+}
+
+/* Section card head — number + title, mono badge on the right. */
+.set-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--rule);
+  gap: 16px;
+}
+.set-section-head .num {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.set-section-head .title {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 500;
+  color: var(--ink);
+  letter-spacing: -0.01em;
+}
+.set-section-head .head-left {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+
+/* Ratio chip used by the Generation defaults section. */
+.ratio-chip {
+  width: 44px; height: 36px;
+  border: 1px solid var(--ink);
+  background: var(--card);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+.ratio-chip[data-on="true"] {
+  background: var(--banana);
+}
+.ratio-chip:focus-visible {
+  outline: 2px solid var(--banana);
+  outline-offset: 2px;
+}
+.ratio-chip > span {
+  display: inline-block;
+  background: var(--ink);
+}
+
+/* Tooltip — appears next to setting labels with a "?" icon. We do
+   it CSS-only because the project doesn't ship a popper library and
+   our content is short enough to live in the title attribute. */
+.help-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px; height: 14px;
+  border: 1px solid var(--ink-3);
+  border-radius: 50%;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--ink-3);
+  cursor: help;
+  flex-shrink: 0;
+  background: transparent;
+  padding: 0;
+  margin-left: 2px;
+  position: relative;
+}
+.help-icon:hover, .help-icon:focus-visible {
+  border-color: var(--ink);
+  color: var(--ink);
+  outline: none;
+}
+.help-icon[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  z-index: 50;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: var(--paper);
+  padding: 8px 10px;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  width: max-content;
+  max-width: 240px;
+  line-height: 1.45;
+  border: 1px solid var(--ink);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  text-align: left;
+  white-space: normal;
+}
+.help-icon[data-tooltip]::before {
+  content: "";
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 4px solid transparent;
+  border-top-color: var(--ink);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.help-icon:hover[data-tooltip]::after,
+.help-icon:focus-visible[data-tooltip]::after,
+.help-icon:hover[data-tooltip]::before,
+.help-icon:focus-visible[data-tooltip]::before {
+  opacity: 1;
+}
+
+/* Settings page sticky save bar — high-contrast banana accent when
+   dirty so users notice they have unsaved changes. */
+.set-savebar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--ink);
+  background: var(--paper);
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+.set-savebar[data-dirty="true"] {
+  background: var(--banana-soft);
+  box-shadow: 0 2px 0 var(--ink);
+}
+
+/* Volume slider — match the brutalist token vocabulary instead of the
+   browser default. */
+.range-banana {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 120px;
+  height: 4px;
+  border: 1px solid var(--ink);
+  background: var(--card);
+  outline: none;
+}
+.range-banana::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px; height: 14px;
+  background: var(--banana);
+  border: 1px solid var(--ink);
+  cursor: pointer;
+}
+.range-banana::-moz-range-thumb {
+  width: 14px; height: 14px;
+  background: var(--banana);
+  border: 1px solid var(--ink);
+  cursor: pointer;
+}
+
+/* Settings select — inherits .inp font/border but trims height. */
+.set-select {
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--ink);
+  background: var(--card);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--ink);
+  min-width: 160px;
+}
+.set-select:focus { outline: 2px solid var(--banana); outline-offset: -2px; }
+.set-select:disabled { cursor: not-allowed; opacity: 0.55; }
+
+/* "Danger zone" banner is the only place we use a pink wash. */
+.danger-banner {
+  background: #fbe4dc;
+  border: 1px solid var(--ink);
+  padding: 12px 14px;
+  font-size: 12px;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+:root[data-theme="dark"] .danger-banner {
+  background: #4a1d18;
 }
 
 /* ---------------------------------------------------------------------
