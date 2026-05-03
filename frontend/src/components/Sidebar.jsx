@@ -19,16 +19,47 @@ const BOTTOM = [
   { id: "settings", label: "Settings", icon: "gear", path: "/settings" },
 ];
 
+// Device-local override of the sidebar mode. Once the user clicks
+// expand/collapse, we cache their choice here so a refresh (or a new
+// tab) keeps the same state, regardless of the synced default.
+const SIDEBAR_LOCAL_KEY = "txt2img_sidebar_mode";
+
+function readSidebarLocal() {
+  try {
+    const raw = localStorage.getItem(SIDEBAR_LOCAL_KEY);
+    if (raw === "expanded" || raw === "rail") return raw;
+  } catch {
+    /* localStorage unavailable */
+  }
+  return null;
+}
+
+function writeSidebarLocal(mode) {
+  try {
+    localStorage.setItem(SIDEBAR_LOCAL_KEY, mode);
+  } catch {
+    /* localStorage unavailable */
+  }
+}
+
 export default function Sidebar({ defaultMode }) {
   // Sidebar default comes from the user's synced preference; the prop
-  // remains as a manual override so tests / Storybook can pin it.
+  // remains as a manual override so tests / Storybook can pin it. A
+  // device-local override (set by a previous expand/collapse click)
+  // wins over the synced default so refreshes preserve the user's
+  // current choice.
   const { prefs } = usePreferences();
-  const initialMode = defaultMode || prefs?.appearance?.sidebar_default || "expanded";
+  const localOverride = readSidebarLocal();
+  const initialMode =
+    defaultMode ||
+    localOverride ||
+    prefs?.appearance?.sidebar_default ||
+    "expanded";
   const [mode, setMode] = useState(initialMode);
-  const [hasUserToggled, setHasUserToggled] = useState(false);
+  const [hasUserToggled, setHasUserToggled] = useState(localOverride != null);
   // Sync down updates to the saved preference unless the user has
-  // explicitly toggled the sidebar in this session — once they touch
-  // it, we stop overwriting their choice from preferences.
+  // explicitly toggled the sidebar (this session or a prior one) —
+  // once they touch it, we stop overwriting their choice.
   useEffect(() => {
     if (hasUserToggled) return;
     const next = prefs?.appearance?.sidebar_default;
@@ -50,10 +81,12 @@ export default function Sidebar({ defaultMode }) {
   const expand = () => {
     setMode("expanded");
     setHasUserToggled(true);
+    writeSidebarLocal("expanded");
   };
   const collapse = () => {
     setMode("rail");
     setHasUserToggled(true);
+    writeSidebarLocal("rail");
   };
 
   const logout = async () => {

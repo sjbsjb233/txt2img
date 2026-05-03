@@ -20,6 +20,7 @@ import {
   setSessionToken,
   setSessionUser,
   setToken,
+  updateCurrentUser,
 } from "../api/client.js";
 import { decodeJwtPayload } from "../utils/jwt.js";
 
@@ -71,6 +72,18 @@ export function setSession({ accessToken, user }) {
   setToken(accessToken);
   setCurrentUser(user);
   notify();
+}
+
+/**
+ * Merge updated user fields (e.g. display_name from PATCH /api/me)
+ * into the cached identity and notify subscribers so the sidebar,
+ * dashboard greeting, and any other useAuth() consumer re-render.
+ * No-op if there isn't a cached user yet.
+ */
+export function updateUser(patch) {
+  const merged = updateCurrentUser(patch);
+  if (merged) notify();
+  return merged;
 }
 
 /**

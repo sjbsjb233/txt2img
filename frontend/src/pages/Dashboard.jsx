@@ -123,7 +123,8 @@ export default function Dashboard() {
             className="mono caps"
             style={{ fontSize: 11, letterSpacing: "0.18em" }}
           >
-            TXT2IMG · WED 24 APR · GOOD AFTERNOON, LIUXI
+            TXT2IMG · WED 24 APR · GOOD AFTERNOON,{" "}
+            {(user?.display_name || user?.username || "guest").toUpperCase()}
           </span>
           <span style={{ flex: 1 }} />
           <button
