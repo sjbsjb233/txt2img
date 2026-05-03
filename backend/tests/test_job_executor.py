@@ -35,6 +35,7 @@ from app.schemas.normalized import (
     StandardError,
     StandardErrorKind,
 )
+from app.schemas.provider import CapabilityField
 from app.utils.crypto import encrypt
 from app.utils.ids import new_user_id
 from app.utils.security import hash_password
@@ -62,6 +63,9 @@ class RouteByProviderAdapter(BaseAdapter):
 
     def supported_models(self) -> list[str]:
         return ["gpt-image-2"]
+
+    def capability_schema(self) -> list[CapabilityField]:
+        return []
 
 
 async def _bootstrap() -> None:

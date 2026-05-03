@@ -20,7 +20,7 @@ Three top-level groups:
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -96,6 +96,57 @@ class ProviderModelEntry(BaseModel):
         default_factory=ProviderModelCapabilities
     )
     enabled: bool = True
+
+
+# ---------------------------------------------------------------------------
+# Adapter self-describing capability schema (PR-A)
+# ---------------------------------------------------------------------------
+#
+# Each adapter declares which capability fields it understands so the
+# admin UI can render a form tailored to that adapter, instead of the
+# union of every possible capability. The `k` field on each entry MUST
+# be a field name on ``ProviderModelCapabilities`` above — admin still
+# stores results into the same ``capabilities_json`` blob, validated by
+# that pydantic class.
+
+
+class CapabilityFieldList(BaseModel):
+    """Discrete-value capability field rendered as a chip multi-select."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    k: str
+    kind: Literal["list"] = "list"
+    options: list[str]
+    label: str | None = None
+    help: str | None = None
+
+
+class CapabilityFieldInt(BaseModel):
+    """Numeric upper-bound capability field rendered as a number input."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    k: str
+    kind: Literal["int"] = "int"
+    min: int | None = None
+    max: int | None = None
+    label: str | None = None
+    help: str | None = None
+
+
+class CapabilityFieldBool(BaseModel):
+    """Tri-state boolean capability field (unset / true / false)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    k: str
+    kind: Literal["bool"] = "bool"
+    label: str | None = None
+    help: str | None = None
+
+
+CapabilityField = Union[CapabilityFieldList, CapabilityFieldInt, CapabilityFieldBool]
 
 
 # ---------------------------------------------------------------------------

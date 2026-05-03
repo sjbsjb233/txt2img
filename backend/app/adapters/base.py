@@ -36,6 +36,7 @@ from app.schemas.normalized import (
     StandardError,
     StandardErrorKind,
 )
+from app.schemas.provider import CapabilityField
 
 logger = logging.getLogger("txt2img.adapters")
 
@@ -93,6 +94,32 @@ class BaseAdapter(ABC):
         This is the *theoretical* whitelist. Whether a given provider has
         that model enabled is a separate decision recorded in the
         ``provider_models`` table (design doc §4.1).
+        """
+
+    @abstractmethod
+    def capability_schema(self) -> list[CapabilityField]:
+        """Declare which capability fields admin may configure for this adapter.
+
+        Returned by ``GET /api/admin/adapters`` and consumed by the
+        provider editor UI. Each entry's ``k`` MUST match a field on
+        ``ProviderModelCapabilities``; admin's saved ``capabilities_json``
+        is still validated against that pydantic class.
+
+        Convention:
+
+        - ``CapabilityFieldList`` for whitelisted discrete values (chip
+          multi-select). ``options`` should mirror the adapter's internal
+          ``_ALLOWED_*`` constants so the UI never offers a value the
+          adapter would reject at validation time.
+        - ``CapabilityFieldInt`` for numeric upper bounds. ``min`` / ``max``
+          mirror the ``ProviderModelCapabilities`` ``ge`` / ``le`` so the
+          form can clamp before submission.
+        - ``CapabilityFieldBool`` for tri-state opt-in flags.
+
+        Adapters whose model variants differ in supported fields (e.g.
+        Gemini 3 Pro vs 3.1 Flash) should surface the union here with
+        ``help`` strings noting per-model limitations; the adapter's own
+        ``_validate`` stays authoritative for actual rejections.
         """
 
     # ------------------------------------------------------------------

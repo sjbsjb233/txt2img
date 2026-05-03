@@ -47,6 +47,12 @@ from app.schemas.normalized import (
     StandardError,
     StandardErrorKind,
 )
+from app.schemas.provider import (
+    CapabilityField,
+    CapabilityFieldBool,
+    CapabilityFieldInt,
+    CapabilityFieldList,
+)
 
 
 # Model id → feature set. Anything not in this dict is rejected as
@@ -98,6 +104,62 @@ class GeminiV1BetaAdapter(BaseAdapter):
 
     def supported_models(self) -> list[str]:
         return list(_MODELS.keys())
+
+    def capability_schema(self) -> list[CapabilityField]:
+        """Fields admin can configure for a gemini_v1beta provider model.
+
+        Phase 1 surfaces the union over the adapter's supported models
+        (3 Pro and 3.1 Flash); per-model differences are noted in the
+        ``help`` text and remain enforced by ``_validate``. ``n_max`` is
+        omitted because Gemini hard-codes ``n=1``.
+        """
+        all_aspect_ratios = sorted(
+            _ASPECT_RATIOS_PRO | _ASPECT_RATIOS_FLASH_31_EXTRA
+        )
+        all_image_sizes = sorted(_IMAGE_SIZES_PRO | _IMAGE_SIZES_FLASH_31_EXTRA)
+
+        return [
+            CapabilityFieldList(
+                k="aspect_ratio",
+                options=all_aspect_ratios,
+                help=(
+                    "3 Pro supports the 10 base ratios; 1:4 / 4:1 / 1:8 / 8:1 "
+                    "are 3.1 Flash only."
+                ),
+            ),
+            CapabilityFieldList(
+                k="image_size",
+                options=all_image_sizes,
+                help=(
+                    "Case-sensitive. 512 is 3.1 Flash only; 1K/2K/4K work "
+                    "on both."
+                ),
+            ),
+            CapabilityFieldList(
+                k="thinking_level",
+                options=sorted(_THINKING_LEVELS),
+                help="3.1 Flash only.",
+            ),
+            CapabilityFieldInt(
+                k="max_reference_images",
+                min=0,
+                max=_MAX_REFERENCES,
+            ),
+            CapabilityFieldInt(
+                k="max_prompt_chars",
+                min=1,
+                max=_PROMPT_MAX_CHARS,
+            ),
+            CapabilityFieldBool(
+                k="include_thoughts",
+                help="3.1 Flash only.",
+            ),
+            CapabilityFieldBool(k="google_search"),
+            CapabilityFieldBool(
+                k="image_search",
+                help="3.1 Flash only.",
+            ),
+        ]
 
     def _model_features(self, model: str) -> dict[str, bool]:
         try:
