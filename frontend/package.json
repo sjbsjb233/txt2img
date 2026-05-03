@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "playwright:install": "PLAYWRIGHT_BROWSERS_PATH=../.playwright-browsers playwright install chromium",
     "test:e2e": "PLAYWRIGHT_BROWSERS_PATH=../.playwright-browsers playwright test"
   },
@@ -17,7 +19,13 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@vitejs/plugin-react": "^4.3.4",
-    "vite": "^5.4.10"
+    "@vitest/ui": "^2.1.9",
+    "jsdom": "^29.1.1",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.9"
   }
 }

@@ -245,3 +245,152 @@ def test_each_registered_adapter_returns_ui_schema_for_each_model() -> None:
                     assert isinstance(entry, ModelUIField)
     finally:
         AdapterRegistry.reset_for_tests()
+
+
+# ---------------------------------------------------------------------------
+# Tricky edge cases (test plan §3.2 expansion)
+# ---------------------------------------------------------------------------
+
+
+_BUILTIN_ADAPTERS = [OpenAIV1Adapter(), GeminiV1BetaAdapter()]
+
+
+@pytest.mark.parametrize("adapter", _BUILTIN_ADAPTERS, ids=lambda a: a.adapter_type)
+def test_unsupported_model_empty_string_raises(adapter) -> None:
+    with pytest.raises(ValueError):
+        adapter.ui_schema("")
+
+
+@pytest.mark.parametrize("adapter", _BUILTIN_ADAPTERS, ids=lambda a: a.adapter_type)
+def test_unsupported_model_with_whitespace_raises(adapter) -> None:
+    """Whitespace is not stripped — sloppy callers would otherwise mask
+    typos in admin tooling."""
+    candidate = adapter.supported_models()[0]
+    with pytest.raises(ValueError):
+        adapter.ui_schema(f" {candidate} ")
+
+
+@pytest.mark.parametrize("adapter", _BUILTIN_ADAPTERS, ids=lambda a: a.adapter_type)
+def test_unsupported_model_case_sensitive(adapter) -> None:
+    candidate = adapter.supported_models()[0]
+    if candidate.lower() == candidate.upper():
+        pytest.skip("model id has no alpha chars")
+    with pytest.raises(ValueError):
+        adapter.ui_schema(candidate.upper())
+
+
+@pytest.mark.parametrize("adapter", _BUILTIN_ADAPTERS, ids=lambda a: a.adapter_type)
+def test_field_keys_unique_within_model(adapter) -> None:
+    for model_id in adapter.supported_models():
+        keys = [f.k for f in adapter.ui_schema(model_id)]
+        assert len(keys) == len(set(keys)), (
+            f"{adapter.adapter_type}/{model_id} duplicate keys: {keys}"
+        )
+
+
+@pytest.mark.parametrize("adapter", _BUILTIN_ADAPTERS, ids=lambda a: a.adapter_type)
+def test_list_controls_have_non_empty_options(adapter) -> None:
+    for model_id in adapter.supported_models():
+        for f in adapter.ui_schema(model_id):
+            if f.control in ("chip-grid", "chip-row", "select"):
+                assert f.options is not None and len(f.options) > 0, (
+                    f"{model_id}/{f.k}: list control must have non-empty options"
+                )
+
+
+@pytest.mark.parametrize("adapter", _BUILTIN_ADAPTERS, ids=lambda a: a.adapter_type)
+def test_number_controls_have_max(adapter) -> None:
+    for model_id in adapter.supported_models():
+        for f in adapter.ui_schema(model_id):
+            if f.control == "number":
+                assert f.max is not None, (
+                    f"{model_id}/{f.k}: number control must declare max "
+                    "(drives the disabled-preset boundary)"
+                )
+                if f.presets:
+                    for p in f.presets:
+                        assert p <= f.max, (
+                            f"{model_id}/{f.k}: preset {p} > max {f.max}"
+                        )
+
+
+@pytest.mark.parametrize("adapter", _BUILTIN_ADAPTERS, ids=lambda a: a.adapter_type)
+def test_no_options_on_non_list_controls(adapter) -> None:
+    """toggle / number must not declare options — silently surplus
+    fields would cause subtle frontend bugs."""
+    for model_id in adapter.supported_models():
+        for f in adapter.ui_schema(model_id):
+            if f.control in ("toggle", "number"):
+                assert f.options is None, (
+                    f"{model_id}/{f.k}: {f.control} field must not have options"
+                )
+
+
+def test_openai_v1_n_max_presets_subset_of_max() -> None:
+    adapter = OpenAIV1Adapter()
+    schema = {f.k: f for f in adapter.ui_schema("gpt-image-2")}
+    n = schema["n_max"]
+    assert all(p <= n.max for p in n.presets)
+    assert n.min == 1
+    assert 1 in n.presets, "Output count must always allow 1"
+
+
+def test_openai_v1_no_gemini_only_fields() -> None:
+    """Defence in depth — adapter pollution would otherwise survive
+    schema-key validation if a field name happened to collide."""
+    adapter = OpenAIV1Adapter()
+    keys = {f.k for f in adapter.ui_schema("gpt-image-2")}
+    assert "aspect_ratio" not in keys
+    assert "image_size" not in keys
+    assert "thinking_level" not in keys
+
+
+def test_gemini_3pro_basic_aspect_ratios_only() -> None:
+    """3 Pro must NOT include the flash-31 extra ratios (1:4 / 4:1 / 1:8 / 8:1)."""
+    adapter = GeminiV1BetaAdapter()
+    schema = {f.k: f for f in adapter.ui_schema("gemini-3-pro-image-preview")}
+    opts = set(schema["aspect_ratio"].options)
+    assert "1:4" not in opts
+    assert "8:1" not in opts
+
+
+def test_no_internal_state_mutation_across_models() -> None:
+    """Calling adapter.ui_schema() for different models must not pollute
+    state used by subsequent calls (defensive — would surface if anyone
+    cached aspect_options at module load)."""
+    a = GeminiV1BetaAdapter()
+    s1 = [f.model_dump() for f in a.ui_schema("gemini-3-pro-image-preview")]
+    a.ui_schema("gemini-3.1-flash-image-preview")
+    s3 = [f.model_dump() for f in a.ui_schema("gemini-3-pro-image-preview")]
+    assert s1 == s3
+
+
+def test_returned_list_is_safe_to_mutate() -> None:
+    """Caller mutation of the returned list must not poison subsequent calls."""
+    a = OpenAIV1Adapter()
+    s1 = a.ui_schema("gpt-image-2")
+    s1.clear()
+    s2 = a.ui_schema("gpt-image-2")
+    assert len(s2) > 0
+
+
+# ---------------------------------------------------------------------------
+# value_key indirection (the bug the e2e Playwright run caught)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "adapter,model_id",
+    [
+        (OpenAIV1Adapter(), "gpt-image-2"),
+        (GeminiV1BetaAdapter(), "gemini-3-pro-image-preview"),
+        (GeminiV1BetaAdapter(), "gemini-3.1-flash-image-preview"),
+    ],
+)
+def test_n_max_field_declares_value_key_n(adapter, model_id) -> None:
+    schema = {f.k: f for f in adapter.ui_schema(model_id)}
+    assert schema["n_max"].value_key == "n", (
+        "n_max writes the chosen batch size to the request param `n`, "
+        "not `n_max` — without value_key the renderer would write to "
+        "the wrong key (regression: PR-3)"
+    )

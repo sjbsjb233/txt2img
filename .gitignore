@@ -14,3 +14,5 @@ __pycache__/
 .playwright-browsers/
 playwright-report/
 test-results/
+playwright-shots/
+.e2e-data/

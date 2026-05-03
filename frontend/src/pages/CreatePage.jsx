@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Icon from "../components/Icon.jsx";
 import TopBar from "../components/TopBar.jsx";
@@ -9,6 +9,9 @@ import { createSession } from "../api/sessions.js";
 import * as sseStore from "../store/sse.js";
 import * as archiveStore from "../store/archive.js";
 import { usePreferences } from "../store/preferences.js";
+import { useFieldRenderPlan } from "../hooks/useFieldRenderPlan.js";
+import { applyDefaults } from "../utils/reconcileParams.js";
+import { SchemaParamsPanel } from "../components/SchemaParamsPanel.jsx";
 
 // ---------------------------------------------------------------------------
 // Visual atoms
@@ -99,180 +102,12 @@ function relativeTime(iso) {
   return `updated ${mo}mo ago`;
 }
 
-function aspectBoxSize(ratio) {
-  const parts = String(ratio || "1:1").split(":");
-  const a = Math.max(1, Number(parts[0]) || 1);
-  const b = Math.max(1, Number(parts[1]) || 1);
-  // 36×32 fits the chip layout. Long ratios like 8:1 collapse below
-  // the minimum so we floor at 4 px to keep them visible.
-  const maxW = 36;
-  const maxH = 32;
-  const ratioVal = a / b;
-  let w = maxW;
-  let h = maxW / ratioVal;
-  if (h > maxH) {
-    h = maxH;
-    w = maxH * ratioVal;
-  }
-  return { w: Math.max(4, Math.round(w)), h: Math.max(4, Math.round(h)) };
-}
-
 // ---------------------------------------------------------------------------
 // Param helpers — scrub a value off the request when the new model's
 // capability set no longer permits it. Without this, switching from
 // gpt-image-2 (size=1024x1024) to gemini-3.1-flash would leak the
 // OpenAI-only `size` field into the gemini payload and trigger 422.
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Param helpers — schema-driven. Walk every field declared by the model's
-// ui_schema and drop / clamp values that fall outside the merged
-// capabilities. Without this, switching from gpt-image-2 (size=1024x1024)
-// to gemini-3.1-flash would leak the OpenAI-only `size` field into the
-// gemini payload and trigger 422.
-//
-// `value_key` indirection: a field's `k` names the *capability* the cell
-// reads from (e.g. n_max), but the actual *param* it writes to may be a
-// different key (n). The fallback is `k` for the common case where they
-// match (size, aspect_ratio, quality, …).
-//
-// Field-key universe: anything outside the schema's value_keys plus a
-// hard-coded set of submission-glue keys (model / prompt / etc.) is
-// considered junk left over from a previous model and gets dropped on
-// reconcile. Without this gate, default user-prefs like
-// `aspect_ratio="1:1"` survive a switch to gpt-image-2 (which has no
-// aspect_ratio field) and leak into the request payload.
-// ---------------------------------------------------------------------------
-
-const SUBMISSION_GLUE_KEYS = new Set([
-  "model",
-  "prompt",
-  "session_id",
-  "client_request_id",
-  "captcha_token",
-]);
-
-function paramKey(field) {
-  return field.value_key || field.k;
-}
-
-function reconcileParams(params, capabilities, uiSchema) {
-  const next = { ...params };
-  const allowedParamKeys = new Set(SUBMISSION_GLUE_KEYS);
-  for (const field of uiSchema || []) {
-    allowedParamKeys.add(paramKey(field));
-  }
-
-  // Drop any param that no longer corresponds to a schema field — this
-  // is what kills the gpt-image-2 ← gemini aspect_ratio leak.
-  for (const k of Object.keys(next)) {
-    if (!allowedParamKeys.has(k)) {
-      delete next[k];
-    }
-  }
-
-  for (const field of uiSchema || []) {
-    const cap = capabilities?.[field.k];
-    const pk = paramKey(field);
-    const cur = next[pk];
-
-    if (
-      field.control === "chip-grid" ||
-      field.control === "chip-row" ||
-      field.control === "select"
-    ) {
-      if (cur != null && Array.isArray(cap) && !cap.includes(cur)) {
-        delete next[pk];
-      }
-    } else if (field.control === "number") {
-      if (typeof cur === "number" && typeof cap === "number" && cur > cap) {
-        next[pk] = cap;
-      }
-    } else if (field.control === "toggle") {
-      if (cur === true && cap !== true) {
-        next[pk] = false;
-      }
-    }
-  }
-  return next;
-}
-
-function applyDefaults(defaults, params, capabilities, uiSchema) {
-  // Apply backend-recommended defaults only when the field is unset
-  // *or* the previous value is no longer allowed. We lean to "preserve
-  // user intent" so switching models keeps the prompt et al intact.
-  const next = { ...params };
-  const setIfMissing = (key, fallback) => {
-    if (next[key] === undefined || next[key] === null) next[key] = fallback;
-  };
-  Object.entries(defaults || {}).forEach(([k, v]) => {
-    if (v !== null && v !== undefined) setIfMissing(k, v);
-  });
-  return reconcileParams(next, capabilities, uiSchema);
-}
-
-// Build a render plan from (uiSchema, capabilities). For each field,
-// decide whether it's interactive at all and which individual options
-// are reachable under the user's current tier × provider mix. The
-// renderer uses this directly — it never re-derives from capabilities.
-function useFieldRenderPlan(uiSchema, capabilities) {
-  return useMemo(() => {
-    const plan = (uiSchema || []).map((field) => {
-      const cap = capabilities?.[field.k];
-      let allowedOptions = null;
-      let fieldDisabled = false;
-      let disabledReason = null;
-
-      if (
-        field.control === "chip-grid" ||
-        field.control === "chip-row" ||
-        field.control === "select"
-      ) {
-        if (!Array.isArray(cap) || cap.length === 0) {
-          fieldDisabled = true;
-          disabledReason = "Not available on your current tier.";
-          allowedOptions = new Set();
-        } else {
-          allowedOptions = new Set(cap);
-        }
-      } else if (field.control === "number") {
-        const max = typeof cap === "number" ? cap : null;
-        const lowerBound = field.min ?? 1;
-        if (max == null || max <= lowerBound) {
-          // max == null means the merged caps don't expose an upper
-          // bound → still interactive but driven by the schema's max.
-          if (max != null && max < lowerBound) {
-            fieldDisabled = true;
-            disabledReason = "Not adjustable for this model.";
-          } else if (max != null && max === lowerBound && (field.presets?.length ?? 0) <= 1) {
-            // Locked to a single value (e.g. Gemini n=1) — still
-            // render so the layout is stable, but no presets to pick.
-            fieldDisabled = false;
-          }
-        }
-      } else if (field.control === "toggle") {
-        if (cap !== true) {
-          fieldDisabled = true;
-          disabledReason =
-            cap === false
-              ? "Provider has not enabled this feature."
-              : "Not available on your current tier.";
-        }
-      }
-
-      return { field, allowedOptions, fieldDisabled, disabledReason };
-    });
-
-    const byOrder = (a, b) => (a.field.order ?? 100) - (b.field.order ?? 100);
-    const primary = plan
-      .filter((p) => (p.field.group ?? "primary") === "primary")
-      .sort(byOrder);
-    const advanced = plan
-      .filter((p) => p.field.group === "advanced")
-      .sort(byOrder);
-    return { primary, advanced };
-  }, [uiSchema, capabilities]);
-}
 
 // ---------------------------------------------------------------------------
 // CreatePage
@@ -706,6 +541,7 @@ export default function CreatePage() {
               </div>
             </div>
             <textarea
+              data-test-prompt-input
               value={prompt}
               onChange={(e) =>
                 setPrompt(e.target.value.slice(0, promptCharCap))
@@ -999,6 +835,9 @@ export default function CreatePage() {
                 return (
                   <button
                     key={m.model_id}
+                    data-test-model-id={m.model_id}
+                    data-test-available={m.available ? "true" : "false"}
+                    data-test-active={on ? "true" : "false"}
                     onClick={() => !disabled && setSelectedModel(m)}
                     disabled={disabled}
                     title={disabled ? unavailableReasonCopy(m.available_reason) : undefined}
@@ -1198,6 +1037,8 @@ export default function CreatePage() {
 
         {/* Right column: parameters */}
         <div
+          data-test-param-panel
+          data-test-active-model={selectedModel?.model_id || ""}
           style={{
             background: "var(--paper-2)",
             display: "flex",
@@ -1233,6 +1074,7 @@ export default function CreatePage() {
           >
             {errorMessage ? (
               <div
+                data-test-error
                 className="mono"
                 style={{
                   fontSize: 11,
@@ -1247,6 +1089,7 @@ export default function CreatePage() {
               </div>
             ) : null}
             <button
+              data-test-submit-button
               onClick={handleGenerate}
               disabled={submitting || !selectedModel?.available}
               className="btn primary shadowed lg"
@@ -1285,525 +1128,6 @@ export default function CreatePage() {
         onSuccess={onCaptchaSuccess}
       />
     </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
-
-function ChipGroup({
-  label,
-  hint,
-  options,
-  value,
-  onChange,
-  renderOption,
-  smallTopMargin = false,
-  isOptionAllowed,
-  fieldDisabled = false,
-  disabledReason = null,
-  layout,
-  showHairline = true,
-}) {
-  // Pick a column count by the longest label so chips fit the 360px right
-  // panel without spilling. The thresholds below are calibrated against the
-  // ticker font (16px / 900) used by the chip body:
-  //   - 4 cols ≈ 70px each: comfortable for "1K", "low", "auto", "png"
-  //   - 3 cols ≈ 95px each: handles "medium", "high"
-  //   - 2 cols ≈ 150px each: fits "1024x1024", "1024x1536", "minimal"
-  // ``renderOption`` is only used by the aspect-ratio chips today, whose
-  // body is a tiny rectangle plus a 4-char label — those always fit 4-up.
-  const longest = options.reduce(
-    (acc, opt) => Math.max(acc, String(opt).length),
-    0
-  );
-  let cols;
-  if (layout === "row") {
-    cols = Math.min(options.length || 1, 4);
-  } else if (renderOption) {
-    cols = Math.min(options.length || 1, layout === "grid" ? 3 : 4);
-  } else if (longest >= 8) {
-    cols = 2;
-  } else if (longest >= 5) {
-    cols = 3;
-  } else {
-    cols = Math.min(options.length || 1, 4);
-  }
-  return (
-    <div
-      style={{
-        marginTop: smallTopMargin ? 4 : 0,
-        opacity: fieldDisabled ? 0.55 : 1,
-      }}
-      title={fieldDisabled ? disabledReason || undefined : undefined}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "baseline",
-          justifyContent: "space-between",
-          marginBottom: 10,
-        }}
-      >
-        <div
-          className="mono caps"
-          style={{
-            fontSize: 10,
-            color: fieldDisabled ? "var(--ink-4)" : "var(--ink-3)",
-          }}
-        >
-          {label}
-        </div>
-        {hint ? (
-          <div className="mono" style={{ fontSize: 9, color: "var(--ink-3)" }}>
-            {hint}
-          </div>
-        ) : null}
-      </div>
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-          gap: 6,
-        }}
-      >
-        {options.map((opt) => {
-          const on = value === opt;
-          const allowed =
-            !fieldDisabled &&
-            (typeof isOptionAllowed === "function" ? isOptionAllowed(opt) : true);
-          return (
-            <button
-              key={opt}
-              onClick={() => allowed && onChange(opt)}
-              disabled={!allowed}
-              title={
-                fieldDisabled
-                  ? disabledReason || undefined
-                  : allowed
-                  ? undefined
-                  : "Not available on your current tier."
-              }
-              style={{
-                padding: "10px 6px",
-                background: on
-                  ? "var(--ink)"
-                  : allowed
-                  ? "#fffdf7"
-                  : "var(--paper-3)",
-                border: "1px solid var(--ink)",
-                color: on
-                  ? "var(--banana)"
-                  : allowed
-                  ? "var(--ink)"
-                  : "var(--ink-4)",
-                cursor: allowed ? "pointer" : "not-allowed",
-                textAlign: "center",
-                minWidth: 0,
-                overflow: "hidden",
-                opacity: allowed ? 1 : 0.5,
-              }}
-            >
-              {renderOption ? (
-                renderOption(opt, on)
-              ) : (
-                <div
-                  className="ticker"
-                  style={{
-                    fontSize: 16,
-                    fontWeight: 900,
-                    letterSpacing: "-0.03em",
-                    lineHeight: 1.1,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {opt}
-                </div>
-              )}
-            </button>
-          );
-        })}
-      </div>
-      {fieldDisabled && disabledReason ? (
-        <div
-          className="mono"
-          style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 6 }}
-        >
-          {disabledReason}
-        </div>
-      ) : null}
-      {showHairline ? <div className="hair" style={{ margin: "18px 0" }} /> : null}
-    </div>
-  );
-}
-
-function Toggle({
-  label,
-  hint,
-  value,
-  onChange,
-  fieldDisabled = false,
-  disabledReason = null,
-}) {
-  return (
-    <label
-      title={fieldDisabled ? disabledReason || undefined : undefined}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        background: fieldDisabled ? "var(--paper-3)" : "#fffdf7",
-        border: "1px solid var(--ink)",
-        padding: "8px 10px",
-        cursor: fieldDisabled ? "not-allowed" : "pointer",
-        opacity: fieldDisabled ? 0.55 : 1,
-      }}
-    >
-      <input
-        type="checkbox"
-        checked={value}
-        disabled={fieldDisabled}
-        onChange={(e) => onChange(e.target.checked)}
-      />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          style={{
-            fontSize: 12,
-            fontWeight: 600,
-            color: fieldDisabled ? "var(--ink-4)" : undefined,
-          }}
-        >
-          {label}
-        </div>
-        {hint ? (
-          <div className="mono" style={{ fontSize: 9, color: "var(--ink-3)" }}>
-            {hint}
-          </div>
-        ) : null}
-        {fieldDisabled && disabledReason ? (
-          <div
-            className="mono"
-            style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}
-          >
-            {disabledReason}
-          </div>
-        ) : null}
-      </div>
-    </label>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Schema-driven param panel — NumberPresets / FieldRenderer / SchemaParamsPanel.
-//
-// NumberPresets is intentionally "Output count specific" rather than a
-// generic number input: it carries the ticker (×N) visual the original
-// mockup used. The plan reserves it for the `n_max` field today; if a
-// future schema field also wants this control they get the same look.
-// ---------------------------------------------------------------------------
-
-function NumberPresets({
-  label,
-  hint,
-  presets,
-  max,
-  value,
-  onChange,
-  fieldDisabled = false,
-  disabledReason = null,
-}) {
-  const display = typeof value === "number" ? value : 1;
-  const presetList = presets && presets.length ? presets : [1, 2, 4, 8];
-  return (
-    <div
-      title={fieldDisabled ? disabledReason || undefined : undefined}
-      style={{ opacity: fieldDisabled ? 0.55 : 1 }}
-    >
-      <div
-        className="mono caps"
-        style={{
-          fontSize: 10,
-          color: fieldDisabled ? "var(--ink-4)" : "var(--ink-3)",
-          marginBottom: 8,
-        }}
-      >
-        {label}
-      </div>
-      <div
-        style={{
-          border: "1px solid var(--ink)",
-          padding: 12,
-          background: fieldDisabled ? "var(--paper-3)" : "#fffdf7",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "baseline",
-          }}
-        >
-          <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
-            {hint || ""}
-          </span>
-          <div
-            className="ticker"
-            style={{ fontSize: 24, fontWeight: 900, letterSpacing: "-0.03em" }}
-          >
-            ×{display}
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 4, marginTop: 8 }}>
-          {presetList.map((n) => {
-            const allowed =
-              !fieldDisabled && (typeof max === "number" ? n <= max : true);
-            const on = display === n;
-            return (
-              <button
-                key={n}
-                onClick={() => allowed && onChange(n)}
-                disabled={!allowed}
-                title={
-                  fieldDisabled
-                    ? disabledReason || undefined
-                    : allowed
-                    ? undefined
-                    : `caps at ${max}`
-                }
-                style={{
-                  flex: 1,
-                  height: 30,
-                  background: on
-                    ? "var(--banana)"
-                    : allowed
-                    ? "transparent"
-                    : "var(--paper-3)",
-                  border: "1px solid var(--ink)",
-                  cursor: allowed ? "pointer" : "not-allowed",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 12,
-                  fontWeight: 700,
-                  color: allowed ? "var(--ink)" : "var(--ink-4)",
-                  opacity: allowed ? 1 : 0.5,
-                }}
-              >
-                {n}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-      {fieldDisabled && disabledReason ? (
-        <div
-          className="mono"
-          style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 4 }}
-        >
-          {disabledReason}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-// Field-key-specific cell renderers we still want to keep when migrating
-// off the hard-coded JSX. Aspect ratio cells need a proportional preview
-// box and image-size cells need a ticker + descriptor — neither fits the
-// generic "ticker text" cell ChipGroup ships by default.
-const IMAGE_SIZE_NOTES_FOR_RENDERER = {
-  512: "preview",
-  "1K": "balanced",
-  "2K": "print",
-  "4K": "max",
-};
-
-function aspectRatioRenderOption(opt, on) {
-  const { w, h } = aspectBoxSize(opt);
-  return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        gap: 6,
-        color: on ? "var(--banana)" : "var(--ink)",
-      }}
-    >
-      <div
-        style={{
-          width: w,
-          height: h,
-          background: on ? "var(--banana)" : "var(--paper-3)",
-          border: "1px solid currentColor",
-        }}
-      />
-      <div className="mono" style={{ fontSize: 10, fontWeight: 700 }}>
-        {opt}
-      </div>
-    </div>
-  );
-}
-
-function imageSizeRenderOption(opt, on) {
-  return (
-    <div>
-      <div
-        className="ticker"
-        style={{
-          fontSize: 20,
-          fontWeight: 900,
-          letterSpacing: "-0.03em",
-          lineHeight: 1,
-        }}
-      >
-        {opt}
-      </div>
-      <div
-        className="mono"
-        style={{ fontSize: 9, marginTop: 4, opacity: on ? 0.8 : 0.6 }}
-      >
-        {IMAGE_SIZE_NOTES_FOR_RENDERER[opt] || ""}
-      </div>
-    </div>
-  );
-}
-
-function FieldRenderer({ plan, value, onChange, capabilities }) {
-  const { field, allowedOptions, fieldDisabled, disabledReason } = plan;
-  const isAllowed = (opt) =>
-    allowedOptions ? allowedOptions.has(opt) : true;
-
-  if (
-    field.control === "chip-grid" ||
-    field.control === "chip-row" ||
-    field.control === "select"
-  ) {
-    let renderOption;
-    if (field.k === "aspect_ratio") renderOption = aspectRatioRenderOption;
-    else if (field.k === "image_size") renderOption = imageSizeRenderOption;
-
-    return (
-      <ChipGroup
-        label={field.label}
-        hint={field.hint || null}
-        options={field.options || []}
-        value={value ?? null}
-        onChange={onChange}
-        renderOption={renderOption}
-        layout={field.control === "chip-row" ? "row" : "grid"}
-        isOptionAllowed={isAllowed}
-        fieldDisabled={fieldDisabled}
-        disabledReason={disabledReason}
-        showHairline={false}
-      />
-    );
-  }
-
-  if (field.control === "number") {
-    const cap = capabilities?.[field.k];
-    const max = typeof cap === "number" ? cap : field.max ?? null;
-    return (
-      <NumberPresets
-        label={field.label}
-        hint={field.hint || null}
-        presets={field.presets || [1, 2, 4, 8]}
-        max={max}
-        value={typeof value === "number" ? value : 1}
-        onChange={onChange}
-        fieldDisabled={fieldDisabled}
-        disabledReason={disabledReason}
-      />
-    );
-  }
-
-  if (field.control === "toggle") {
-    return (
-      <Toggle
-        label={field.label}
-        hint={field.hint || null}
-        value={!!value}
-        onChange={onChange}
-        fieldDisabled={fieldDisabled}
-        disabledReason={disabledReason}
-      />
-    );
-  }
-
-  return null;
-}
-
-function SchemaParamsPanel({ plan, params, setParam, capabilities }) {
-  if (!plan.primary.length && !plan.advanced.length) {
-    return (
-      <div
-        className="mono"
-        style={{ fontSize: 11, color: "var(--ink-3)", padding: 12 }}
-      >
-        This model has no configurable parameters.
-      </div>
-    );
-  }
-  return (
-    <>
-      {plan.primary.map((p, idx) => {
-        const pk = paramKey(p.field);
-        return (
-          <Fragment key={p.field.k}>
-            <FieldRenderer
-              plan={p}
-              value={params[pk]}
-              onChange={(v) => setParam(pk, v)}
-              capabilities={capabilities}
-            />
-            {idx < plan.primary.length - 1 ? (
-              <div className="hair" style={{ margin: "18px 0" }} />
-            ) : null}
-          </Fragment>
-        );
-      })}
-      {plan.advanced.length > 0 ? (
-        <>
-          <div className="hair" style={{ margin: "18px 0" }} />
-          <details>
-            <summary
-              className="mono caps"
-              style={{
-                fontSize: 10,
-                color: "var(--ink-3)",
-                cursor: "pointer",
-                outline: "none",
-                userSelect: "none",
-              }}
-            >
-              ◢ Advanced
-            </summary>
-            <div
-              style={{
-                marginTop: 12,
-                display: "flex",
-                flexDirection: "column",
-                gap: 14,
-              }}
-            >
-              {plan.advanced.map((p) => {
-                const pk = paramKey(p.field);
-                return (
-                  <FieldRenderer
-                    key={p.field.k}
-                    plan={p}
-                    value={params[pk]}
-                    onChange={(v) => setParam(pk, v)}
-                    capabilities={capabilities}
-                  />
-                );
-              })}
-            </div>
-          </details>
-        </>
-      ) : null}
-    </>
   );
 }
 
