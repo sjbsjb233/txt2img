@@ -5,6 +5,7 @@ import Dashboard from "./pages/Dashboard.jsx";
 import CreatePage from "./pages/CreatePage.jsx";
 import ArchivePage from "./pages/ArchivePage.jsx";
 import AdminPage from "./pages/AdminPage.jsx";
+import SettingsPage from "./pages/SettingsPage.jsx";
 import Layout from "./components/Layout.jsx";
 import RequireAuth from "./components/RequireAuth.jsx";
 import RequireAdmin from "./components/RequireAdmin.jsx";
@@ -17,6 +18,8 @@ import {
 } from "./store/sse.js";
 import * as announcementsStore from "./store/announcements.js";
 import * as archiveStore from "./store/archive.js";
+import * as preferencesStore from "./store/preferences.js";
+import * as sseStoreModule from "./store/sse.js";
 
 export default function App() {
   const { isAuthenticated, user } = useAuth();
@@ -63,6 +66,48 @@ export default function App() {
     }
   }, [isAuthenticated, user?.id]);
 
+  // Load synced preferences once we have a token. Theme / density /
+  // sidebar default depend on this — preferencesStore applies them to
+  // <html> as data-attributes so the rest of the app picks them up
+  // through CSS without needing a React subscription.
+  useEffect(() => {
+    if (isAuthenticated && user?.id) {
+      void preferencesStore.load();
+    }
+  }, [isAuthenticated, user?.id]);
+
+  // Browser-notification subscriber: when a job ends in SUCCEEDED or
+  // FAILED while another tab is foregrounded, fire a Notification
+  // (the user opted in from Settings → Notifications). This is the
+  // *only* job-level browser surface, so it lives at the App layer
+  // alongside the other long-lived subscriptions.
+  useEffect(() => {
+    if (!isAuthenticated) return undefined;
+    const off = sseStoreModule.subscribe("job_state", (payload) => {
+      const prefs = preferencesStore.getMerged();
+      if (!prefs?.notifications?.browser_on_complete) return;
+      if (typeof Notification === "undefined") return;
+      if (Notification.permission !== "granted") return;
+      if (typeof document !== "undefined" && !document.hidden) return;
+      const status = payload?.to;
+      if (status !== "SUCCEEDED" && status !== "FAILED") return;
+      try {
+        new Notification(
+          status === "SUCCEEDED" ? "Generation complete" : "Generation failed",
+          {
+            body: payload?.prompt
+              ? String(payload.prompt).slice(0, 80)
+              : `Job ${payload?.hash_id || ""}`,
+            tag: `job-${payload?.hash_id || payload?.job_id || Math.random()}`,
+          }
+        );
+      } catch {
+        /* ignore — some browsers throw if the tab is closing */
+      }
+    });
+    return off;
+  }, [isAuthenticated]);
+
   // Show the full-screen "connection lost" overlay only after the SSE
   // client has tried at least 5 times in a row to reconnect. It hides
   // automatically when status flips back to ``open``.
@@ -85,6 +130,7 @@ export default function App() {
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/create" element={<CreatePage />} />
           <Route path="/archive" element={<ArchivePage />} />
+          <Route path="/settings" element={<SettingsPage />} />
           <Route
             path="/admin"
             element={

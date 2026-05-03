@@ -106,10 +106,13 @@ async def test_login_success_returns_jwt_with_minimal_payload(
     from app.utils.security import decode_access_token
 
     payload = decode_access_token(token)
-    assert set(payload.keys()) == {"sub", "u", "r", "iat", "exp"}
+    # ``jti`` was added so the auth dependency can match the token to a
+    # row in ``auth_sessions`` and reject revoked devices.
+    assert set(payload.keys()) == {"sub", "u", "r", "iat", "exp", "jti"}
     assert payload["u"] == "admin"
     assert payload["r"] == "admin"
     assert payload["sub"].startswith("u_")
+    assert isinstance(payload["jti"], str) and payload["jti"]
 
     # Response payload is the §2.3 minimal shape — no tier / quota / etc.
     user = body["user"]
@@ -268,8 +271,24 @@ async def test_me_returns_only_identity_fields(
     )
     assert resp.status_code == 200
     body = resp.json()
-    # No tier / today_count / soft_quota / hard_quota / last_login_at.
-    assert set(body.keys()) == {"id", "username", "role", "display_name"}
+    # No tier / today_count / soft_quota / hard_quota — those are admin-
+    # only. Profile metadata (email, created_at, last_login_at,
+    # password_changed_at) was added with the /settings page and is
+    # safe to expose to the user themselves.
+    assert set(body.keys()) == {
+        "id",
+        "username",
+        "role",
+        "display_name",
+        "email",
+        "created_at",
+        "last_login_at",
+        "password_changed_at",
+    }
+    assert "tier" not in body
+    assert "today_count" not in body
+    assert "soft_quota" not in body
+    assert "hard_quota" not in body
 
 
 @pytest.mark.asyncio

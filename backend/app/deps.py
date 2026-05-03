@@ -25,7 +25,7 @@ from fastapi import Depends, Header
 from sqlalchemy import select
 
 from app.db.engine import get_session
-from app.db.models import User
+from app.db.models import AuthSession, User
 from app.domain.runtime_configs import EmergencyConfig
 from app.utils.errors import api_error
 from app.utils.security import TokenError, decode_access_token
@@ -53,6 +53,12 @@ class AuthContext:
     """Admin id from the JWT ``impersonator`` claim, or ``None`` for a
     plain login token. When set, ``user`` is the *target* of the
     impersonation, not the original actor.
+    """
+
+    jti: str | None
+    """``jti`` claim from the JWT, when present. Used by the /api/me
+    routes to know which auth_sessions row represents *this* request
+    so they can label it as the current device.
     """
 
     @property
@@ -117,10 +123,26 @@ async def get_auth_context(
     else:
         impersonator_id = None
 
+    jti_raw = payload.get("jti")
+    jti: str | None = jti_raw if isinstance(jti_raw, str) and jti_raw else None
+
     async with get_session() as session:
         user = (
             await session.execute(select(User).where(User.id == user_id))
         ).scalar_one_or_none()
+        # Plain login tokens carry a jti tied to a row in auth_sessions.
+        # If that row has been revoked, the token is no longer valid even
+        # though the cryptographic signature still verifies. Impersonate
+        # tokens skip the lookup — they're short-lived, single-use admin
+        # tools and don't need device tracking.
+        if jti is not None and impersonator_id is None:
+            sess_row = (
+                await session.execute(
+                    select(AuthSession).where(AuthSession.jti == jti)
+                )
+            ).scalar_one_or_none()
+            if sess_row is not None and sess_row.revoked_at is not None:
+                raise api_error(401, "UNAUTHORIZED", "Session has been revoked.")
 
     if user is None:
         # Token references a user that no longer exists.
@@ -133,7 +155,7 @@ async def get_auth_context(
         # don't accidentally leak the soft-delete distinction.
         raise api_error(401, "UNAUTHORIZED", "Account not found.")
 
-    return AuthContext(user=user, impersonator_id=impersonator_id)
+    return AuthContext(user=user, impersonator_id=impersonator_id, jti=jti)
 
 
 async def get_current_user(

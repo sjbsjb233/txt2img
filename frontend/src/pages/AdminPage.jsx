@@ -9,8 +9,10 @@ import AdaptersTab from "./admin/AdaptersTab.jsx";
 import ConfigTab from "./admin/ConfigTab.jsx";
 import CleanupTab from "./admin/CleanupTab.jsx";
 import AnnouncementsTab from "./admin/AnnouncementsTab.jsx";
+import ApprovalsTab from "./admin/ApprovalsTab.jsx";
 import AuditTab from "./admin/AuditTab.jsx";
 import * as adminConfig from "../api/admin/config.js";
+import * as adminApprovals from "../api/admin/approvals.js";
 
 // `count` was hardcoded in the mock; we drop it on backend-wired tabs
 // because the real numbers vary and the chip looked stale. The
@@ -19,6 +21,7 @@ import * as adminConfig from "../api/admin/config.js";
 const TABS = [
   { id: "overview", label: "Overview", Component: OverviewTab },
   { id: "users", label: "Users", Component: UsersTab },
+  { id: "approvals", label: "Approvals", Component: ApprovalsTab },
   { id: "tiers", label: "Tiers", Component: TiersTab },
   { id: "providers", label: "Providers", Component: ProvidersTab },
   { id: "adapters", label: "Adapters", Component: AdaptersTab },
@@ -82,7 +85,29 @@ const EMERGENCY_LABELS = {
 export default function AdminPage({ initialTab = "overview" }) {
   const [tab, setTab] = useState(initialTab);
   const [activeEmergencies, setActiveEmergencies] = useState([]);
+  const [pendingApprovals, setPendingApprovals] = useState(0);
   const Active = TABS.find((t) => t.id === tab)?.Component || OverviewTab;
+
+  // Pull the deletion-request pending count once per tab change so
+  // the Approvals tab badge reflects the queue length without
+  // requiring the admin to open it. Cheap query (id + status).
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const list = await adminApprovals.listDeletionRequests({
+          status: "pending",
+          limit: 1,
+        });
+        if (alive) setPendingApprovals(list?.total_pending || 0);
+      } catch {
+        /* keep stale count if the call fails */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [tab]);
 
   // Pull current config once so the emergency banner reflects live
   // state — the previous mock hard-coded the banner. Refreshes on
@@ -176,7 +201,7 @@ export default function AdminPage({ initialTab = "overview" }) {
               style={{
                 padding: "10px 14px",
                 border: "1px solid var(--ink)",
-                background: "#fffdf7",
+                background: "var(--card)",
                 minWidth: 180,
                 display: "flex",
                 flexDirection: "column",
@@ -248,16 +273,21 @@ export default function AdminPage({ initialTab = "overview" }) {
         )}
 
         <div style={{ display: "flex", gap: 4, marginTop: 22, overflowX: "auto" }}>
-          {TABS.map((t) => (
-            <AdminTab
-              key={t.id}
-              id={t.id}
-              label={t.label}
-              count={t.count}
-              active={tab === t.id}
-              onClick={setTab}
-            />
-          ))}
+          {TABS.map((t) => {
+            // Approvals tab gets a live count of pending requests.
+            const dynamicCount =
+              t.id === "approvals" ? pendingApprovals || null : t.count;
+            return (
+              <AdminTab
+                key={t.id}
+                id={t.id}
+                label={t.label}
+                count={dynamicCount}
+                active={tab === t.id}
+                onClick={setTab}
+              />
+            );
+          })}
         </div>
       </div>
 

@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import Icon from "./Icon.jsx";
 import { Logo, Wordmark } from "./Logo.jsx";
 import { logout as logoutFlow, useAuth } from "../store/auth.js";
+import { usePreferences } from "../store/preferences.js";
 
 const NAV = [
   { id: "dashboard", label: "Dashboard", icon: "chart", path: "/dashboard" },
@@ -18,8 +19,22 @@ const BOTTOM = [
   { id: "settings", label: "Settings", icon: "gear", path: "/settings" },
 ];
 
-export default function Sidebar({ defaultMode = "expanded" }) {
-  const [mode, setMode] = useState(defaultMode);
+export default function Sidebar({ defaultMode }) {
+  // Sidebar default comes from the user's synced preference; the prop
+  // remains as a manual override so tests / Storybook can pin it.
+  const { prefs } = usePreferences();
+  const initialMode = defaultMode || prefs?.appearance?.sidebar_default || "expanded";
+  const [mode, setMode] = useState(initialMode);
+  const [hasUserToggled, setHasUserToggled] = useState(false);
+  // Sync down updates to the saved preference unless the user has
+  // explicitly toggled the sidebar in this session — once they touch
+  // it, we stop overwriting their choice from preferences.
+  useEffect(() => {
+    if (hasUserToggled) return;
+    const next = prefs?.appearance?.sidebar_default;
+    if (next && next !== mode) setMode(next);
+  }, [prefs?.appearance?.sidebar_default, hasUserToggled, mode]);
+
   const isRail = mode === "rail";
   const railWidth = 56;
   const expandedWidth = 232;
@@ -32,8 +47,14 @@ export default function Sidebar({ defaultMode = "expanded" }) {
     NAV.find((n) => n.path === location.pathname)?.id ||
     bottomItems.find((n) => n.path === location.pathname)?.id;
 
-  const expand = () => setMode("expanded");
-  const collapse = () => setMode("rail");
+  const expand = () => {
+    setMode("expanded");
+    setHasUserToggled(true);
+  };
+  const collapse = () => {
+    setMode("rail");
+    setHasUserToggled(true);
+  };
 
   const logout = async () => {
     await logoutFlow(); // best-effort POST + clearAuth + notify
@@ -42,7 +63,6 @@ export default function Sidebar({ defaultMode = "expanded" }) {
 
   const displayName = user?.display_name || user?.username || "guest";
   const initials = (displayName || "??").slice(0, 2).toUpperCase();
-  const roleLabel = (user?.role || "user").toUpperCase();
 
   const NavBtn = ({ it, muted = false }) => {
     const on = active === it.id;
@@ -197,7 +217,7 @@ export default function Sidebar({ defaultMode = "expanded" }) {
               {displayName}
             </div>
             <div className="mono" style={{ fontSize: 9, color: "var(--ink-3)" }}>
-              {roleLabel}
+              @{user?.username || "guest"}
             </div>
           </div>
           <button

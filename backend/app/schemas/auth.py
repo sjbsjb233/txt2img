@@ -6,6 +6,8 @@ breaking them requires a coordinated frontend change.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -66,3 +68,7 @@ class MeResponse(BaseModel):
     username: str
     role: str
     display_name: str | None = None
+    email: str | None = None
+    created_at: datetime | None = None
+    last_login_at: datetime | None = None
+    password_changed_at: datetime | None = None

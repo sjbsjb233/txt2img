@@ -78,12 +78,18 @@ class User(Base):
     )
     last_login_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
+    # Profile fields used by the user-facing /settings page. ``email`` is
+    # nullable & unique-modulo-NULL; SQLite treats NULLs as distinct.
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    password_changed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
     __table_args__ = (
         CheckConstraint("role IN ('admin','user')", name="ck_users_role"),
         CheckConstraint(
             "status IN ('active','disabled','deleted')", name="ck_users_status"
         ),
         Index("idx_users_status_tier", "status", "tier"),
+        Index("idx_users_email_unique", "email", unique=True),
     )
 
 
@@ -494,3 +500,181 @@ class DiskUsage(Base):
     bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     job_count: Mapped[int] = mapped_column(Integer, nullable=False)
     refreshed_at: Mapped[datetime] = mapped_column(nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# Per-user preferences, auth sessions, account deletion requests
+# ---------------------------------------------------------------------------
+
+
+class UserPreference(Base):
+    """Single-row-per-user preferences for the /settings page.
+
+    A flat schema (one column per setting) was picked over a generic
+    key/value table because there are only a couple dozen fields, the
+    set is stable, and PATCH semantics need to be atomic across a
+    typed schema — a KV layout would make every update an N-way upsert
+    with no DB-level type checking.
+    """
+
+    __tablename__ = "user_preferences"
+
+    user_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+
+    # ----- generation
+    default_model_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    default_aspect_ratio: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'1:1'")
+    )
+    default_batch_size: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    auto_bind_session: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    auto_retry: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    remember_prompt_history: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+
+    # ----- notifications
+    notif_browser_on_complete: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    notif_sound_on_complete: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    notif_sound_volume: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("60")
+    )
+    notif_desktop_badge: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    notif_announcements_level: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'all'")
+    )
+
+    # ----- appearance
+    theme: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'system'")
+    )
+    density: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'comfortable'")
+    )
+    sidebar_default: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'expanded'")
+    )
+
+    # ----- locale
+    language: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'en'")
+    )
+    timezone: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'Asia/Shanghai'")
+    )
+    date_format: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'iso'")
+    )
+
+    # ----- privacy
+    hide_prompts_in_screenshot_mode: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "default_batch_size IN (1,2,4,8)", name="ck_pref_batch"
+        ),
+        CheckConstraint(
+            "notif_sound_volume BETWEEN 0 AND 100", name="ck_pref_volume"
+        ),
+        CheckConstraint(
+            "notif_announcements_level IN ('all','important','none')",
+            name="ck_pref_ann",
+        ),
+        CheckConstraint(
+            "theme IN ('light','dark','system')", name="ck_pref_theme"
+        ),
+        CheckConstraint(
+            "density IN ('comfortable','compact')", name="ck_pref_density"
+        ),
+        CheckConstraint(
+            "sidebar_default IN ('expanded','rail')", name="ck_pref_sidebar"
+        ),
+        CheckConstraint(
+            "date_format IN ('iso','long','us')", name="ck_pref_date"
+        ),
+    )
+
+
+class AuthSession(Base):
+    """Server-side tracking row for one authenticated browser session.
+
+    Backs the "Active sessions" list in /settings/security and the
+    "Sign out everywhere" action. Each issued JWT carries a ``jti``
+    matching one row here; ``deps.get_auth_context`` rejects tokens
+    whose row has ``revoked_at`` set.
+    """
+
+    __tablename__ = "auth_sessions"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    jti: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ip: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    last_active_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        Index("idx_auth_sessions_user", "user_id", "revoked_at"),
+    )
+
+
+class AccountDeletionRequest(Base):
+    """Self-service account deletion ticket awaiting admin approval."""
+
+    __tablename__ = "account_deletion_requests"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'pending'")
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("users.id"), nullable=True
+    )
+    admin_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','approved','rejected','withdrawn')",
+            name="ck_adr_status",
+        ),
+    )
