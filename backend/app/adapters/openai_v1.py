@@ -49,6 +49,12 @@ from app.schemas.normalized import (
     StandardError,
     StandardErrorKind,
 )
+from app.schemas.provider import (
+    CapabilityField,
+    CapabilityFieldBool,
+    CapabilityFieldInt,
+    CapabilityFieldList,
+)
 
 
 _SUPPORTED_MODELS: tuple[str, ...] = (
@@ -87,6 +93,57 @@ class OpenAIV1Adapter(BaseAdapter):
 
     def supported_models(self) -> list[str]:
         return list(_SUPPORTED_MODELS)
+
+    def capability_schema(self) -> list[CapabilityField]:
+        """Fields admin can configure for an openai_v1 provider model.
+
+        Options mirror the ``_ALLOWED_*`` sets above so a UI selection
+        cannot produce a value ``_validate`` would reject.
+        """
+        return [
+            CapabilityFieldList(
+                k="size",
+                options=sorted(_ALLOWED_SIZE_PRESETS),
+                help="Allowed size presets. Empty list disables the control.",
+            ),
+            CapabilityFieldList(
+                k="quality",
+                options=sorted(_ALLOWED_QUALITY),
+            ),
+            CapabilityFieldList(
+                k="output_format",
+                options=sorted(_ALLOWED_OUTPUT_FORMAT),
+            ),
+            CapabilityFieldList(
+                k="background",
+                options=sorted(_ALLOWED_BACKGROUND),
+                help=(
+                    "gpt-image-2 does not support transparent; toggle "
+                    "supports_transparent_bg separately if a relay does."
+                ),
+            ),
+            CapabilityFieldList(
+                k="moderation",
+                options=sorted(_ALLOWED_MODERATION),
+            ),
+            CapabilityFieldInt(k="n_max", min=1, max=10),
+            CapabilityFieldInt(k="partial_images_max", min=0, max=3),
+            CapabilityFieldInt(k="max_reference_images", min=0, max=16),
+            CapabilityFieldInt(
+                k="max_prompt_chars",
+                min=1,
+                max=_PROMPT_MAX_CHARS,
+            ),
+            CapabilityFieldBool(k="stream"),
+            CapabilityFieldBool(k="supports_mask"),
+            CapabilityFieldBool(
+                k="supports_transparent_bg",
+                help=(
+                    "gpt-image-2 does not actually support transparent "
+                    "background; reserved for future relays."
+                ),
+            ),
+        ]
 
     def _validate(self, request: NormalizedRequest) -> None:
         """Raise ``StandardError(INVALID_PARAMETER)`` for anything we

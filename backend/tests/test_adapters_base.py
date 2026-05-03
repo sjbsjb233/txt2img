@@ -18,6 +18,7 @@ from app.schemas.normalized import (
     StandardError,
     StandardErrorKind,
 )
+from app.schemas.provider import CapabilityField
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +40,9 @@ class _Toy(BaseAdapter):
 
     def supported_models(self) -> list[str]:
         return ["toy-model"]
+
+    def capability_schema(self) -> list[CapabilityField]:
+        return []
 
 
 def test_register_rejects_empty_adapter_type() -> None:

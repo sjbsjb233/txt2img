@@ -3,38 +3,10 @@ import * as adminProviders from "../../api/admin/providers.js";
 
 const ALL_TIERS = ["vip", "premium", "standard", "free"];
 
-// Capability fields the form exposes. Keep aligned with the
-// ProviderModelCapabilities pydantic schema. List-typed fields use
-// chip toggles; numeric fields use number inputs; booleans use
-// toggles. None of these are required — the backend treats null /
-// missing as "no opinion at this layer".
-const CAPABILITY_FIELDS = [
-  { k: "size", kind: "list", options: ["1024x1024", "1536x1024", "1024x1536", "auto"] },
-  {
-    k: "aspect_ratio",
-    kind: "list",
-    options: [
-      "1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4",
-      "9:16", "16:9", "21:9", "1:4", "4:1", "1:8", "8:1",
-    ],
-  },
-  { k: "image_size", kind: "list", options: ["512", "1K", "2K", "4K"] },
-  { k: "quality", kind: "list", options: ["low", "medium", "high", "auto"] },
-  { k: "output_format", kind: "list", options: ["png", "jpeg", "webp"] },
-  { k: "background", kind: "list", options: ["auto", "opaque"] },
-  { k: "moderation", kind: "list", options: ["auto", "low"] },
-  { k: "thinking_level", kind: "list", options: ["minimal", "high"] },
-  { k: "n_max", kind: "int" },
-  { k: "max_reference_images", kind: "int" },
-  { k: "max_prompt_chars", kind: "int" },
-  { k: "partial_images_max", kind: "int" },
-  { k: "include_thoughts", kind: "bool" },
-  { k: "google_search", kind: "bool" },
-  { k: "image_search", kind: "bool" },
-  { k: "stream", kind: "bool" },
-  { k: "supports_transparent_bg", kind: "bool" },
-  { k: "supports_mask", kind: "bool" },
-];
+// Capability fields are no longer hard-coded here — each adapter
+// declares its own schema via GET /api/admin/adapters
+// (`capability_schema`), and the form below renders only those fields.
+// See backend/app/adapters/base.py BaseAdapter.capability_schema().
 
 function emptyModelEntry(modelId = "") {
   return {
@@ -152,7 +124,7 @@ function ListChip({ active, onClick, children }) {
   );
 }
 
-function CapabilityEditor({ entry, onChange, allModels }) {
+function CapabilityEditor({ entry, onChange, allModels, capabilitySchema }) {
   const set = (k, v) => {
     const next = { ...entry.capabilities };
     if (v === undefined || v === null || v === "") delete next[k];
@@ -169,8 +141,20 @@ function CapabilityEditor({ entry, onChange, allModels }) {
     }
   };
 
+  const schema = capabilitySchema || [];
+  const knownKeys = new Set(schema.map((f) => f.k));
+  const unknownKeys = Object.keys(entry.capabilities || {}).filter(
+    (k) => !knownKeys.has(k),
+  );
+  const dropUnknown = (k) => {
+    const next = { ...entry.capabilities };
+    delete next[k];
+    onChange({ ...entry, capabilities: next });
+  };
+
   return (
     <div
+      data-testid="capability-editor"
       style={{
         display: "flex",
         flexDirection: "column",
@@ -221,16 +205,25 @@ function CapabilityEditor({ entry, onChange, allModels }) {
         </label>
       </div>
 
-      {CAPABILITY_FIELDS.map((f) => {
+      {schema.length === 0 && (
+        <div
+          className="mono"
+          style={{ fontSize: 11, color: "var(--ink-3)", fontStyle: "italic" }}
+        >
+          this adapter declares no configurable capability fields.
+        </div>
+      )}
+
+      {schema.map((f) => {
         if (f.kind === "list") {
           const cur = entry.capabilities[f.k] || [];
           return (
-            <div key={f.k}>
+            <div key={f.k} data-testid={`cap-field-${f.k}`}>
               <div
                 className="mono caps"
                 style={{ fontSize: 9, color: "var(--ink-3)", marginBottom: 4 }}
               >
-                {f.k}
+                {f.label || f.k}
               </div>
               <div>
                 {f.options.map((opt) => (
@@ -243,6 +236,18 @@ function CapabilityEditor({ entry, onChange, allModels }) {
                   </ListChip>
                 ))}
               </div>
+              {f.help && (
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: "var(--ink-3)",
+                    marginTop: 4,
+                    fontStyle: "italic",
+                  }}
+                >
+                  {f.help}
+                </div>
+              )}
             </div>
           );
         }
@@ -250,25 +255,42 @@ function CapabilityEditor({ entry, onChange, allModels }) {
           return (
             <div
               key={f.k}
-              style={{ display: "flex", alignItems: "center", gap: 8 }}
+              data-testid={`cap-field-${f.k}`}
+              style={{ display: "flex", flexDirection: "column", gap: 2 }}
             >
-              <span
-                className="mono caps"
-                style={{ fontSize: 9, color: "var(--ink-3)", minWidth: 160 }}
-              >
-                {f.k}
-              </span>
-              <input
-                type="number"
-                className="inp"
-                value={entry.capabilities[f.k] ?? ""}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  if (v === "") set(f.k, undefined);
-                  else set(f.k, Number(v));
-                }}
-                style={{ width: 100, fontFamily: "var(--font-mono)" }}
-              />
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span
+                  className="mono caps"
+                  style={{ fontSize: 9, color: "var(--ink-3)", minWidth: 160 }}
+                >
+                  {f.label || f.k}
+                </span>
+                <input
+                  type="number"
+                  className="inp"
+                  min={f.min ?? undefined}
+                  max={f.max ?? undefined}
+                  value={entry.capabilities[f.k] ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === "") set(f.k, undefined);
+                    else set(f.k, Number(v));
+                  }}
+                  style={{ width: 100, fontFamily: "var(--font-mono)" }}
+                />
+              </div>
+              {f.help && (
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: "var(--ink-3)",
+                    marginLeft: 168,
+                    fontStyle: "italic",
+                  }}
+                >
+                  {f.help}
+                </div>
+              )}
             </div>
           );
         }
@@ -276,37 +298,91 @@ function CapabilityEditor({ entry, onChange, allModels }) {
         return (
           <div
             key={f.k}
-            style={{ display: "flex", alignItems: "center", gap: 8 }}
+            data-testid={`cap-field-${f.k}`}
+            style={{ display: "flex", flexDirection: "column", gap: 2 }}
           >
-            <span
-              className="mono caps"
-              style={{ fontSize: 9, color: "var(--ink-3)", minWidth: 160 }}
-            >
-              {f.k}
-            </span>
-            <select
-              className="inp"
-              value={
-                entry.capabilities[f.k] === undefined
-                  ? "unset"
-                  : entry.capabilities[f.k]
-                    ? "true"
-                    : "false"
-              }
-              onChange={(e) => {
-                const v = e.target.value;
-                if (v === "unset") set(f.k, undefined);
-                else set(f.k, v === "true");
-              }}
-              style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}
-            >
-              <option value="unset">unset</option>
-              <option value="true">true</option>
-              <option value="false">false</option>
-            </select>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span
+                className="mono caps"
+                style={{ fontSize: 9, color: "var(--ink-3)", minWidth: 160 }}
+              >
+                {f.label || f.k}
+              </span>
+              <select
+                className="inp"
+                value={
+                  entry.capabilities[f.k] === undefined
+                    ? "unset"
+                    : entry.capabilities[f.k]
+                      ? "true"
+                      : "false"
+                }
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "unset") set(f.k, undefined);
+                  else set(f.k, v === "true");
+                }}
+                style={{ fontFamily: "var(--font-mono)", fontSize: 12 }}
+              >
+                <option value="unset">unset</option>
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+            </div>
+            {f.help && (
+              <div
+                style={{
+                  fontSize: 10,
+                  color: "var(--ink-3)",
+                  marginLeft: 168,
+                  fontStyle: "italic",
+                }}
+              >
+                {f.help}
+              </div>
+            )}
           </div>
         );
       })}
+
+      {unknownKeys.length > 0 && (
+        <div
+          data-testid="cap-unknown-warning"
+          style={{
+            padding: 8,
+            border: "1px dashed var(--bad)",
+            color: "var(--bad)",
+            fontSize: 11,
+            display: "flex",
+            flexDirection: "column",
+            gap: 4,
+          }}
+        >
+          <div className="mono caps" style={{ fontSize: 9 }}>
+            unknown capability keys (not declared by current adapter)
+          </div>
+          {unknownKeys.map((k) => (
+            <div
+              key={k}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                fontFamily: "var(--font-mono)",
+              }}
+            >
+              <span style={{ flex: 1 }}>{k}</span>
+              <button
+                type="button"
+                className="btn sm"
+                onClick={() => dropUnknown(k)}
+              >
+                remove
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -342,6 +418,7 @@ export default function ProviderEditorDialog({
     [adapters, form.adapter_type],
   );
   const allModels = adapterEntry ? adapterEntry.supported_models : [];
+  const capabilitySchema = adapterEntry?.capability_schema || [];
 
   const setField = (k, v) => setForm((prev) => ({ ...prev, [k]: v }));
 
@@ -687,6 +764,7 @@ export default function ProviderEditorDialog({
                     entry={m}
                     onChange={(next) => updateModel(i, next)}
                     allModels={allModels}
+                    capabilitySchema={capabilitySchema}
                   />
                   <button
                     type="button"

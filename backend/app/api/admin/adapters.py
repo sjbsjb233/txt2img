@@ -20,6 +20,7 @@ from app.adapters.base import get_registry
 from app.db.engine import get_session
 from app.db.models import Provider
 from app.deps import CurrentAdmin
+from app.schemas.provider import CapabilityField
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -30,6 +31,7 @@ class AdapterEntry(BaseModel):
     description: str
     supported_models: list[str]
     in_use_by_providers: list[str]
+    capability_schema: list[CapabilityField]
 
 
 @router.get("/adapters", response_model=list[AdapterEntry])
@@ -64,6 +66,7 @@ async def list_adapters(_admin: CurrentAdmin) -> list[AdapterEntry]:
                 description=adapter.description,
                 supported_models=adapter.supported_models(),
                 in_use_by_providers=sorted(grouped.get(adapter.adapter_type, [])),
+                capability_schema=adapter.capability_schema(),
             )
         )
     # Stable order so the admin UI doesn't reshuffle on each refresh.
