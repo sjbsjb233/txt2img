@@ -39,6 +39,7 @@ from typing import Any
 import httpx
 
 from app.adapters.base import BaseAdapter
+from app.schemas.models import ModelUIField
 from app.schemas.normalized import (
     NormalizedImage,
     NormalizedRequest,
@@ -160,6 +161,110 @@ class GeminiV1BetaAdapter(BaseAdapter):
                 help="3.1 Flash only.",
             ),
         ]
+
+    def ui_schema(self, model_id: str) -> list[ModelUIField]:
+        """Create-page parameter layout for a Gemini image-preview model.
+
+        ``flash_31_features=True`` widens the candidate aspect-ratio /
+        image-size sets and unlocks ``thinking_level`` /
+        ``include_thoughts`` / ``image_search``. Pro and 2.5-flash get
+        the conservative subset; the difference is what determines the
+        adapter-side full set surfaced to the panel.
+        """
+        if model_id not in _MODELS:
+            raise ValueError(f"unsupported model: {model_id!r}")
+
+        features = _MODELS[model_id]
+        flash_31 = bool(features.get("flash_31_features"))
+
+        aspect_options = (
+            sorted(_ASPECT_RATIOS_PRO | _ASPECT_RATIOS_FLASH_31_EXTRA)
+            if flash_31
+            else sorted(_ASPECT_RATIOS_PRO)
+        )
+        image_sizes = (
+            sorted(_IMAGE_SIZES_PRO | _IMAGE_SIZES_FLASH_31_EXTRA)
+            if flash_31
+            else sorted(_IMAGE_SIZES_PRO)
+        )
+
+        fields: list[ModelUIField] = [
+            ModelUIField(
+                # Gemini hard-codes n=1, but the panel still renders the
+                # ticker so the slot doesn't shift when switching models.
+                k="n_max",
+                control="number",
+                label="Output count",
+                hint="per generation",
+                group="primary",
+                order=10,
+                min=1,
+                max=1,
+                presets=[1],
+            ),
+            ModelUIField(
+                k="aspect_ratio",
+                control="chip-grid",
+                label="Shape",
+                hint="aspect ratio",
+                group="primary",
+                order=20,
+                options=aspect_options,
+            ),
+            ModelUIField(
+                k="image_size",
+                control="chip-row",
+                label="Image size",
+                hint="rendered resolution",
+                group="primary",
+                order=30,
+                options=image_sizes,
+            ),
+        ]
+
+        if flash_31:
+            fields.extend(
+                [
+                    ModelUIField(
+                        k="thinking_level",
+                        control="chip-row",
+                        label="Thinking level",
+                        hint="latency vs. care",
+                        group="advanced",
+                        order=10,
+                        options=sorted(_THINKING_LEVELS),
+                    ),
+                    ModelUIField(
+                        k="include_thoughts",
+                        control="toggle",
+                        label="Include thoughts",
+                        hint="surface intermediate reasoning",
+                        group="advanced",
+                        order=20,
+                    ),
+                    ModelUIField(
+                        k="image_search",
+                        control="toggle",
+                        label="Image search grounding",
+                        hint="use search images as context",
+                        group="advanced",
+                        order=30,
+                    ),
+                ]
+            )
+
+        fields.append(
+            ModelUIField(
+                k="google_search",
+                control="toggle",
+                label="Google search grounding",
+                hint="ground on web facts",
+                group="advanced",
+                order=40,
+            )
+        )
+
+        return fields
 
     def _model_features(self, model: str) -> dict[str, bool]:
         try:

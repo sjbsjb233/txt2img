@@ -43,6 +43,7 @@ from app.schemas.models import (
     ModelCapabilities,
     ModelDefaults,
     ModelDescriptor,
+    ModelUIField,
 )
 
 logger = logging.getLogger("txt2img.model_catalog")
@@ -56,6 +57,12 @@ logger = logging.getLogger("txt2img.model_catalog")
 # adapter exposes it. Anything not in this map still surfaces (with a
 # generic display name) so an experimental relay model isn't invisible.
 # ---------------------------------------------------------------------------
+# ``primary_adapter`` is the single source of truth for the model's
+# Create-page ``ui_schema`` (design v2 §3.2). The runtime allows multiple
+# adapters to claim the same ``model_id`` (legitimate but uncommon — e.g.
+# a private-protocol relay also speaking gpt-image-2), so without an
+# explicit pick the panel layout would be non-deterministic. Selection /
+# scheduling stay independent of this field.
 _MODEL_DISPLAY: dict[str, dict[str, str | None]] = {
     "gpt-image-2": {
         "display_name": "ChatGPT Images 2.0",
@@ -65,12 +72,14 @@ _MODEL_DISPLAY: dict[str, dict[str, str | None]] = {
             "Best for editorial, photoreal, brand. Strong text & "
             "composition control."
         ),
+        "primary_adapter": "openai_v1",
     },
     "gpt-image-2-2026-04-21": {
         "display_name": "ChatGPT Images 2.0 (snapshot)",
         "tag": "RECOMMENDED",
         "logo": "chatgpt",
         "blurb": "Pinned 2026-04-21 snapshot of gpt-image-2.",
+        "primary_adapter": "openai_v1",
     },
     "gemini-3-pro-image-preview": {
         "display_name": "Gemini 3 Pro (Nano Banana Pro)",
@@ -80,6 +89,7 @@ _MODEL_DISPLAY: dict[str, dict[str, str | None]] = {
             "High-fidelity gemini preview with built-in thinking. "
             "Up to 4K, 14 reference images."
         ),
+        "primary_adapter": "gemini_v1beta",
     },
     "gemini-3.1-flash-image-preview": {
         "display_name": "Gemini 3.1 Flash (Nano Banana 2)",
@@ -89,12 +99,14 @@ _MODEL_DISPLAY: dict[str, dict[str, str | None]] = {
             "Fast iteration with configurable thinking, image search, "
             "and extreme aspect ratios."
         ),
+        "primary_adapter": "gemini_v1beta",
     },
     "gemini-2.5-flash-image": {
         "display_name": "Gemini 2.5 Flash Image",
         "tag": "LEGACY",
         "logo": "flash",
         "blurb": "Legacy Gemini relay model.",
+        "primary_adapter": "gemini_v1beta",
     },
 }
 
@@ -317,6 +329,7 @@ def _build_descriptor(
 ) -> ModelDescriptor:
     display = _MODEL_DISPLAY.get(model_id, {})
     defaults = _MODEL_DEFAULTS.get(model_id, ModelDefaults())
+    ui_schema = _resolve_ui_schema(model_id)
 
     if not rows:
         # No provider has this model on for the user's tier. Could be
@@ -337,6 +350,7 @@ def _build_descriptor(
             available_reason=reason,
             capabilities=ModelCapabilities(),
             defaults=defaults,
+            ui_schema=ui_schema,
         )
 
     healthy_rows = [r for r in rows if r.circuit_state == "healthy"]
@@ -363,7 +377,102 @@ def _build_descriptor(
         available_reason=available_reason,
         capabilities=merged,
         defaults=defaults,
+        ui_schema=ui_schema,
     )
+
+
+# ---------------------------------------------------------------------------
+# UI schema resolution (design v2 §3.2 / §4.6)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_ui_schema(model_id: str) -> list[ModelUIField]:
+    """Look up the Create-page panel layout for ``model_id``.
+
+    Always goes through ``_MODEL_DISPLAY[model_id]['primary_adapter']``
+    so the panel source is deterministic even when multiple adapters
+    declare the same model. Failure modes (model absent from the
+    display table, primary adapter unregistered, primary adapter
+    refuses the model) all log a warning and degrade to ``[]`` — the
+    frontend shows a minimal panel rather than crashing.
+    """
+    display = _MODEL_DISPLAY.get(model_id, {})
+    primary_type = display.get("primary_adapter")
+    if not primary_type:
+        # Untracked model id (admin enabled an experimental relay that
+        # we don't have a display row for). Return empty so the panel
+        # doesn't disappear; defaults still ship.
+        return []
+
+    registry = get_registry()
+    if not registry.has(primary_type):
+        logger.warning(
+            "model %r declares primary_adapter %r but it is not registered; "
+            "ui_schema will be empty",
+            model_id,
+            primary_type,
+        )
+        return []
+
+    adapter = registry.get(primary_type)
+    try:
+        return list(adapter.ui_schema(model_id))
+    except ValueError:
+        logger.warning(
+            "primary_adapter %r refused to produce ui_schema for model %r; "
+            "check _MODEL_DISPLAY for stale primary_adapter mapping",
+            primary_type,
+            model_id,
+        )
+        return []
+    except Exception as exc:  # pragma: no cover — protective
+        logger.exception(
+            "ui_schema for model %r raised in adapter %r: %s",
+            model_id,
+            primary_type,
+            exc,
+        )
+        return []
+
+
+def validate_primary_adapters() -> None:
+    """Sanity-check ``_MODEL_DISPLAY.primary_adapter`` wiring at startup.
+
+    Logs warnings only — a deployment may legitimately disable an
+    adapter for ops reasons, and we don't want to block process start
+    over a Create-page panel issue. Operators read these warnings to
+    spot stale or typo'd ``primary_adapter`` values.
+    """
+    registry = get_registry()
+    for model_id, display in _MODEL_DISPLAY.items():
+        primary_type = display.get("primary_adapter")
+
+        if not primary_type:
+            logger.warning(
+                "model_catalog: %r in _MODEL_DISPLAY has no primary_adapter; "
+                "Create page will show empty parameter panel for this model",
+                model_id,
+            )
+            continue
+
+        if not registry.has(primary_type):
+            logger.warning(
+                "model_catalog: %r declares primary_adapter %r but adapter "
+                "is not registered (admin disabled? typo?)",
+                model_id,
+                primary_type,
+            )
+            continue
+
+        adapter = registry.get(primary_type)
+        if model_id not in adapter.supported_models():
+            logger.warning(
+                "model_catalog: %r declares primary_adapter %r but the "
+                "adapter does not list it in supported_models() — "
+                "primary_adapter may be stale",
+                model_id,
+                primary_type,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -497,6 +606,7 @@ __all__ = (
     "NO_PROVIDER_FOR_TIER",
     "effective_capabilities_for_user",
     "list_models_for_user",
+    "validate_primary_adapters",
 )
 
 

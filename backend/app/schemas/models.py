@@ -19,7 +19,7 @@ Two pieces of data flow through here:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -89,6 +89,57 @@ class ModelDefaults(BaseModel):
     image_search: bool | None = None
 
 
+class ModelUIField(BaseModel):
+    """Per-field render metadata for the Create-page parameter panel.
+
+    Drives *what* the frontend renders and *where*; works alongside
+    :class:`ModelCapabilities` which drives *which options are usable*
+    for the current user. The pair lets the panel render disabled
+    affordances (greyed chips, locked toggles) instead of dropping
+    fields entirely when a tier × provider combination cannot reach
+    them — design v2 §3.1 / §3.4.
+
+    Sourced from the model's *primary adapter* (declared in
+    ``model_catalog._MODEL_DISPLAY[..].primary_adapter``) and is invariant
+    across tiers and runtime provider topology — design v2 §3.2.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    k: str
+    """Field name; MUST be a declared field on :class:`ModelCapabilities`."""
+
+    control: Literal["chip-grid", "chip-row", "number", "toggle", "select"]
+    """Render kind. Drives both the React component picked and how the
+    frontend interprets ``options`` / ``presets`` / ``min`` / ``max``."""
+
+    label: str
+    """Primary user-facing label (e.g. "Shape")."""
+
+    hint: str | None = None
+    """Short caption rendered alongside the label (e.g. "aspect ratio")."""
+
+    group: Literal["primary", "advanced"] = "primary"
+    """Which section of the panel — primary shows by default; advanced
+    sits in the collapsible ``◢ Advanced`` block."""
+
+    order: int = 100
+    """Sort key within ``group``. Lower renders first."""
+
+    options: list[str] | None = None
+    """For list-controls: the adapter-side full set of candidate values.
+    The frontend greys options not present in the user's
+    ``capabilities[k]`` instead of removing them."""
+
+    min: int | None = None
+    max: int | None = None
+    """For ``number`` controls: hard floor / ceiling at the adapter level."""
+
+    presets: list[int] | None = None
+    """For ``number`` controls: which preset buttons to render
+    (e.g. ``[1, 2, 4, 8]`` for Output count)."""
+
+
 class ModelDescriptor(BaseModel):
     """One entry in the ``/api/models`` ``models`` list."""
 
@@ -103,6 +154,7 @@ class ModelDescriptor(BaseModel):
     available_reason: str | None = None
     capabilities: ModelCapabilities
     defaults: ModelDefaults
+    ui_schema: list[ModelUIField] = []
 
 
 class ModelSessionEntry(BaseModel):
@@ -130,6 +182,7 @@ __all__: tuple[str, ...] = (
     "ModelDefaults",
     "ModelDescriptor",
     "ModelSessionEntry",
+    "ModelUIField",
     "ModelsResponse",
 )
 

@@ -41,6 +41,7 @@ from urllib.parse import urlparse, urlunparse
 import httpx
 
 from app.adapters.base import BaseAdapter
+from app.schemas.models import ModelUIField
 from app.schemas.normalized import (
     NormalizedImage,
     NormalizedRequest,
@@ -142,6 +143,80 @@ class OpenAIV1Adapter(BaseAdapter):
                     "gpt-image-2 does not actually support transparent "
                     "background; reserved for future relays."
                 ),
+            ),
+        ]
+
+    def ui_schema(self, model_id: str) -> list[ModelUIField]:
+        """Create-page parameter layout for the gpt-image-2 family.
+
+        Both ``gpt-image-2`` and the pinned snapshot share the same
+        panel; if a future snapshot diverges, branch on ``model_id``.
+
+        ``supports_mask`` / ``supports_transparent_bg`` aren't surfaced
+        as panel fields — the Create page doesn't currently expose
+        reference-image + mask uploads. Add toggles here once that flow
+        ships.
+        """
+        if model_id not in _SUPPORTED_MODELS:
+            raise ValueError(f"unsupported model: {model_id!r}")
+
+        return [
+            ModelUIField(
+                k="n_max",
+                control="number",
+                label="Output count",
+                hint="per generation",
+                group="primary",
+                order=10,
+                min=1,
+                max=10,
+                presets=[1, 2, 4, 8],
+            ),
+            ModelUIField(
+                k="size",
+                control="chip-grid",
+                label="Size",
+                hint="output dimensions",
+                group="primary",
+                order=20,
+                options=sorted(_ALLOWED_SIZE_PRESETS),
+            ),
+            ModelUIField(
+                k="quality",
+                control="chip-row",
+                label="Quality",
+                hint="render fidelity",
+                group="advanced",
+                order=10,
+                # Semantic order, not alphabetical — low → auto reads
+                # like a quality dial.
+                options=["low", "medium", "high", "auto"],
+            ),
+            ModelUIField(
+                k="output_format",
+                control="chip-row",
+                label="Output format",
+                hint="encoded as",
+                group="advanced",
+                order=20,
+                options=sorted(_ALLOWED_OUTPUT_FORMAT),
+            ),
+            ModelUIField(
+                k="background",
+                control="chip-row",
+                label="Background",
+                group="advanced",
+                order=30,
+                options=sorted(_ALLOWED_BACKGROUND),
+            ),
+            ModelUIField(
+                k="moderation",
+                control="chip-row",
+                label="Moderation",
+                hint="content filter",
+                group="advanced",
+                order=40,
+                options=sorted(_ALLOWED_MODERATION),
             ),
         ]
 

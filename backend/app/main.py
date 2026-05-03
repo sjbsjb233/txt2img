@@ -62,6 +62,7 @@ from app.domain.job_scheduler import (
     restore_queued_jobs,
 )
 from app.domain.metrics_engine import get_metrics_engine, run_metrics_snapshot_loop
+from app.domain.model_catalog import validate_primary_adapters
 from app.domain.provider_ledger import get_provider_ledger
 from app.domain.provider_selector import get_provider_selector
 from app.domain.quota_guard import run_quota_reset_loop
@@ -109,6 +110,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # instantiates each non-abstract subclass. Re-running ``discover`` on
     # an already-populated registry is a no-op (duplicates are skipped).
     AdapterRegistry.instance().discover()
+    # Warn if any model in ``_MODEL_DISPLAY`` declares a primary_adapter
+    # that's missing or doesn't list the model — symptom is an empty
+    # Create-page parameter panel for that model.
+    validate_primary_adapters()
 
     metrics = get_metrics_engine()
     breaker = get_circuit_breaker()

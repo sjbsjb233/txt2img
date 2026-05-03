@@ -288,6 +288,93 @@ async def test_models_respects_tier_access(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# UI schema (Create-page renderer driver, design v2 §3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_models_includes_ui_schema_for_every_descriptor(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Every model row carries a ``ui_schema`` list (possibly empty)."""
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get("/api/models", headers=_auth(token))
+    assert resp.status_code == 200, resp.text
+    for descriptor in resp.json()["models"]:
+        assert isinstance(descriptor.get("ui_schema"), list)
+
+
+@pytest.mark.asyncio
+async def test_models_ui_schema_present_even_without_provider(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """A model with no provider configured still ships its ui_schema —
+    the panel should render fields, just with everything greyed."""
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get("/api/models", headers=_auth(token))
+    by_id = {m["model_id"]: m for m in resp.json()["models"]}
+
+    gpt = by_id["gpt-image-2"]
+    assert gpt["available"] is False
+    keys = {f["k"] for f in gpt["ui_schema"]}
+    assert {"n_max", "size", "quality"} <= keys
+
+
+@pytest.mark.asyncio
+async def test_models_ui_schema_independent_of_user_tier(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Two users on different tiers see the same ``ui_schema`` for a
+    model — only ``capabilities`` differs by tier."""
+    from app.db.engine import get_session
+    from app.db.models import User
+    from app.utils.security import hash_password
+
+    admin_token = await _login_admin(seeded_app)
+    payload = _openai_provider_payload()
+    payload["tier_access"] = ["vip", "premium", "standard"]
+    create = await seeded_app.post(
+        "/api/admin/providers", headers=_auth(admin_token), json=payload
+    )
+    assert create.status_code == 201
+
+    async with get_session() as session:
+        session.add(
+            User(
+                id="u_free_uischema",
+                username="free_uischema",
+                password_hash=hash_password("freepw1234"),
+                role="user",
+                tier="free",
+            )
+        )
+
+    free_login = await seeded_app.post(
+        "/api/auth/login",
+        json={"username": "free_uischema", "password": "freepw1234"},
+    )
+    free_token = free_login.json()["access_token"]
+
+    admin_resp = await seeded_app.get(
+        "/api/models", headers=_auth(admin_token)
+    )
+    free_resp = await seeded_app.get(
+        "/api/models", headers=_auth(free_token)
+    )
+    admin_gpt = next(
+        m for m in admin_resp.json()["models"] if m["model_id"] == "gpt-image-2"
+    )
+    free_gpt = next(
+        m for m in free_resp.json()["models"] if m["model_id"] == "gpt-image-2"
+    )
+    # Admin (premium tier) reaches the configured provider; free user
+    # does not. Capabilities differ; ui_schema does not.
+    assert admin_gpt["available"] is True
+    assert free_gpt["available"] is False
+    assert admin_gpt["ui_schema"] == free_gpt["ui_schema"]
+
+
 @pytest.mark.asyncio
 async def test_models_includes_sessions_for_picker(
     seeded_app: httpx.AsyncClient,
