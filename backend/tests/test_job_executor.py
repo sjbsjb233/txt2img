@@ -67,6 +67,11 @@ class RouteByProviderAdapter(BaseAdapter):
     def capability_schema(self) -> list[CapabilityField]:
         return []
 
+    def ui_schema(self, model_id: str):  # type: ignore[no-untyped-def]
+        if model_id not in self.supported_models():
+            raise ValueError(f"unsupported model: {model_id!r}")
+        return []
+
 
 async def _bootstrap() -> None:
     from app.db import seed

@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from app.adapters.base import AdapterRegistry, BaseAdapter
+from app.schemas.models import ModelUIField
 from app.schemas.normalized import (
     NormalizedRequest,
     NormalizedResponse,
@@ -42,6 +43,11 @@ class _Toy(BaseAdapter):
         return ["toy-model"]
 
     def capability_schema(self) -> list[CapabilityField]:
+        return []
+
+    def ui_schema(self, model_id: str) -> list[ModelUIField]:
+        if model_id not in self.supported_models():
+            raise ValueError(f"unsupported model: {model_id!r}")
         return []
 
 

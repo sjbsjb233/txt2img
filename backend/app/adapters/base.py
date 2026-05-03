@@ -29,6 +29,7 @@ from typing import ClassVar, Iterable
 
 import httpx
 
+from app.schemas.models import ModelUIField
 from app.schemas.normalized import (
     NormalizedRequest,
     NormalizedResponse,
@@ -120,6 +121,38 @@ class BaseAdapter(ABC):
         Gemini 3 Pro vs 3.1 Flash) should surface the union here with
         ``help`` strings noting per-model limitations; the adapter's own
         ``_validate`` stays authoritative for actual rejections.
+        """
+
+    @abstractmethod
+    def ui_schema(self, model_id: str) -> list[ModelUIField]:
+        """Declare the Create-page parameter panel layout for ``model_id``.
+
+        Returned field order, ``group``, and ``control`` decide how the
+        Create page renders the right-hand panel; ``options`` is the
+        adapter-side full set of candidate values, *not* what the user
+        can currently reach. Reachability is computed in
+        ``model_catalog._merge_capabilities`` and consumed by the
+        frontend to grey out individual options instead of dropping the
+        field — design v2 §3.
+
+        Contract:
+
+        - Each entry's ``k`` MUST match a field on
+          :class:`app.schemas.models.ModelCapabilities`. Mismatched keys
+          would yield a permanently-disabled control because the cap
+          lookup would always be ``None``.
+        - The result MUST NOT depend on user / tier / provider state. The
+          schema is a property of the adapter + model only.
+        - Multiple calls with the same ``model_id`` MUST return equal
+          values (idempotent, no side effects).
+        - For ``model_id`` outside ``supported_models()`` the
+          implementation MUST raise ``ValueError``.
+
+        Only the model's *primary adapter* (declared in
+        ``model_catalog._MODEL_DISPLAY[..].primary_adapter``) is queried
+        at runtime. Non-primary adapters still implement the method —
+        admin previews and adapter self-tests use it — but their output
+        does not flow into ``GET /api/models``.
         """
 
     # ------------------------------------------------------------------
