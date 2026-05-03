@@ -120,6 +120,40 @@ describe("reconcileParams", () => {
     const out = reconcileParams({ prompt: "x" }, {}, null);
     expect(out).toEqual({ prompt: "x" });
   });
+
+  it("REGRESSION — drops list value when capability is missing entirely", () => {
+    /** Live bug: gpt-image-2 defaults seed background="auto"; if the
+     * user's merged capabilities don't include `background` at all
+     * (the field renders as disabled with "Not available on your
+     * current tier."), the value must NOT survive into the payload
+     * — backend rejects with INVALID_PARAMETER. */
+    const out = reconcileParams(
+      { background: "auto" },
+      { /* no background key */ },
+      [{ k: "background", control: "chip-row", options: ["auto", "opaque"] }]
+    );
+    expect(out.background).toBeUndefined();
+  });
+
+  it("REGRESSION — drops list value when capability is empty array", () => {
+    /** Empty list = provider explicitly opted out. Same disabled UI,
+     * same need to scrub the default. */
+    const out = reconcileParams(
+      { background: "auto" },
+      { background: [] },
+      [{ k: "background", control: "chip-row", options: ["auto", "opaque"] }]
+    );
+    expect(out.background).toBeUndefined();
+  });
+
+  it("REGRESSION — drops list value when capability is null", () => {
+    const out = reconcileParams(
+      { background: "auto" },
+      { background: null },
+      [{ k: "background", control: "chip-row", options: ["auto", "opaque"] }]
+    );
+    expect(out.background).toBeUndefined();
+  });
 });
 
 describe("applyDefaults", () => {

@@ -50,8 +50,18 @@ export function reconcileParams(params, capabilities, uiSchema) {
       field.control === "chip-row" ||
       field.control === "select"
     ) {
-      if (cur != null && Array.isArray(cap) && !cap.includes(cur)) {
-        delete next[pk];
+      // Three drop conditions for list fields:
+      //   1. cap is an array AND current value isn't in it
+      //   2. cap is an empty array (provider opted-out)
+      //   3. cap is missing entirely (no provider exposes the field)
+      // Cases 2 and 3 also render the field as disabled — without
+      // dropping the value the request body would still ship a default
+      // the merged caps don't permit, and the backend would reject
+      // with INVALID_PARAMETER.
+      if (cur != null) {
+        if (!Array.isArray(cap) || cap.length === 0 || !cap.includes(cur)) {
+          delete next[pk];
+        }
       }
     } else if (field.control === "number") {
       if (typeof cur === "number" && typeof cap === "number" && cur > cap) {
