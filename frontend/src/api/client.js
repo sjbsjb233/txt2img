@@ -197,6 +197,37 @@ export function setSessionUser(user) {
   else sessionStorage.removeItem(USER_KEY);
 }
 
+/**
+ * Merge `patch` into the currently active cached user object, preserving
+ * the storage layer (per-tab sessionStorage for impersonation tabs,
+ * otherwise localStorage). Returns the merged user, or null if there
+ * isn't one cached yet.
+ */
+export function updateCurrentUser(patch) {
+  if (!patch || typeof patch !== "object") return null;
+  const sessionRaw = sessionStorage.getItem(USER_KEY);
+  if (sessionRaw) {
+    try {
+      const merged = { ...JSON.parse(sessionRaw), ...patch };
+      sessionStorage.setItem(USER_KEY, JSON.stringify(merged));
+      return merged;
+    } catch {
+      /* fall through */
+    }
+  }
+  const localRaw = localStorage.getItem(USER_KEY);
+  if (localRaw) {
+    try {
+      const merged = { ...JSON.parse(localRaw), ...patch };
+      localStorage.setItem(USER_KEY, JSON.stringify(merged));
+      return merged;
+    } catch {
+      /* fall through */
+    }
+  }
+  return null;
+}
+
 export function clearAuth() {
   clearToken();
   setCurrentUser(null);

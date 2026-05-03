@@ -7,6 +7,7 @@
 
 import { useEffect, useState } from "react";
 import * as meApi from "../../api/me.js";
+import { updateUser as updateAuthUser } from "../../store/auth.js";
 import { Chip, Icon, SectionCard, SectionHead, SettingRow } from "./components.jsx";
 
 function formatAbsolute(iso) {
@@ -64,6 +65,13 @@ export default function SectionProfile({ me, onMeChanged }) {
         payload.email = email.trim();
       }
       const updated = await meApi.patchMe(payload);
+      // Push the new display_name / email into the auth store so the
+      // sidebar avatar / name and the dashboard greeting update without
+      // requiring a page refresh.
+      updateAuthUser({
+        display_name: updated.display_name,
+        email: updated.email,
+      });
       onMeChanged && onMeChanged(updated);
     } catch (err) {
       setError(err);
