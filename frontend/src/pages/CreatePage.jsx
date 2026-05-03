@@ -181,7 +181,15 @@ function reconcileParams(params, capabilities, uiSchema) {
       field.control === "chip-row" ||
       field.control === "select"
     ) {
-      if (cur != null && Array.isArray(cap) && !cap.includes(cur)) {
+      // Drop the value when the merged caps don't expose this field at
+      // all (cap null/undefined/non-array) OR when the current value
+      // isn't in the allowed list. The first arm matters because model
+      // defaults (e.g. background="auto" for gpt-image-2) get applied
+      // unconditionally — if no provider opts the field in, the UI
+      // renders it disabled and the user can't clear the value
+      // themselves, but the default still ends up on the wire and
+      // trips the backend's INVALID_PARAMETER guard.
+      if (cur != null && (!Array.isArray(cap) || !cap.includes(cur))) {
         delete next[pk];
       }
     } else if (field.control === "number") {
