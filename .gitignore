@@ -14,8 +14,3 @@ __pycache__/
 .playwright-browsers/
 playwright-report/
 test-results/
-
-# Playwright artefacts
-frontend/playwright-shots/
-frontend/playwright-report/
-frontend/test-results/

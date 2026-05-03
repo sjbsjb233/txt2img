@@ -230,7 +230,7 @@ function useFieldRenderPlan(uiSchema, capabilities) {
       ) {
         if (!Array.isArray(cap) || cap.length === 0) {
           fieldDisabled = true;
-          disabledReason = "您当前 tier 下无中转站支持此参数";
+          disabledReason = "Not available on your current tier.";
           allowedOptions = new Set();
         } else {
           allowedOptions = new Set(cap);
@@ -243,7 +243,7 @@ function useFieldRenderPlan(uiSchema, capabilities) {
           // bound → still interactive but driven by the schema's max.
           if (max != null && max < lowerBound) {
             fieldDisabled = true;
-            disabledReason = "当前路径下不可调";
+            disabledReason = "Not adjustable for this model.";
           } else if (max != null && max === lowerBound && (field.presets?.length ?? 0) <= 1) {
             // Locked to a single value (e.g. Gemini n=1) — still
             // render so the layout is stable, but no presets to pick.
@@ -255,8 +255,8 @@ function useFieldRenderPlan(uiSchema, capabilities) {
           fieldDisabled = true;
           disabledReason =
             cap === false
-              ? "中转站未启用此特性"
-              : "您当前 tier 下无中转站支持此参数";
+              ? "Provider has not enabled this feature."
+              : "Not available on your current tier.";
         }
       }
 
@@ -1383,7 +1383,7 @@ function ChipGroup({
                   ? disabledReason || undefined
                   : allowed
                   ? undefined
-                  : "您当前 tier 下无中转站支持此选项"
+                  : "Not available on your current tier."
               }
               style={{
                 padding: "10px 6px",
