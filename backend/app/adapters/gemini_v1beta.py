@@ -193,6 +193,7 @@ class GeminiV1BetaAdapter(BaseAdapter):
                 # Gemini hard-codes n=1, but the panel still renders the
                 # ticker so the slot doesn't shift when switching models.
                 k="n_max",
+                value_key="n",
                 control="number",
                 label="Output count",
                 hint="per generation",
