@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import Icon from "../components/Icon.jsx";
 import TopBar from "../components/TopBar.jsx";
@@ -9,6 +9,22 @@ import { createSession } from "../api/sessions.js";
 import * as sseStore from "../store/sse.js";
 import * as archiveStore from "../store/archive.js";
 import { usePreferences } from "../store/preferences.js";
+
+// ---------------------------------------------------------------------------
+// PR-2 skeleton: schema-driven params renderer.
+//
+// Off by default. Append `?schemaDrivenParams=1` to the URL to flip into the
+// new code path for visual QA without touching production behaviour. PR-3
+// flips the default and deletes the legacy JSX.
+// ---------------------------------------------------------------------------
+const USE_SCHEMA_DRIVEN_PARAMS = (() => {
+  if (typeof window === "undefined") return false;
+  try {
+    return new URLSearchParams(window.location.search).get("schemaDrivenParams") === "1";
+  } catch {
+    return false;
+  }
+})();
 
 // ---------------------------------------------------------------------------
 // Visual atoms
@@ -183,6 +199,108 @@ function applyDefaults(defaults, params, caps) {
     if (v !== null && v !== undefined) setIfMissing(k, v);
   });
   return reconcileParams(next, caps);
+}
+
+// ---------------------------------------------------------------------------
+// PR-2 skeleton helpers — schema-driven counterparts to the legacy
+// hard-coded helpers above. These are invoked only by the new render
+// path (gated on USE_SCHEMA_DRIVEN_PARAMS); the legacy path is untouched
+// so production behaviour is unchanged.
+// ---------------------------------------------------------------------------
+
+// Walk every field declared by the model's ui_schema and drop / clamp
+// values that fall outside the merged capabilities. Mirrors §5.2 step 4
+// of the design doc — same behaviour as legacy `reconcileParams` for
+// the current field set, but driven by the schema so future fields
+// don't need to be added to a hard-coded list.
+function reconcileParamsFromSchema(params, capabilities, uiSchema) {
+  const next = { ...params };
+  for (const field of uiSchema || []) {
+    const cap = capabilities?.[field.k];
+    const cur = next[field.k];
+
+    if (
+      field.control === "chip-grid" ||
+      field.control === "chip-row" ||
+      field.control === "select"
+    ) {
+      if (cur != null && Array.isArray(cap) && !cap.includes(cur)) {
+        next[field.k] = undefined;
+      }
+    } else if (field.control === "number") {
+      if (typeof cur === "number" && typeof cap === "number" && cur > cap) {
+        next[field.k] = cap;
+      }
+    } else if (field.control === "toggle") {
+      if (cur === true && cap !== true) {
+        next[field.k] = false;
+      }
+    }
+  }
+  return next;
+}
+
+// Build a render plan from (uiSchema, capabilities). For each field,
+// decide whether it's interactive at all and which individual options
+// are reachable under the user's current tier × provider mix. The
+// renderer uses this directly — it never re-derives from capabilities.
+function useFieldRenderPlan(uiSchema, capabilities) {
+  return useMemo(() => {
+    const plan = (uiSchema || []).map((field) => {
+      const cap = capabilities?.[field.k];
+      let allowedOptions = null;
+      let fieldDisabled = false;
+      let disabledReason = null;
+
+      if (
+        field.control === "chip-grid" ||
+        field.control === "chip-row" ||
+        field.control === "select"
+      ) {
+        if (!Array.isArray(cap) || cap.length === 0) {
+          fieldDisabled = true;
+          disabledReason = "您当前 tier 下无中转站支持此参数";
+          allowedOptions = new Set();
+        } else {
+          allowedOptions = new Set(cap);
+        }
+      } else if (field.control === "number") {
+        const max = typeof cap === "number" ? cap : null;
+        const lowerBound = field.min ?? 1;
+        if (max == null || max <= lowerBound) {
+          // max == null means the merged caps don't expose an upper
+          // bound → still interactive but driven by the schema's max.
+          if (max != null && max < lowerBound) {
+            fieldDisabled = true;
+            disabledReason = "当前路径下不可调";
+          } else if (max != null && max === lowerBound && (field.presets?.length ?? 0) <= 1) {
+            // Locked to a single value (e.g. Gemini n=1) — still
+            // render so the layout is stable, but no presets to pick.
+            fieldDisabled = false;
+          }
+        }
+      } else if (field.control === "toggle") {
+        if (cap !== true) {
+          fieldDisabled = true;
+          disabledReason =
+            cap === false
+              ? "中转站未启用此特性"
+              : "您当前 tier 下无中转站支持此参数";
+        }
+      }
+
+      return { field, allowedOptions, fieldDisabled, disabledReason };
+    });
+
+    const byOrder = (a, b) => (a.field.order ?? 100) - (b.field.order ?? 100);
+    const primary = plan
+      .filter((p) => (p.field.group ?? "primary") === "primary")
+      .sort(byOrder);
+    const advanced = plan
+      .filter((p) => p.field.group === "advanced")
+      .sort(byOrder);
+    return { primary, advanced };
+  }, [uiSchema, capabilities]);
 }
 
 // ---------------------------------------------------------------------------
@@ -505,6 +623,15 @@ export default function CreatePage() {
   const errorMessage = submitError
     ? submitError.message || "Generation failed."
     : null;
+
+  // PR-2 skeleton: schema-driven render plan. Always computed (cheap
+  // memo), but only consumed when the feature flag is on. Once PR-3
+  // flips the default and deletes the legacy JSX this becomes the
+  // only consumer of params on the right rail.
+  const fieldPlan = useFieldRenderPlan(
+    selectedModel?.ui_schema || [],
+    selectedModel?.capabilities || {}
+  );
 
   // -----------------------------------------------------------------
   // Render
@@ -1132,6 +1259,15 @@ export default function CreatePage() {
               padding: "20px 22px",
             }}
           >
+            {USE_SCHEMA_DRIVEN_PARAMS ? (
+              <SchemaParamsPanel
+                plan={fieldPlan}
+                params={params}
+                setParam={setParam}
+                capabilities={selectedModel?.capabilities || {}}
+              />
+            ) : (
+              <>
             {/* Output count — always shown. Standard preset list mirrors
                 the original mockup; chips above ``n_max`` are rendered
                 disabled instead of hidden so the row width is stable
@@ -1454,6 +1590,8 @@ export default function CreatePage() {
                 </div>
               </details>
             ) : null}
+              </>
+            )}
           </div>
 
           <div
@@ -1533,6 +1671,13 @@ function ChipGroup({
   onChange,
   renderOption,
   smallTopMargin = false,
+  // PR-2 skeleton extensions — all default to "no opinion" so the
+  // existing legacy call sites keep their behaviour unchanged.
+  isOptionAllowed,
+  fieldDisabled = false,
+  disabledReason = null,
+  layout,
+  showHairline = true,
 }) {
   // Pick a column count by the longest label so chips fit the 360px right
   // panel without spilling. The thresholds below are calibrated against the
@@ -1547,17 +1692,25 @@ function ChipGroup({
     0
   );
   let cols;
-  if (renderOption) {
-    cols = Math.min(options.length, 4);
+  if (layout === "row") {
+    cols = Math.min(options.length || 1, 4);
+  } else if (renderOption) {
+    cols = Math.min(options.length || 1, layout === "grid" ? 3 : 4);
   } else if (longest >= 8) {
     cols = 2;
   } else if (longest >= 5) {
     cols = 3;
   } else {
-    cols = Math.min(options.length, 4);
+    cols = Math.min(options.length || 1, 4);
   }
   return (
-    <div style={{ marginTop: smallTopMargin ? 4 : 0 }}>
+    <div
+      style={{
+        marginTop: smallTopMargin ? 4 : 0,
+        opacity: fieldDisabled ? 0.55 : 1,
+      }}
+      title={fieldDisabled ? disabledReason || undefined : undefined}
+    >
       <div
         style={{
           display: "flex",
@@ -1566,7 +1719,13 @@ function ChipGroup({
           marginBottom: 10,
         }}
       >
-        <div className="mono caps" style={{ fontSize: 10, color: "var(--ink-3)" }}>
+        <div
+          className="mono caps"
+          style={{
+            fontSize: 10,
+            color: fieldDisabled ? "var(--ink-4)" : "var(--ink-3)",
+          }}
+        >
           {label}
         </div>
         {hint ? (
@@ -1584,19 +1743,39 @@ function ChipGroup({
       >
         {options.map((opt) => {
           const on = value === opt;
+          const allowed =
+            !fieldDisabled &&
+            (typeof isOptionAllowed === "function" ? isOptionAllowed(opt) : true);
           return (
             <button
               key={opt}
-              onClick={() => onChange(opt)}
+              onClick={() => allowed && onChange(opt)}
+              disabled={!allowed}
+              title={
+                fieldDisabled
+                  ? disabledReason || undefined
+                  : allowed
+                  ? undefined
+                  : "您当前 tier 下无中转站支持此选项"
+              }
               style={{
                 padding: "10px 6px",
-                background: on ? "var(--ink)" : "#fffdf7",
+                background: on
+                  ? "var(--ink)"
+                  : allowed
+                  ? "#fffdf7"
+                  : "var(--paper-3)",
                 border: "1px solid var(--ink)",
-                color: on ? "var(--banana)" : "var(--ink)",
-                cursor: "pointer",
+                color: on
+                  ? "var(--banana)"
+                  : allowed
+                  ? "var(--ink)"
+                  : "var(--ink-4)",
+                cursor: allowed ? "pointer" : "not-allowed",
                 textAlign: "center",
                 minWidth: 0,
                 overflow: "hidden",
+                opacity: allowed ? 1 : 0.5,
               }}
             >
               {renderOption ? (
@@ -1621,38 +1800,381 @@ function ChipGroup({
           );
         })}
       </div>
-      <div className="hair" style={{ margin: "18px 0" }} />
+      {fieldDisabled && disabledReason ? (
+        <div
+          className="mono"
+          style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 6 }}
+        >
+          {disabledReason}
+        </div>
+      ) : null}
+      {showHairline ? <div className="hair" style={{ margin: "18px 0" }} /> : null}
     </div>
   );
 }
 
-function Toggle({ label, hint, value, onChange }) {
+function Toggle({
+  label,
+  hint,
+  value,
+  onChange,
+  fieldDisabled = false,
+  disabledReason = null,
+}) {
   return (
     <label
+      title={fieldDisabled ? disabledReason || undefined : undefined}
       style={{
         display: "flex",
         alignItems: "center",
         gap: 10,
-        background: "#fffdf7",
+        background: fieldDisabled ? "var(--paper-3)" : "#fffdf7",
         border: "1px solid var(--ink)",
         padding: "8px 10px",
-        cursor: "pointer",
+        cursor: fieldDisabled ? "not-allowed" : "pointer",
+        opacity: fieldDisabled ? 0.55 : 1,
       }}
     >
       <input
         type="checkbox"
         checked={value}
+        disabled={fieldDisabled}
         onChange={(e) => onChange(e.target.checked)}
       />
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 12, fontWeight: 600 }}>{label}</div>
+        <div
+          style={{
+            fontSize: 12,
+            fontWeight: 600,
+            color: fieldDisabled ? "var(--ink-4)" : undefined,
+          }}
+        >
+          {label}
+        </div>
         {hint ? (
           <div className="mono" style={{ fontSize: 9, color: "var(--ink-3)" }}>
             {hint}
           </div>
         ) : null}
+        {fieldDisabled && disabledReason ? (
+          <div
+            className="mono"
+            style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 2 }}
+          >
+            {disabledReason}
+          </div>
+        ) : null}
       </div>
     </label>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// PR-2 skeleton: NumberPresets / FieldRenderer / SchemaParamsPanel.
+//
+// These are the schema-driven counterparts to the legacy JSX in the right
+// rail. They are wired in only when USE_SCHEMA_DRIVEN_PARAMS is true; the
+// legacy path remains the default until PR-3.
+//
+// NumberPresets is intentionally "Output count specific" rather than a
+// generic number input: it carries the ticker (×N) visual the original
+// mockup used. The plan reserves it for the `n_max` field today; if a
+// future schema field also wants this control they get the same look.
+// ---------------------------------------------------------------------------
+
+function NumberPresets({
+  label,
+  hint,
+  presets,
+  max,
+  value,
+  onChange,
+  fieldDisabled = false,
+  disabledReason = null,
+}) {
+  const display = typeof value === "number" ? value : 1;
+  const presetList = presets && presets.length ? presets : [1, 2, 4, 8];
+  return (
+    <div
+      title={fieldDisabled ? disabledReason || undefined : undefined}
+      style={{ opacity: fieldDisabled ? 0.55 : 1 }}
+    >
+      <div
+        className="mono caps"
+        style={{
+          fontSize: 10,
+          color: fieldDisabled ? "var(--ink-4)" : "var(--ink-3)",
+          marginBottom: 8,
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          border: "1px solid var(--ink)",
+          padding: 12,
+          background: fieldDisabled ? "var(--paper-3)" : "#fffdf7",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "baseline",
+          }}
+        >
+          <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
+            {hint || ""}
+          </span>
+          <div
+            className="ticker"
+            style={{ fontSize: 24, fontWeight: 900, letterSpacing: "-0.03em" }}
+          >
+            ×{display}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 4, marginTop: 8 }}>
+          {presetList.map((n) => {
+            const allowed =
+              !fieldDisabled && (typeof max === "number" ? n <= max : true);
+            const on = display === n;
+            return (
+              <button
+                key={n}
+                onClick={() => allowed && onChange(n)}
+                disabled={!allowed}
+                title={
+                  fieldDisabled
+                    ? disabledReason || undefined
+                    : allowed
+                    ? undefined
+                    : `caps at ${max}`
+                }
+                style={{
+                  flex: 1,
+                  height: 30,
+                  background: on
+                    ? "var(--banana)"
+                    : allowed
+                    ? "transparent"
+                    : "var(--paper-3)",
+                  border: "1px solid var(--ink)",
+                  cursor: allowed ? "pointer" : "not-allowed",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  color: allowed ? "var(--ink)" : "var(--ink-4)",
+                  opacity: allowed ? 1 : 0.5,
+                }}
+              >
+                {n}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      {fieldDisabled && disabledReason ? (
+        <div
+          className="mono"
+          style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 4 }}
+        >
+          {disabledReason}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// Field-key-specific cell renderers we still want to keep when migrating
+// off the hard-coded JSX. Aspect ratio cells need a proportional preview
+// box and image-size cells need a ticker + descriptor — neither fits the
+// generic "ticker text" cell ChipGroup ships by default.
+const IMAGE_SIZE_NOTES_FOR_RENDERER = {
+  512: "preview",
+  "1K": "balanced",
+  "2K": "print",
+  "4K": "max",
+};
+
+function aspectRatioRenderOption(opt, on) {
+  const { w, h } = aspectBoxSize(opt);
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 6,
+        color: on ? "var(--banana)" : "var(--ink)",
+      }}
+    >
+      <div
+        style={{
+          width: w,
+          height: h,
+          background: on ? "var(--banana)" : "var(--paper-3)",
+          border: "1px solid currentColor",
+        }}
+      />
+      <div className="mono" style={{ fontSize: 10, fontWeight: 700 }}>
+        {opt}
+      </div>
+    </div>
+  );
+}
+
+function imageSizeRenderOption(opt, on) {
+  return (
+    <div>
+      <div
+        className="ticker"
+        style={{
+          fontSize: 20,
+          fontWeight: 900,
+          letterSpacing: "-0.03em",
+          lineHeight: 1,
+        }}
+      >
+        {opt}
+      </div>
+      <div
+        className="mono"
+        style={{ fontSize: 9, marginTop: 4, opacity: on ? 0.8 : 0.6 }}
+      >
+        {IMAGE_SIZE_NOTES_FOR_RENDERER[opt] || ""}
+      </div>
+    </div>
+  );
+}
+
+function FieldRenderer({ plan, value, onChange, capabilities }) {
+  const { field, allowedOptions, fieldDisabled, disabledReason } = plan;
+  const isAllowed = (opt) =>
+    allowedOptions ? allowedOptions.has(opt) : true;
+
+  if (
+    field.control === "chip-grid" ||
+    field.control === "chip-row" ||
+    field.control === "select"
+  ) {
+    let renderOption;
+    if (field.k === "aspect_ratio") renderOption = aspectRatioRenderOption;
+    else if (field.k === "image_size") renderOption = imageSizeRenderOption;
+
+    return (
+      <ChipGroup
+        label={field.label}
+        hint={field.hint || null}
+        options={field.options || []}
+        value={value ?? null}
+        onChange={onChange}
+        renderOption={renderOption}
+        layout={field.control === "chip-row" ? "row" : "grid"}
+        isOptionAllowed={isAllowed}
+        fieldDisabled={fieldDisabled}
+        disabledReason={disabledReason}
+        showHairline={false}
+      />
+    );
+  }
+
+  if (field.control === "number") {
+    const cap = capabilities?.[field.k];
+    const max = typeof cap === "number" ? cap : field.max ?? null;
+    return (
+      <NumberPresets
+        label={field.label}
+        hint={field.hint || null}
+        presets={field.presets || [1, 2, 4, 8]}
+        max={max}
+        value={typeof value === "number" ? value : 1}
+        onChange={onChange}
+        fieldDisabled={fieldDisabled}
+        disabledReason={disabledReason}
+      />
+    );
+  }
+
+  if (field.control === "toggle") {
+    return (
+      <Toggle
+        label={field.label}
+        hint={field.hint || null}
+        value={!!value}
+        onChange={onChange}
+        fieldDisabled={fieldDisabled}
+        disabledReason={disabledReason}
+      />
+    );
+  }
+
+  return null;
+}
+
+function SchemaParamsPanel({ plan, params, setParam, capabilities }) {
+  if (!plan.primary.length && !plan.advanced.length) {
+    return (
+      <div
+        className="mono"
+        style={{ fontSize: 11, color: "var(--ink-3)", padding: 12 }}
+      >
+        This model has no configurable parameters.
+      </div>
+    );
+  }
+  return (
+    <>
+      {plan.primary.map((p, idx) => (
+        <Fragment key={p.field.k}>
+          <FieldRenderer
+            plan={p}
+            value={params[p.field.k]}
+            onChange={(v) => setParam(p.field.k, v)}
+            capabilities={capabilities}
+          />
+          {idx < plan.primary.length - 1 ? (
+            <div className="hair" style={{ margin: "18px 0" }} />
+          ) : null}
+        </Fragment>
+      ))}
+      {plan.advanced.length > 0 ? (
+        <>
+          <div className="hair" style={{ margin: "18px 0" }} />
+          <details>
+            <summary
+              className="mono caps"
+              style={{
+                fontSize: 10,
+                color: "var(--ink-3)",
+                cursor: "pointer",
+                outline: "none",
+                userSelect: "none",
+              }}
+            >
+              ◢ Advanced
+            </summary>
+            <div
+              style={{
+                marginTop: 12,
+                display: "flex",
+                flexDirection: "column",
+                gap: 14,
+              }}
+            >
+              {plan.advanced.map((p) => (
+                <FieldRenderer
+                  key={p.field.k}
+                  plan={p}
+                  value={params[p.field.k]}
+                  onChange={(v) => setParam(p.field.k, v)}
+                  capabilities={capabilities}
+                />
+              ))}
+            </div>
+          </details>
+        </>
+      ) : null}
+    </>
   );
 }
 
