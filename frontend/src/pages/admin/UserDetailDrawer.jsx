@@ -46,6 +46,134 @@ function statusChip(status, todayCount, soft, hard) {
 }
 
 // ---------------------------------------------------------------------------
+// 30-day usage strip with hover tooltip
+// ---------------------------------------------------------------------------
+
+function DailyUsageStrip({ usagePoints, maxUsage }) {
+  const [hover, setHover] = useState(null); // { i, x, y, parentWidth }
+  const total = usagePoints.reduce((a, p) => a + (p.jobs_count || 0), 0);
+  const peak = usagePoints.length
+    ? usagePoints.reduce((m, p) => (p.jobs_count > m ? p.jobs_count : m), 0)
+    : 0;
+  const peakIdx = peak > 0 ? usagePoints.findIndex((p) => p.jobs_count === peak) : -1;
+
+  function handleEnter(i, e) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const parent = e.currentTarget.parentElement.parentElement.getBoundingClientRect();
+    setHover({
+      i,
+      x: rect.left - parent.left + rect.width / 2,
+      y: rect.top - parent.top,
+      parentWidth: parent.width,
+    });
+  }
+
+  return (
+    <div
+      style={{ position: "relative", marginTop: 10 }}
+      onMouseLeave={() => setHover(null)}
+    >
+      <div
+        data-testid="user-daily-strip"
+        style={{
+          height: 80,
+          display: "flex",
+          alignItems: "flex-end",
+          gap: 2,
+        }}
+      >
+        {usagePoints.map((p, i) => {
+          const h = Math.max(2, (p.jobs_count / maxUsage) * 100);
+          const success = p.jobs_count ? p.success_count / p.jobs_count : 1;
+          const tone =
+            p.jobs_count === 0
+              ? "var(--paper-3)"
+              : success >= 0.9
+                ? "var(--ink-2)"
+                : "var(--warn)";
+          const isHovered = hover?.i === i;
+          const ariaLabel =
+            `${p.date}, ${p.jobs_count} jobs, ` +
+            `${p.success_count} ok, ${Math.max(0, p.jobs_count - p.success_count)} fail`;
+          return (
+            <div
+              key={p.date}
+              data-testid={`user-daily-bar-${i}`}
+              tabIndex={0}
+              role="img"
+              aria-label={ariaLabel}
+              onMouseEnter={(e) => handleEnter(i, e)}
+              onFocus={(e) => handleEnter(i, e)}
+              onBlur={() => setHover(null)}
+              style={{
+                flex: 1,
+                height: `${h}%`,
+                background: isHovered ? "var(--banana-deep)" : tone,
+                cursor: "crosshair",
+                transition: "background 0.1s ease",
+                outline: "none",
+              }}
+            />
+          );
+        })}
+      </div>
+      {hover && (() => {
+        const p = usagePoints[hover.i];
+        const jobs = p.jobs_count || 0;
+        const ok = p.success_count || 0;
+        const fail = Math.max(0, jobs - ok);
+        const successPct = jobs ? (ok / jobs) * 100 : 0;
+        const sharePct = total > 0 ? (jobs / total) * 100 : 0;
+        const tipWidth = 230;
+        const maxLeft = Math.max(0, hover.parentWidth - tipWidth);
+        const left = Math.max(0, Math.min(hover.x - tipWidth / 2, maxLeft));
+        return (
+          <div
+            data-testid="user-daily-tooltip"
+            style={{
+              position: "absolute",
+              left,
+              top: Math.max(-92, hover.y - 100),
+              width: tipWidth,
+              padding: "8px 10px",
+              background: "var(--ink)",
+              color: "var(--paper)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              lineHeight: 1.4,
+              border: "1px solid var(--ink)",
+              boxShadow: "0 4px 0 0 var(--banana)",
+              pointerEvents: "none",
+              zIndex: 5,
+            }}
+          >
+            <div style={{ fontWeight: 700, letterSpacing: "0.04em" }}>
+              {p.date}
+            </div>
+            <div style={{ marginTop: 4 }}>
+              jobs · <span style={{ color: "var(--banana)", fontWeight: 700 }}>{jobs}</span>
+              <span style={{ opacity: 0.6 }}> / peak {peak}</span>
+            </div>
+            <div>
+              ok · {ok} · fail · {fail}
+            </div>
+            <div>
+              success · {jobs ? `${successPct.toFixed(1)}%` : "—"}
+            </div>
+            <div>
+              share · {sharePct.toFixed(1)}% of {total} · 30d
+            </div>
+            {hover.i === peakIdx && peak > 0 && (
+              <div style={{ color: "var(--banana)", marginTop: 2 }}>← peak day</div>
+            )}
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Drawer
 // ---------------------------------------------------------------------------
 
@@ -505,35 +633,10 @@ export default function UserDetailDrawer({ userId, onClose, onChanged, currentAd
             <div className="mono caps" style={{ fontSize: 10, color: "var(--ink-3)" }}>
               30 DAYS · JOBS PER DAY
             </div>
-            <div
-              style={{
-                marginTop: 10,
-                height: 80,
-                display: "flex",
-                alignItems: "flex-end",
-                gap: 2,
-              }}
-            >
-              {usagePoints.map((p) => {
-                const h = Math.max(2, (p.jobs_count / maxUsage) * 100);
-                const success = p.jobs_count
-                  ? p.success_count / p.jobs_count
-                  : 1;
-                const tone =
-                  p.jobs_count === 0
-                    ? "var(--paper-3)"
-                    : success >= 0.9
-                      ? "var(--ink-2)"
-                      : "var(--warn)";
-                return (
-                  <div
-                    key={p.date}
-                    title={`${p.date} · ${p.jobs_count} jobs · ${p.success_count} ok`}
-                    style={{ flex: 1, height: `${h}%`, background: tone }}
-                  />
-                );
-              })}
-            </div>
+            <DailyUsageStrip
+              usagePoints={usagePoints}
+              maxUsage={maxUsage}
+            />
             <div
               className="mono"
               style={{

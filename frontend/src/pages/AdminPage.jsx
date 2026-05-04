@@ -13,6 +13,8 @@ import ApprovalsTab from "./admin/ApprovalsTab.jsx";
 import AuditTab from "./admin/AuditTab.jsx";
 import * as adminConfig from "../api/admin/config.js";
 import * as adminApprovals from "../api/admin/approvals.js";
+import * as adminMetrics from "../api/admin/metrics.js";
+import * as adminAnnouncements from "../api/admin/announcements.js";
 
 // `count` was hardcoded in the mock; we drop it on backend-wired tabs
 // because the real numbers vary and the chip looked stale. The
@@ -27,7 +29,7 @@ const TABS = [
   { id: "adapters", label: "Adapters", Component: AdaptersTab },
   { id: "config", label: "Config", Component: ConfigTab },
   { id: "cleanup", label: "Cleanup", Component: CleanupTab },
-  { id: "announcements", label: "Announcements", count: 2, Component: AnnouncementsTab },
+  { id: "announcements", label: "Announcements", Component: AnnouncementsTab },
   { id: "audit", label: "Audit", Component: AuditTab },
 ];
 
@@ -86,7 +88,65 @@ export default function AdminPage({ initialTab = "overview" }) {
   const [tab, setTab] = useState(initialTab);
   const [activeEmergencies, setActiveEmergencies] = useState([]);
   const [pendingApprovals, setPendingApprovals] = useState(0);
+  const [schedulerView, setSchedulerView] = useState({
+    healthy: null,
+    workersInUse: null,
+    workersMax: null,
+    queued: null,
+  });
+  const [liveAnnouncements, setLiveAnnouncements] = useState(0);
   const Active = TABS.find((t) => t.id === tab)?.Component || OverviewTab;
+
+  // Poll the overview snapshot for the header scheduler card. Same
+  // 10s cadence as OverviewTab — duplicating the call is cheaper than
+  // threading shared state through every tab.
+  useEffect(() => {
+    let alive = true;
+    async function pull() {
+      try {
+        const data = await adminMetrics.getOverview();
+        if (!alive) return;
+        const queued = Object.values(data.queue_state || {}).reduce(
+          (acc, lane) => acc + (lane?.queued || 0),
+          0,
+        );
+        setSchedulerView({
+          healthy: true,
+          workersInUse: data.worker_pool?.in_use ?? 0,
+          workersMax: data.worker_pool?.max ?? 0,
+          queued,
+        });
+      } catch {
+        if (alive) setSchedulerView((v) => ({ ...v, healthy: false }));
+      }
+    }
+    pull();
+    const t = setInterval(pull, 10_000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+
+  // Live announcement count drives the tab badge — we only flag the
+  // tab when there are announcements *currently* visible to users.
+  useEffect(() => {
+    let alive = true;
+    async function pull() {
+      try {
+        const res = await adminAnnouncements.listAnnouncements();
+        if (!alive) return;
+        const count = (res?.items || []).filter((a) => a.is_live).length;
+        setLiveAnnouncements(count);
+      } catch {
+        /* leave stale; not load-bearing */
+      }
+    }
+    pull();
+    return () => {
+      alive = false;
+    };
+  }, [tab]);
 
   // Pull the deletion-request pending count once per tab change so
   // the Approvals tab badge reflects the queue length without
@@ -219,13 +279,21 @@ export default function AdminPage({ initialTab = "overview" }) {
                   marginTop: 4,
                 }}
               >
-                <StatusDot tone="ok" label="HEALTHY" />
+                {schedulerView.healthy === null ? (
+                  <StatusDot tone="muted" label="…" />
+                ) : schedulerView.healthy ? (
+                  <StatusDot tone="ok" label="HEALTHY" />
+                ) : (
+                  <StatusDot tone="bad" label="UNREACHABLE" />
+                )}
               </div>
               <div
                 className="mono"
                 style={{ fontSize: 11, color: "var(--ink-3)", marginTop: 4 }}
               >
-                17/32 workers · 49 queued
+                {schedulerView.workersMax == null
+                  ? "—"
+                  : `${schedulerView.workersInUse}/${schedulerView.workersMax} workers · ${schedulerView.queued} queued`}
               </div>
             </div>
             <button
@@ -274,9 +342,11 @@ export default function AdminPage({ initialTab = "overview" }) {
 
         <div style={{ display: "flex", gap: 4, marginTop: 22, overflowX: "auto" }}>
           {TABS.map((t) => {
-            // Approvals tab gets a live count of pending requests.
-            const dynamicCount =
-              t.id === "approvals" ? pendingApprovals || null : t.count;
+            // Approvals + Announcements tabs get a live count badge.
+            // Other tabs fall back to whatever static `count` was set.
+            let dynamicCount = t.count;
+            if (t.id === "approvals") dynamicCount = pendingApprovals || null;
+            if (t.id === "announcements") dynamicCount = liveAnnouncements || null;
             return (
               <AdminTab
                 key={t.id}
