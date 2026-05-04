@@ -60,15 +60,26 @@ export default function FilterPopover({
   // Wrap onClose / onApply so the exit animation plays first. The
   // parent unmounts us via `filterOpen → false`, so we can simply delay
   // the parent callback by EXIT_MS while showing the closing keyframe.
+  //
+  // The `closing` state isn't enough as a guard — React batches updates
+  // so a rapid double-click could still see `closing === false` on the
+  // second call. Use the timer ref as the synchronous lock and bail
+  // (or reset) before scheduling another callback.
   function deferClose() {
-    if (closing) return;
+    if (exitTimer.current) return;
     setClosing(true);
-    exitTimer.current = setTimeout(() => onClose(), EXIT_MS);
+    exitTimer.current = setTimeout(() => {
+      exitTimer.current = null;
+      onClose();
+    }, EXIT_MS);
   }
   function deferApply(next) {
-    if (closing) return;
+    if (exitTimer.current) return;
     setClosing(true);
-    exitTimer.current = setTimeout(() => onApply(next), EXIT_MS);
+    exitTimer.current = setTimeout(() => {
+      exitTimer.current = null;
+      onApply(next);
+    }, EXIT_MS);
   }
 
   // Click-outside + Esc + Enter handlers.
@@ -134,7 +145,7 @@ export default function FilterPopover({
       data-testid="archive-filter-popover"
       role="dialog"
       aria-label="filter properties"
-      className={closing ? "archive-pop-close" : "archive-pop-open"}
+      className={closing ? "arch-pop-close" : "arch-pop-open"}
       style={{
         position: "absolute",
         top: "calc(100% + 8px)",
@@ -205,7 +216,7 @@ export default function FilterPopover({
 
         <div
           key={activeProp}
-          className="archive-prop-panel"
+          className="arch-prop-panel"
           style={{
             flex: 1,
             minWidth: 0,

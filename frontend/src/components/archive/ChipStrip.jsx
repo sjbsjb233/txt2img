@@ -70,6 +70,7 @@ export function FilterTrigger({ count, onClick }) {
       + filter
       {count > 0 && (
         <span
+          className="arch-chip-badge-pop"
           aria-label={`${count} filters applied`}
           style={{
             position: "absolute",
@@ -88,8 +89,6 @@ export function FilterTrigger({ count, onClick }) {
             alignItems: "center",
             justifyContent: "center",
             fontFamily: "var(--font-mono)",
-            // Pop animation when count goes 0 → 1
-            animation: "chipBadgePop 220ms cubic-bezier(.22,.85,.22,1)",
           }}
         >
           {count}
@@ -104,6 +103,7 @@ function Chip({ propId, value, label, onRemove }) {
   return (
     <div
       data-testid={`chip-${propId}-${v}`}
+      className="arch-chip-in"
       style={{
         flexShrink: 0,
         display: "inline-flex",
@@ -118,8 +118,6 @@ function Chip({ propId, value, label, onRemove }) {
         whiteSpace: "nowrap",
         height: 28,
         overflow: "hidden",
-        animation: "chipIn 240ms cubic-bezier(.22,.85,.22,1)",
-        transformOrigin: "left center",
       }}
     >
       <span style={{ display: "inline-flex", alignItems: "center", padding: "0 10px" }}>

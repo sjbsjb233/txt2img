@@ -10,6 +10,7 @@ export default function ArchiveNoMatches({ onClear }) {
   return (
     <div
       data-testid="archive-no-matches"
+      className="arch-no-matches-in"
       style={{
         marginTop: 28,
         position: "relative",
@@ -17,7 +18,6 @@ export default function ArchiveNoMatches({ onClear }) {
         background: "#fffdf7",
         minHeight: 360,
         overflow: "hidden",
-        animation: "noMatchesIn 320ms cubic-bezier(.22,.85,.22,1)",
       }}
     >
       {/* Dense hatch background — the same texture used for empty surfaces
@@ -126,6 +126,7 @@ export default function ArchiveNoMatches({ onClear }) {
 
         <button
           type="button"
+          className="arch-press"
           onClick={onClear}
           style={{
             padding: "9px 18px",
@@ -137,19 +138,6 @@ export default function ArchiveNoMatches({ onClear }) {
             fontSize: 12,
             fontWeight: 700,
             boxShadow: "3px 3px 0 var(--ink)",
-            transition: "transform 80ms ease, box-shadow 80ms ease",
-          }}
-          onMouseDown={(e) => {
-            e.currentTarget.style.transform = "translate(2px, 2px)";
-            e.currentTarget.style.boxShadow = "1px 1px 0 var(--ink)";
-          }}
-          onMouseUp={(e) => {
-            e.currentTarget.style.transform = "";
-            e.currentTarget.style.boxShadow = "3px 3px 0 var(--ink)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.transform = "";
-            e.currentTarget.style.boxShadow = "3px 3px 0 var(--ink)";
           }}
         >
           Clear all filters

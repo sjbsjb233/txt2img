@@ -28,20 +28,32 @@ export default function SortDropdown({
     };
   }, []);
 
+  // The `closing` state isn't enough as a guard — React batches updates
+  // so a rapid double-click could still see `closing === false` on the
+  // second call. Use the timer ref as the synchronous lock.
   function deferClose() {
-    if (closing) return;
+    if (exitTimer.current) return;
     setClosing(true);
-    exitTimer.current = setTimeout(() => onClose(), EXIT_MS);
+    exitTimer.current = setTimeout(() => {
+      exitTimer.current = null;
+      onClose();
+    }, EXIT_MS);
   }
   function deferPick(k) {
-    if (closing) return;
+    if (exitTimer.current) return;
     setClosing(true);
-    exitTimer.current = setTimeout(() => onPick(k), EXIT_MS);
+    exitTimer.current = setTimeout(() => {
+      exitTimer.current = null;
+      onPick(k);
+    }, EXIT_MS);
   }
   function deferRefresh() {
-    if (closing) return;
+    if (exitTimer.current) return;
     setClosing(true);
-    exitTimer.current = setTimeout(() => onRefresh(), EXIT_MS);
+    exitTimer.current = setTimeout(() => {
+      exitTimer.current = null;
+      onRefresh();
+    }, EXIT_MS);
   }
 
   useEffect(() => {
@@ -67,7 +79,7 @@ export default function SortDropdown({
       ref={ref}
       role="menu"
       aria-label="sort options"
-      className={closing ? "archive-pop-close" : "archive-pop-open"}
+      className={closing ? "arch-pop-close" : "arch-pop-open"}
       style={{
         position: "absolute",
         top: "calc(100% + 6px)",
