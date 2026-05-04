@@ -1045,8 +1045,17 @@ export default function ArchivePage() {
                 const focusClass = focused ? "arch-focused" : "";
 
                 if (row.status === "RUNNING") {
-                  const elapsed = row._runStartedAt
-                    ? Math.max(0, Math.floor((Date.now() - row._runStartedAt) / 1000))
+                  // Prefer the SSE-derived anchor; fall back to the
+                  // server's ``timing.started_at`` so the timer survives
+                  // a refresh (the SSE anchor is stripped before
+                  // persistence — see ``_stripVolatile``).
+                  const anchor =
+                    row._runStartedAt ||
+                    (row.timing?.started_at &&
+                      Date.parse(row.timing.started_at)) ||
+                    0;
+                  const elapsed = anchor
+                    ? Math.max(0, Math.floor((Date.now() - anchor) / 1000))
                     : 0;
                   return (
                     <RunningCard

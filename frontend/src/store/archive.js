@@ -534,6 +534,9 @@ function _stripVolatile(row) {
   // only while the page is alive. Persisting them would leave a stale
   // ``_runStartedAt`` sitting in IndexedDB that survives a tab close
   // and would lead to "running for 5 hours" timers on the next open.
+  //
+  // The running card recovers across refreshes by falling back to
+  // ``timing.started_at`` (which IS persisted) — see ArchivePage.
   // eslint-disable-next-line no-unused-vars
   const { _position, _eta, _runStartedAt, ...persistable } = row;
   return persistable;
