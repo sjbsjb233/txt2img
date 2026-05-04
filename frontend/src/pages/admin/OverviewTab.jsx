@@ -51,12 +51,39 @@ const RANGE_LABELS = [
 // Tiny inline bar chart (no external deps; mirrors mock styling)
 // ---------------------------------------------------------------------
 
-function MiniBarChart({ points }) {
-  const max = Math.max(1, ...points.map((p) => p.value || 0));
+// Bucket sizes mirror the FE `getTimeseries` defaults — kept here so
+// the tooltip can render the bucket window without an extra API call.
+const BUCKET_MS = {
+  "1m": 60_000,
+  "5m": 5 * 60_000,
+  "1h": 60 * 60_000,
+  "1d": 24 * 60 * 60_000,
+};
+
+function formatBucketTs(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  );
+}
+
+function MiniBarChart({ points, bucket = "5m" }) {
+  const values = points.map((p) => p.value || 0);
+  const max = Math.max(1, ...values);
   const len = points.length;
+  const total = values.reduce((a, b) => a + b, 0);
+  const peakIdx = values.indexOf(Math.max(...values));
+  const [hover, setHover] = useState(null); // { i, x, y }
+  const bucketMs = BUCKET_MS[bucket] || 5 * 60_000;
+
   return (
     <div
       style={{
+        position: "relative",
         height: 160,
         border: "1px solid var(--ink)",
         background: "#fffdf7",
@@ -65,6 +92,8 @@ function MiniBarChart({ points }) {
         alignItems: "flex-end",
         gap: 2,
       }}
+      onMouseLeave={() => setHover(null)}
+      data-testid="overview-jobs-chart"
     >
       {points.map((p, i) => {
         const v = p.value || 0;
@@ -72,18 +101,82 @@ function MiniBarChart({ points }) {
         // Highlight the last 1/6 of the chart with banana so the user
         // can pick the recent end at a glance.
         const recent = i >= Math.floor(len * (5 / 6));
+        const isHovered = hover?.i === i;
         return (
           <div
             key={p.ts}
-            title={`${p.ts}\n${v.toFixed(2)}`}
+            data-testid={`jobs-bar-${i}`}
+            onMouseEnter={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const parent = e.currentTarget.parentElement.getBoundingClientRect();
+              setHover({
+                i,
+                x: rect.left - parent.left + rect.width / 2,
+                y: rect.top - parent.top,
+              });
+            }}
             style={{
               flex: 1,
               height: `${h}%`,
-              background: recent ? "var(--banana)" : "var(--ink)",
+              background: isHovered
+                ? "var(--banana-deep)"
+                : recent
+                  ? "var(--banana)"
+                  : "var(--ink)",
+              cursor: "crosshair",
+              transition: "background 0.1s ease",
             }}
           />
         );
       })}
+      {hover && (() => {
+        const p = points[hover.i];
+        const v = p.value || 0;
+        const start = new Date(p.ts);
+        const end = new Date(start.getTime() + bucketMs);
+        const share = total > 0 ? (v / total) * 100 : 0;
+        const tipWidth = 240;
+        // Pin the tip so it doesn't clip the right edge of the chart.
+        const left = Math.max(8, Math.min(hover.x - tipWidth / 2, 9999));
+        return (
+          <div
+            data-testid="jobs-bar-tooltip"
+            style={{
+              position: "absolute",
+              left,
+              top: Math.max(8, hover.y - 92),
+              width: tipWidth,
+              padding: "8px 10px",
+              background: "var(--ink)",
+              color: "var(--paper)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              lineHeight: 1.4,
+              border: "1px solid var(--ink)",
+              boxShadow: "0 4px 0 0 var(--banana)",
+              pointerEvents: "none",
+              zIndex: 5,
+            }}
+          >
+            <div style={{ fontWeight: 700, letterSpacing: "0.04em" }}>
+              {formatBucketTs(p.ts)} → {formatBucketTs(end.toISOString()).slice(11)}
+            </div>
+            <div style={{ marginTop: 4 }}>
+              jobs · <span style={{ color: "var(--banana)", fontWeight: 700 }}>{v}</span>
+              <span style={{ opacity: 0.6 }}> / peak {Math.max(...values)}</span>
+            </div>
+            <div>
+              bucket · {bucket} · #{hover.i + 1}/{len}
+            </div>
+            <div>
+              share · {share.toFixed(1)}% of {total} total
+            </div>
+            {hover.i === peakIdx && (
+              <div style={{ color: "var(--banana)", marginTop: 2 }}>← peak bucket</div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -485,7 +578,7 @@ export default function OverviewTab() {
         )}
         <div style={{ marginTop: 12 }}>
           {timeseries?.points?.length ? (
-            <MiniBarChart points={timeseries.points} />
+            <MiniBarChart points={timeseries.points} bucket={timeseries.bucket} />
           ) : (
             <div
               style={{
