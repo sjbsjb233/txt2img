@@ -266,6 +266,17 @@ function JobDrawer({ row, onClose, onPrev, onNext, width }) {
             "var(--ink-3)",
         }} />
         <div style={{ flex: 1 }} />
+        <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
+          ⌘[{" "}
+          <button onClick={onPrev} style={{
+            background: "transparent", border: "none", cursor: "pointer",
+            color: "inherit", fontFamily: "inherit", fontSize: "inherit",
+          }}>prev</button>{" "}·{" "}
+          <button onClick={onNext} style={{
+            background: "transparent", border: "none", cursor: "pointer",
+            color: "inherit", fontFamily: "inherit", fontSize: "inherit",
+          }}>next</button>{" "}⌘]
+        </span>
         <button
           data-testid="drawer-close"
           onClick={onClose}
@@ -334,6 +345,18 @@ function JobDrawer({ row, onClose, onPrev, onNext, width }) {
             }}
           >
             {it.prompt || "—"}
+            {it.prompt && (
+              <button
+                onClick={() => navigator.clipboard?.writeText(it.prompt)}
+                style={{
+                  position: "absolute", bottom: 6, right: 8,
+                  background: "transparent", border: "none", cursor: "pointer",
+                  fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--ink-3)",
+                }}
+              >
+                copy
+              </button>
+            )}
           </div>
         </div>
 
@@ -347,15 +370,108 @@ function JobDrawer({ row, onClose, onPrev, onNext, width }) {
             {queueSec && <MetaRow k="queue" v={queueSec} />}
             {renderSec && <MetaRow k="render" v={renderSec} />}
             <MetaRow k="created" v={fullTimestamp(it.timing?.queued_at || it.updated_at)} />
-            <MetaRow k="session" v={sessionLabel} />
+            {it.references?.length ? (
+              <MetaRow
+                k="refs"
+                v={`used ${it.references.length} reference image${
+                  it.references.length === 1 ? "" : "s"
+                }`}
+              />
+            ) : null}
+            <MetaRow k="session" v={sessionLabel} link={!!it.session} />
           </div>
         </div>
+
+        {Object.keys(it.params || {}).length > 0 && (
+          <div style={{ marginTop: 22 }}>
+            <details>
+              <summary
+                className="mono caps"
+                style={{
+                  fontSize: 10, color: "var(--ink-3)", cursor: "pointer",
+                  outline: "none", userSelect: "none",
+                }}
+              >
+                ◢ More details
+              </summary>
+              <div
+                style={{
+                  marginTop: 10, padding: "10px 12px", background: "var(--paper-2)",
+                  border: "1px solid var(--ink)", fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                }}
+              >
+                {Object.entries(it.params).map(([k, v]) => (
+                  <div
+                    key={k}
+                    style={{
+                      display: "flex", justifyContent: "space-between",
+                      padding: "4px 0", borderBottom: "1px dashed var(--rule-2)",
+                    }}
+                  >
+                    <span style={{ color: "var(--ink-3)" }}>{k}</span>
+                    <span style={{ fontWeight: 600 }}>{String(v)}</span>
+                  </div>
+                ))}
+              </div>
+            </details>
+          </div>
+        )}
+
+        {it.references?.length > 0 && (
+          <div style={{ marginTop: 22 }}>
+            <div className="mono caps" style={{ fontSize: 9, color: "var(--ink-3)", letterSpacing: "0.16em" }}>
+              REFERENCES
+            </div>
+            <div
+              style={{
+                marginTop: 10, display: "grid",
+                gridTemplateColumns: "repeat(5, 1fr)", gap: 6,
+              }}
+            >
+              {it.references.map((r) => (
+                <div
+                  key={r.order}
+                  style={{
+                    aspectRatio: "1/1",
+                    border: "1px solid var(--ink)",
+                    background: "var(--paper-2)",
+                    overflow: "hidden",
+                  }}
+                >
+                  <AuthorizedImage
+                    src={referenceThumbUrl(it.hash_id, r.order)}
+                    alt={r.filename}
+                    style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {it.error && (
+          <div style={{ marginTop: 22 }}>
+            <div className="mono caps" style={{ fontSize: 9, color: "var(--bad)", letterSpacing: "0.16em" }}>
+              ERROR
+            </div>
+            <div
+              style={{
+                marginTop: 8, padding: "10px 12px", background: "#fdecea",
+                border: "1px solid var(--bad)", fontFamily: "var(--font-mono)",
+                fontSize: 11, color: "var(--bad)",
+              }}
+            >
+              {it.error}
+            </div>
+          </div>
+        )}
       </div>
     </aside>
   );
 }
 
-function MetaRow({ k, v }) {
+function MetaRow({ k, v, link = false }) {
   return (
     <div
       style={{
@@ -364,7 +480,15 @@ function MetaRow({ k, v }) {
       }}
     >
       <span style={{ color: "var(--ink-3)" }}>{k}</span>
-      <span style={{ fontWeight: 600, color: "var(--ink)" }}>{v}</span>
+      <span
+        style={{
+          fontWeight: 600,
+          color: link ? "var(--info)" : "var(--ink)",
+          textDecoration: link ? "underline" : "none",
+        }}
+      >
+        {v}
+      </span>
     </div>
   );
 }

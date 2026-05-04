@@ -183,7 +183,7 @@ export default function FilterPopover({
         <div
           style={{
             flex: 1,
-            minWidth: 360,
+            minWidth: 0,
             padding: "16px 18px",
             overflowY: "auto",
           }}
@@ -388,26 +388,28 @@ function TogglePanel({ propId, value, label, onChange }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <PanelTitle>{propId}</PanelTitle>
-      <label
+      <div
         style={{
           display: "flex",
           alignItems: "center",
           gap: 10,
-          cursor: "pointer",
           fontFamily: "var(--font-mono)",
           fontSize: 12,
           color: "var(--ink-2)",
         }}
       >
-        <span
+        <button
+          type="button"
           data-testid={`filter-opt-${propId}-__t`}
           data-selected={value ? "true" : "false"}
           role="switch"
           aria-checked={value}
+          aria-label={label}
           onClick={onChange}
           style={{
             width: 38,
             height: 22,
+            padding: 0,
             border: "1px solid var(--ink)",
             background: value ? "var(--banana)" : "var(--paper-2)",
             position: "relative",
@@ -417,6 +419,7 @@ function TogglePanel({ propId, value, label, onChange }) {
           }}
         >
           <span
+            aria-hidden="true"
             style={{
               position: "absolute",
               top: 1,
@@ -427,9 +430,14 @@ function TogglePanel({ propId, value, label, onChange }) {
               transition: "left 120ms ease",
             }}
           />
-        </span>
-        <span>{label}</span>
-      </label>
+        </button>
+        <label
+          onClick={onChange}
+          style={{ cursor: "pointer" }}
+        >
+          {label}
+        </label>
+      </div>
     </div>
   );
 }

@@ -62,10 +62,11 @@ export default function PaginationPager({
 function PagerButton({ testid, label, ariaLabel, disabled, onClick }) {
   return (
     <button
+      type="button"
       data-testid={testid}
       data-disabled={disabled ? "true" : "false"}
       aria-label={ariaLabel}
-      aria-disabled={disabled}
+      disabled={disabled}
       onClick={onClick}
       style={{
         height: 24,

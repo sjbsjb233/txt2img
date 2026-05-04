@@ -26,24 +26,28 @@ export default function useArchivePagination({
   const [pull, setPull] = useState(0);
   const [isCommitting, setIsCommitting] = useState(false);
   const stopTimer = useRef(null);
+  const commitTimer = useRef(null);
   const pendingTopOnLoad = useRef(0);
-  const lastItemsLen = useRef(0);
 
-  const totalPages = Math.max(1, Math.ceil((items?.length || 0) / pageSize));
+  // 0 items → 0 pages (so the toolbar can hide the pager). Otherwise
+  // use the natural ceiling.
+  const totalPages = Math.ceil((items?.length || 0) / pageSize);
 
   // Clamp loadedPages if items shrunk (e.g. SSE delete).
   useEffect(() => {
     setLoadedPages((prev) => {
+      if (totalPages === 0) return [1];
       const clamped = prev.filter((p) => p <= totalPages);
-      if (clamped.length === 0) return [1];
+      if (clamped.length === 0) return [Math.max(1, totalPages)];
       if (clamped.length === prev.length) return prev;
       return clamped;
     });
-    setViewportPage((p) => Math.min(p, totalPages));
+    setViewportPage((p) => Math.min(p, Math.max(1, totalPages)));
   }, [totalPages]);
 
   // Visible items: union of loaded pages, in their natural order.
   const visibleByPage = useMemo(() => {
+    if (totalPages === 0) return [];
     const out = [];
     const sortedPages = [...loadedPages].sort((a, b) => a - b);
     for (const p of sortedPages) {
@@ -52,7 +56,7 @@ export default function useArchivePagination({
       out.push({ page: p, items: items.slice(start, end) });
     }
     return out;
-  }, [items, loadedPages, pageSize]);
+  }, [items, loadedPages, pageSize, totalPages]);
 
   const visibleItems = useMemo(
     () => visibleByPage.flatMap((b) => b.items),
@@ -77,9 +81,11 @@ export default function useArchivePagination({
     });
     setIsCommitting(true);
     pendingTopOnLoad.current = 1; // signal: scroll to last page top after layout
-    setTimeout(() => {
+    if (commitTimer.current) clearTimeout(commitTimer.current);
+    commitTimer.current = setTimeout(() => {
       setIsCommitting(false);
       setPull(0);
+      commitTimer.current = null;
     }, 520);
   }, [totalPages]);
 
@@ -115,6 +121,7 @@ export default function useArchivePagination({
     // Reset stop timer.
     if (stopTimer.current) clearTimeout(stopTimer.current);
     stopTimer.current = setTimeout(() => {
+      stopTimer.current = null;
       const sc2 = scrollerRef.current;
       if (!sc2 || isCommitting) return;
       // re-measure final pull
@@ -154,6 +161,21 @@ export default function useArchivePagination({
     return () => sc.removeEventListener("scroll", onScroll);
   }, [scrollerRef, onScroll]);
 
+  // Cancel any pending timers when the hook unmounts so deferred
+  // callbacks don't fire on a torn-down tree.
+  useEffect(() => {
+    return () => {
+      if (stopTimer.current) {
+        clearTimeout(stopTimer.current);
+        stopTimer.current = null;
+      }
+      if (commitTimer.current) {
+        clearTimeout(commitTimer.current);
+        commitTimer.current = null;
+      }
+    };
+  }, []);
+
   // After a commit appends a page, scroll to its top (offsetTop − 14).
   useEffect(() => {
     if (!pendingTopOnLoad.current) return;
@@ -178,6 +200,7 @@ export default function useArchivePagination({
   const jumpTo = useCallback(
     (p) => {
       if (isCommitting) return;
+      if (totalPages === 0) return;
       const target = Math.max(1, Math.min(totalPages, p));
       setLoadedPages([target]);
       setViewportPage(target);
@@ -199,11 +222,6 @@ export default function useArchivePagination({
     const sc = scrollerRef.current;
     if (sc) sc.scrollTop = 0;
   }, [scrollerRef]);
-
-  // Track lastItemsLen to support SSE-induced shrink without reset.
-  useEffect(() => {
-    lastItemsLen.current = items.length;
-  }, [items.length]);
 
   return {
     loadedPages,

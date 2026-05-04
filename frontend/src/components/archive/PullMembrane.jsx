@@ -1,7 +1,7 @@
 // "GoodNotes" style pull-to-load membrane. Renders the tension zone at
 // the bottom of the loaded grid; the parent owns the `pull` 0..1 value.
 
-export const TENSION_HEIGHT = 380;
+import { TENSION_HEIGHT } from "../../hooks/useArchivePagination.js";
 
 export default function PullMembrane({
   pull,

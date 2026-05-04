@@ -59,8 +59,17 @@ function sanitizeFilter(raw) {
     out.status = raw.status.filter((v) => STATUS_VALUES.includes(v));
   }
   if (typeof raw.starred === "boolean") out.starred = raw.starred;
-  if (typeof raw.session === "string" && raw.session) out.session = raw.session;
+  // session is intentionally NOT loaded from persistence — its source of
+  // truth is the URL ?session_id=... param, surfaced at the page layer.
   return out;
+}
+
+function stripForPersist(filter) {
+  // Same reason as above: keep `session` out of localStorage so the URL
+  // remains the only place it lives.
+  // eslint-disable-next-line no-unused-vars
+  const { session, ...persistable } = filter;
+  return persistable;
 }
 
 function sanitizeSort(raw) {
@@ -93,7 +102,7 @@ function readSort() {
 
 function writeFilter(value) {
   try {
-    localStorage.setItem(FILTER_KEY, JSON.stringify(value));
+    localStorage.setItem(FILTER_KEY, JSON.stringify(stripForPersist(value)));
   } catch {
     /* ignore */
   }
