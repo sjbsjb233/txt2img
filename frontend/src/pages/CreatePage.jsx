@@ -3,12 +3,15 @@ import { useNavigate } from "react-router-dom";
 import Icon from "../components/Icon.jsx";
 import TopBar from "../components/TopBar.jsx";
 import TurnstileModal from "../components/TurnstileModal.jsx";
+import DraftToast from "../components/DraftToast.jsx";
 import { getModels } from "../api/models.js";
 import { createJob, precheck as precheckJob } from "../api/jobs.js";
 import { createSession } from "../api/sessions.js";
 import * as sseStore from "../store/sse.js";
 import * as archiveStore from "../store/archive.js";
 import { usePreferences } from "../store/preferences.js";
+import { useAuth } from "../store/auth.js";
+import { useDraftAutosave } from "../hooks/useDraftAutosave.js";
 
 // ---------------------------------------------------------------------------
 // Visual atoms
@@ -289,6 +292,8 @@ function useFieldRenderPlan(uiSchema, capabilities) {
 export default function CreatePage() {
   const navigate = useNavigate();
   const { prefs: userPrefs } = usePreferences();
+  const { user } = useAuth();
+  const userId = user?.id || null;
   // Snapshot the user's "default ratio / batch size / model" once on
   // mount so changing them in /settings while the page is open does
   // not silently reset whatever the user has already configured here.
@@ -320,6 +325,25 @@ export default function CreatePage() {
   const [refs, setRefs] = useState([]); // array of File objects (insertion order)
   const [sessionId, setSessionId] = useState(null);
 
+  // Autosave & restore — applied via the useDraftAutosave hook below.
+  // Restore lands one snapshot of state into the form before any user
+  // interaction. We stash a pending model id (the schema-defaults
+  // useEffect later picks it up) so it doesn't fight the catalog loader.
+  const pendingRestoreModelIdRef = useRef(null);
+  const handleRestoreDraft = useCallback((restored) => {
+    if (typeof restored.prompt === "string") setPrompt(restored.prompt);
+    if (Array.isArray(restored.refs)) setRefs(restored.refs);
+    if (restored.params && typeof restored.params === "object") {
+      setParams(restored.params);
+    }
+    if (typeof restored.sessionId === "string" || restored.sessionId === null) {
+      setSessionId(restored.sessionId);
+    }
+    if (restored.modelId) {
+      pendingRestoreModelIdRef.current = restored.modelId;
+    }
+  }, []);
+
   // Submission state.
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
@@ -343,12 +367,20 @@ export default function CreatePage() {
         (m) => m.model_id === (selectedModel?.model_id || "")
       );
       if (!stillThere) {
+        // Restored draft model takes precedence over the user's default
+        // pref so a refresh lands the user back on the model they were
+        // last editing with.
+        const restoredId = pendingRestoreModelIdRef.current;
+        const restored = restoredId
+          ? all.find((m) => m.model_id === restoredId && m.available)
+          : null;
+        if (restored) pendingRestoreModelIdRef.current = null;
         const preferredId = initialPrefsRef.current?.model_id;
         const preferred = preferredId
           ? all.find((m) => m.model_id === preferredId && m.available)
           : null;
         const firstOk = all.find((m) => m.available) || all[0] || null;
-        setSelectedModel(preferred || firstOk);
+        setSelectedModel(restored || preferred || firstOk);
       } else {
         setSelectedModel(stillThere);
       }
@@ -381,6 +413,21 @@ export default function CreatePage() {
       )
     );
   }, [selectedModel?.model_id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Draft autosave + restore. Driven entirely client-side; no backend
+  // calls. The hook waits for the catalog before kicking in so the
+  // restored model_id can be validated against the user's tier.
+  const { toast: draftToast, clearDraft } = useDraftAutosave({
+    userId,
+    prompt,
+    params,
+    refs,
+    modelId: selectedModel?.model_id || null,
+    sessionId,
+    catalog,
+    enabled: !!catalog && !!userId,
+    onRestore: handleRestoreDraft,
+  });
 
   // 60s freshness rule: if the user lingers, re-pull on the next
   // Generate attempt so a capability tweak that landed mid-session
@@ -435,6 +482,8 @@ export default function CreatePage() {
         await archiveStore.insertOptimistic(response);
         // Reset the request id so the next Generate gets a fresh one.
         clientRequestIdRef.current = null;
+        // Silent — user's eyes are about to follow the navigate().
+        clearDraft({ silent: true });
         navigate("/archive");
       } catch (err) {
         if (err?.code === "CAPTCHA_REQUIRED") {
@@ -461,7 +510,7 @@ export default function CreatePage() {
         setSubmitting(false);
       }
     },
-    [buildPayload, navigate, refs, selectedModel]
+    [buildPayload, clearDraft, navigate, refs, selectedModel]
   );
 
   const handleGenerate = useCallback(async () => {
@@ -511,6 +560,7 @@ export default function CreatePage() {
         // The store also persists it to IndexedDB so a reload survives.
         await archiveStore.insertOptimistic(response);
           clientRequestIdRef.current = null;
+          clearDraft({ silent: true });
           navigate("/archive");
         } catch (err) {
           setSubmitError(err);
@@ -521,7 +571,7 @@ export default function CreatePage() {
         await submit(token);
       }
     },
-    [navigate, refs, submit]
+    [clearDraft, navigate, refs, submit]
   );
 
   // -----------------------------------------------------------------
@@ -620,15 +670,17 @@ export default function CreatePage() {
             Make a <span style={{ fontStyle: "italic" }}>thing</span>.
           </>
         }
-        subtitle="Text prompt, up to 14 reference images, any provider. Drafts autosave every keystroke."
+        subtitle="Text prompt, up to 14 reference images, any provider."
         right={
           <>
+            <DraftToast value={draftToast} />
             <button
               className="btn sm ghost"
               onClick={() => {
                 setPrompt("");
                 clearRefs();
                 clientRequestIdRef.current = null;
+                clearDraft();
               }}
             >
               Clear
