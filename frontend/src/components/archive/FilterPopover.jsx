@@ -9,6 +9,8 @@ import {
 } from "./archiveFilter.js";
 import { EMPTY_FILTER as EMPTY } from "../../store/archivePrefs.js";
 
+const EXIT_MS = 140;
+
 const PERIOD_CHOICES = [
   { value: null, label: "any time" },
   { value: "7d", label: "last 7 days" },
@@ -36,8 +38,10 @@ export default function FilterPopover({
   onClose,
 }) {
   const ref = useRef(null);
+  const exitTimer = useRef(null);
   const [pending, setPending] = useState(() => clone(applied || EMPTY));
   const [activeProp, setActiveProp] = useState("period");
+  const [closing, setClosing] = useState(false);
 
   // Reset pending whenever the popover is reopened (parent toggles by
   // mounting/unmounting, so this just runs on first mount).
@@ -45,20 +49,53 @@ export default function FilterPopover({
     setPending(clone(applied || EMPTY));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Cleanup the exit timer if the popover is forcibly unmounted (e.g. a
+  // parent route change) before the exit animation finishes.
+  useEffect(() => {
+    return () => {
+      if (exitTimer.current) clearTimeout(exitTimer.current);
+    };
+  }, []);
+
+  // Wrap onClose / onApply so the exit animation plays first. The
+  // parent unmounts us via `filterOpen → false`, so we can simply delay
+  // the parent callback by EXIT_MS while showing the closing keyframe.
+  //
+  // The `closing` state isn't enough as a guard — React batches updates
+  // so a rapid double-click could still see `closing === false` on the
+  // second call. Use the timer ref as the synchronous lock and bail
+  // (or reset) before scheduling another callback.
+  function deferClose() {
+    if (exitTimer.current) return;
+    setClosing(true);
+    exitTimer.current = setTimeout(() => {
+      exitTimer.current = null;
+      onClose();
+    }, EXIT_MS);
+  }
+  function deferApply(next) {
+    if (exitTimer.current) return;
+    setClosing(true);
+    exitTimer.current = setTimeout(() => {
+      exitTimer.current = null;
+      onApply(next);
+    }, EXIT_MS);
+  }
+
   // Click-outside + Esc + Enter handlers.
   useEffect(() => {
     const onDoc = (e) => {
-      if (ref.current && !ref.current.contains(e.target)) onClose();
+      if (ref.current && !ref.current.contains(e.target)) deferClose();
     };
     const onKey = (e) => {
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose();
+        deferClose();
         return;
       }
       if (e.key === "Enter") {
         e.preventDefault();
-        onApply(pending);
+        deferApply(pending);
         return;
       }
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -77,7 +114,7 @@ export default function FilterPopover({
       document.removeEventListener("mousedown", onDoc);
       document.removeEventListener("keydown", onKey);
     };
-  }, [onClose, onApply, pending, activeProp]);
+  }, [onClose, onApply, pending, activeProp, closing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const dynamic = useMemo(() => computeFilterOptions(allRows), [allRows]);
 
@@ -108,6 +145,7 @@ export default function FilterPopover({
       data-testid="archive-filter-popover"
       role="dialog"
       aria-label="filter properties"
+      className={closing ? "arch-pop-close" : "arch-pop-open"}
       style={{
         position: "absolute",
         top: "calc(100% + 8px)",
@@ -117,16 +155,12 @@ export default function FilterPopover({
         background: "var(--card, #fffdf7)",
         border: "1px solid var(--ink)",
         boxShadow: "5px 5px 0 var(--ink)",
-        animation: "popIn 140ms cubic-bezier(.2,.9,.3,1)",
         display: "flex",
         flexDirection: "column",
         maxHeight: "min(70vh, 600px)",
+        transformOrigin: "top left",
       }}
     >
-      <style>{`
-        @keyframes popIn { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: none; } }
-      `}</style>
-
       <div style={{ display: "flex", flex: 1, minHeight: 320 }}>
         <div
           style={{
@@ -181,6 +215,8 @@ export default function FilterPopover({
         </div>
 
         <div
+          key={activeProp}
+          className="arch-prop-panel"
           style={{
             flex: 1,
             minWidth: 0,
@@ -265,7 +301,7 @@ export default function FilterPopover({
         <div style={{ display: "flex", gap: 8 }}>
           <button
             data-testid="filter-cancel"
-            onClick={onClose}
+            onClick={deferClose}
             style={{
               background: "transparent",
               border: "1px solid var(--ink-3)",
@@ -280,7 +316,7 @@ export default function FilterPopover({
           </button>
           <button
             data-testid="filter-apply"
-            onClick={() => onApply(pending)}
+            onClick={() => deferApply(pending)}
             style={{
               background: "var(--ink)",
               color: "var(--paper)",

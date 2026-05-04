@@ -1,6 +1,6 @@
 // Sort dropdown — selection list + a "refresh from server" footer.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const OPTIONS = [
   { key: "newest", label: "newest first" },
@@ -8,6 +8,8 @@ const OPTIONS = [
   { key: "starred-first", label: "starred first" },
   { key: "set-size", label: "largest set" },
 ];
+
+const EXIT_MS = 140;
 
 export default function SortDropdown({
   current,
@@ -17,15 +19,51 @@ export default function SortDropdown({
   triggerRef,
 }) {
   const ref = useRef(null);
+  const exitTimer = useRef(null);
+  const [closing, setClosing] = useState(false);
+
+  useEffect(() => {
+    return () => {
+      if (exitTimer.current) clearTimeout(exitTimer.current);
+    };
+  }, []);
+
+  // The `closing` state isn't enough as a guard — React batches updates
+  // so a rapid double-click could still see `closing === false` on the
+  // second call. Use the timer ref as the synchronous lock.
+  function deferClose() {
+    if (exitTimer.current) return;
+    setClosing(true);
+    exitTimer.current = setTimeout(() => {
+      exitTimer.current = null;
+      onClose();
+    }, EXIT_MS);
+  }
+  function deferPick(k) {
+    if (exitTimer.current) return;
+    setClosing(true);
+    exitTimer.current = setTimeout(() => {
+      exitTimer.current = null;
+      onPick(k);
+    }, EXIT_MS);
+  }
+  function deferRefresh() {
+    if (exitTimer.current) return;
+    setClosing(true);
+    exitTimer.current = setTimeout(() => {
+      exitTimer.current = null;
+      onRefresh();
+    }, EXIT_MS);
+  }
 
   useEffect(() => {
     const onDoc = (e) => {
       if (ref.current && ref.current.contains(e.target)) return;
       if (triggerRef?.current && triggerRef.current.contains(e.target)) return;
-      onClose();
+      deferClose();
     };
     const onKey = (e) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") deferClose();
     };
     const t = setTimeout(() => document.addEventListener("mousedown", onDoc), 0);
     document.addEventListener("keydown", onKey);
@@ -34,13 +72,14 @@ export default function SortDropdown({
       document.removeEventListener("mousedown", onDoc);
       document.removeEventListener("keydown", onKey);
     };
-  }, [onClose, triggerRef]);
+  }, [closing, triggerRef]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div
       ref={ref}
       role="menu"
       aria-label="sort options"
+      className={closing ? "arch-pop-close" : "arch-pop-open"}
       style={{
         position: "absolute",
         top: "calc(100% + 6px)",
@@ -50,7 +89,7 @@ export default function SortDropdown({
         background: "var(--card, #fffdf7)",
         border: "1px solid var(--ink)",
         boxShadow: "5px 5px 0 var(--ink)",
-        animation: "popIn 140ms cubic-bezier(.2,.9,.3,1)",
+        transformOrigin: "top right",
       }}
     >
       {OPTIONS.map((opt) => {
@@ -61,7 +100,7 @@ export default function SortDropdown({
             data-testid={`sort-opt-${opt.key}`}
             role="menuitem"
             data-selected={sel ? "true" : "false"}
-            onClick={() => onPick(opt.key)}
+            onClick={() => deferPick(opt.key)}
             onMouseEnter={(e) => {
               e.currentTarget.style.background = "var(--paper-2)";
             }}
@@ -94,7 +133,7 @@ export default function SortDropdown({
       <button
         data-testid="sort-opt-refresh"
         role="menuitem"
-        onClick={onRefresh}
+        onClick={deferRefresh}
         onMouseEnter={(e) => {
           e.currentTarget.style.background = "var(--paper-2)";
         }}

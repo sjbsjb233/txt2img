@@ -1,10 +1,10 @@
-// Horizontal strip of applied filter chips. The strip is the only
-// flex-grow item on the toolbar; min-width:0 + flex:1 lets it shrink
-// without pushing the right-side controls out.
+// Horizontal strip of applied filter chips. Scrolls horizontally when
+// chips overflow; the `+ filter` trigger sits OUTSIDE the scroll
+// container so its top-right notification badge is never clipped.
 
 import { chipLabel, forEachChip, removeChip } from "./archiveFilter.js";
 
-export default function ChipStrip({ applied, dynamic, onChange, onAddFilter, chipCount }) {
+export default function ChipStrip({ applied, dynamic, onChange }) {
   const chips = [];
   forEachChip(applied, ({ propId, value }) => {
     chips.push({ propId, value });
@@ -22,10 +22,11 @@ export default function ChipStrip({ applied, dynamic, onChange, onAddFilter, chi
         overflowX: "auto",
         overflowY: "hidden",
         whiteSpace: "nowrap",
-        padding: "2px 0",
+        // Match the chip's 28px height + 1px breathing room top/bottom
+        // so the row doesn't visually jump when the first chip lands.
+        padding: "1px 0",
       }}
     >
-      <FilterTrigger count={chipCount} onClick={onAddFilter} />
       {chips.map(({ propId, value }) => {
         const v = typeof value === "boolean" ? "true" : String(value);
         return (
@@ -42,9 +43,10 @@ export default function ChipStrip({ applied, dynamic, onChange, onAddFilter, chi
   );
 }
 
-function FilterTrigger({ count, onClick }) {
+export function FilterTrigger({ count, onClick }) {
   return (
     <button
+      type="button"
       data-testid="archive-filter-trigger"
       onClick={onClick}
       style={{
@@ -68,11 +70,12 @@ function FilterTrigger({ count, onClick }) {
       + filter
       {count > 0 && (
         <span
+          className="arch-chip-badge-pop"
           aria-label={`${count} filters applied`}
           style={{
             position: "absolute",
-            top: -6,
-            right: -6,
+            top: -7,
+            right: -7,
             minWidth: 18,
             height: 18,
             padding: "0 5px",
@@ -100,6 +103,7 @@ function Chip({ propId, value, label, onRemove }) {
   return (
     <div
       data-testid={`chip-${propId}-${v}`}
+      className="arch-chip-in"
       style={{
         flexShrink: 0,
         display: "inline-flex",
@@ -120,6 +124,7 @@ function Chip({ propId, value, label, onRemove }) {
         {label}
       </span>
       <button
+        type="button"
         data-testid={`chip-remove-${propId}-${v}`}
         aria-label={`remove filter ${propId} ${v}`}
         onClick={onRemove}

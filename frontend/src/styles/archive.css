@@ -725,3 +725,81 @@
     animation: none;
   }
 }
+
+/* ------------------------------------------------------------------
+ * Filter / sort transitions
+ * Used by FilterPopover, SortDropdown, ChipStrip, PaginationPager,
+ * and ArchiveNoMatches. Keep these in one place so the easings stay
+ * coherent across the toolbar surface.
+ * All keyframes + classes follow the `arch-` prefix convention used
+ * elsewhere in this file.
+ * ------------------------------------------------------------------ */
+
+/* Popover & dropdown — soft drop with a touch of overshoot. */
+@keyframes archPopOpen {
+  0%   { opacity: 0; transform: translateY(-6px) scale(.97); }
+  60%  { opacity: 1; transform: translateY(1px) scale(1.005); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes archPopClose {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to   { opacity: 0; transform: translateY(-4px) scale(.98); }
+}
+.arch-pop-open  { animation: archPopOpen  180ms cubic-bezier(.22,.85,.22,1) both; }
+.arch-pop-close { animation: archPopClose 140ms cubic-bezier(.4,0,.7,.2) both; }
+
+/* Filter property switch — smooth left/right swap on the right panel.
+ * Each panel fades + slides 6px in from below. */
+@keyframes archPropPanelIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.arch-prop-panel { animation: archPropPanelIn 200ms cubic-bezier(.22,.85,.22,1) both; }
+
+/* Chip enter — scale + fade from the chip-strip's left anchor. */
+@keyframes archChipIn {
+  from { opacity: 0; transform: scale(.7); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.arch-chip-in {
+  animation: archChipIn 240ms cubic-bezier(.22,.85,.22,1) both;
+  transform-origin: left center;
+}
+
+/* Trigger badge pop — for the "1" notification on `+ filter`. */
+@keyframes archChipBadgePop {
+  0%   { transform: scale(.4); opacity: 0; }
+  60%  { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.arch-chip-badge-pop { animation: archChipBadgePop 220ms cubic-bezier(.22,.85,.22,1) both; }
+
+/* No-matches frame — gentle fade-in so it doesn't feel jarring when the
+ * grid disappears. */
+@keyframes archNoMatchesIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.arch-no-matches-in { animation: archNoMatchesIn 320ms cubic-bezier(.22,.85,.22,1) both; }
+
+/* Brutalist "press" affordance for buttons that want a tactile click
+ * effect. Driven by :active (and inline 3px box-shadow on the element)
+ * so we can disable it cleanly under reduced-motion. */
+.arch-press { transition: transform 80ms ease, box-shadow 80ms ease; }
+.arch-press:active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 var(--ink) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .arch-pop-open,
+  .arch-pop-close,
+  .arch-prop-panel,
+  .arch-chip-in,
+  .arch-chip-badge-pop,
+  .arch-no-matches-in {
+    animation: none !important;
+  }
+  .arch-press { transition: none !important; }
+  .arch-press:active { transform: none !important; }
+}
