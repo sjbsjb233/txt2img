@@ -76,9 +76,21 @@ function MiniBarChart({ points, bucket = "5m" }) {
   const max = Math.max(1, ...values);
   const len = points.length;
   const total = values.reduce((a, b) => a + b, 0);
-  const peakIdx = values.indexOf(Math.max(...values));
-  const [hover, setHover] = useState(null); // { i, x, y }
+  const peakValue = values.length ? Math.max(...values) : 0;
+  const peakIdx = peakValue > 0 ? values.indexOf(peakValue) : -1;
+  const [hover, setHover] = useState(null); // { i, x, y, parentWidth }
   const bucketMs = BUCKET_MS[bucket] || 5 * 60_000;
+
+  function handleEnter(i, e) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const parent = e.currentTarget.parentElement.getBoundingClientRect();
+    setHover({
+      i,
+      x: rect.left - parent.left + rect.width / 2,
+      y: rect.top - parent.top,
+      parentWidth: parent.width,
+    });
+  }
 
   return (
     <div
@@ -102,19 +114,19 @@ function MiniBarChart({ points, bucket = "5m" }) {
         // can pick the recent end at a glance.
         const recent = i >= Math.floor(len * (5 / 6));
         const isHovered = hover?.i === i;
+        const ariaLabel =
+          `${formatBucketTs(p.ts)}, ${v} jobs, bucket ${bucket}, ` +
+          `${total > 0 ? ((v / total) * 100).toFixed(1) : "0.0"}% of ${total} total`;
         return (
           <div
             key={p.ts}
             data-testid={`jobs-bar-${i}`}
-            onMouseEnter={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              const parent = e.currentTarget.parentElement.getBoundingClientRect();
-              setHover({
-                i,
-                x: rect.left - parent.left + rect.width / 2,
-                y: rect.top - parent.top,
-              });
-            }}
+            tabIndex={0}
+            role="img"
+            aria-label={ariaLabel}
+            onMouseEnter={(e) => handleEnter(i, e)}
+            onFocus={(e) => handleEnter(i, e)}
+            onBlur={() => setHover(null)}
             style={{
               flex: 1,
               height: `${h}%`,
@@ -125,6 +137,7 @@ function MiniBarChart({ points, bucket = "5m" }) {
                   : "var(--ink)",
               cursor: "crosshair",
               transition: "background 0.1s ease",
+              outline: "none",
             }}
           />
         );
@@ -136,8 +149,10 @@ function MiniBarChart({ points, bucket = "5m" }) {
         const end = new Date(start.getTime() + bucketMs);
         const share = total > 0 ? (v / total) * 100 : 0;
         const tipWidth = 240;
-        // Pin the tip so it doesn't clip the right edge of the chart.
-        const left = Math.max(8, Math.min(hover.x - tipWidth / 2, 9999));
+        // Clamp against the chart's actual bounding rect so the tip
+        // stays inside on the right edge as well as the left.
+        const maxLeft = Math.max(8, hover.parentWidth - tipWidth - 8);
+        const left = Math.max(8, Math.min(hover.x - tipWidth / 2, maxLeft));
         return (
           <div
             data-testid="jobs-bar-tooltip"
@@ -163,7 +178,7 @@ function MiniBarChart({ points, bucket = "5m" }) {
             </div>
             <div style={{ marginTop: 4 }}>
               jobs · <span style={{ color: "var(--banana)", fontWeight: 700 }}>{v}</span>
-              <span style={{ opacity: 0.6 }}> / peak {Math.max(...values)}</span>
+              <span style={{ opacity: 0.6 }}> / peak {peakValue}</span>
             </div>
             <div>
               bucket · {bucket} · #{hover.i + 1}/{len}
@@ -171,7 +186,7 @@ function MiniBarChart({ points, bucket = "5m" }) {
             <div>
               share · {share.toFixed(1)}% of {total} total
             </div>
-            {hover.i === peakIdx && (
+            {hover.i === peakIdx && peakValue > 0 && (
               <div style={{ color: "var(--banana)", marginTop: 2 }}>← peak bucket</div>
             )}
           </div>

@@ -50,12 +50,23 @@ function statusChip(status, todayCount, soft, hard) {
 // ---------------------------------------------------------------------------
 
 function DailyUsageStrip({ usagePoints, maxUsage }) {
-  const [hover, setHover] = useState(null); // { i, x, y }
+  const [hover, setHover] = useState(null); // { i, x, y, parentWidth }
   const total = usagePoints.reduce((a, p) => a + (p.jobs_count || 0), 0);
   const peak = usagePoints.length
     ? usagePoints.reduce((m, p) => (p.jobs_count > m ? p.jobs_count : m), 0)
     : 0;
-  const peakIdx = usagePoints.findIndex((p) => p.jobs_count === peak);
+  const peakIdx = peak > 0 ? usagePoints.findIndex((p) => p.jobs_count === peak) : -1;
+
+  function handleEnter(i, e) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const parent = e.currentTarget.parentElement.parentElement.getBoundingClientRect();
+    setHover({
+      i,
+      x: rect.left - parent.left + rect.width / 2,
+      y: rect.top - parent.top,
+      parentWidth: parent.width,
+    });
+  }
 
   return (
     <div
@@ -81,25 +92,26 @@ function DailyUsageStrip({ usagePoints, maxUsage }) {
                 ? "var(--ink-2)"
                 : "var(--warn)";
           const isHovered = hover?.i === i;
+          const ariaLabel =
+            `${p.date}, ${p.jobs_count} jobs, ` +
+            `${p.success_count} ok, ${Math.max(0, p.jobs_count - p.success_count)} fail`;
           return (
             <div
               key={p.date}
               data-testid={`user-daily-bar-${i}`}
-              onMouseEnter={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                const parent = e.currentTarget.parentElement.parentElement.getBoundingClientRect();
-                setHover({
-                  i,
-                  x: rect.left - parent.left + rect.width / 2,
-                  y: rect.top - parent.top,
-                });
-              }}
+              tabIndex={0}
+              role="img"
+              aria-label={ariaLabel}
+              onMouseEnter={(e) => handleEnter(i, e)}
+              onFocus={(e) => handleEnter(i, e)}
+              onBlur={() => setHover(null)}
               style={{
                 flex: 1,
                 height: `${h}%`,
                 background: isHovered ? "var(--banana-deep)" : tone,
                 cursor: "crosshair",
                 transition: "background 0.1s ease",
+                outline: "none",
               }}
             />
           );
@@ -113,7 +125,8 @@ function DailyUsageStrip({ usagePoints, maxUsage }) {
         const successPct = jobs ? (ok / jobs) * 100 : 0;
         const sharePct = total > 0 ? (jobs / total) * 100 : 0;
         const tipWidth = 230;
-        const left = Math.max(0, Math.min(hover.x - tipWidth / 2, 9999));
+        const maxLeft = Math.max(0, hover.parentWidth - tipWidth);
+        const left = Math.max(0, Math.min(hover.x - tipWidth / 2, maxLeft));
         return (
           <div
             data-testid="user-daily-tooltip"
