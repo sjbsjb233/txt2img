@@ -104,7 +104,7 @@ export default function ArchiveEmptyHero() {
   const navigate = useNavigate();
 
   return (
-    <div style={{ marginTop: 28 }}>
+    <div data-testid="archive-empty-hero" style={{ marginTop: 28 }}>
       {/* Big editorial empty stage */}
       <div
         style={{
