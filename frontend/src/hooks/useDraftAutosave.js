@@ -247,6 +247,14 @@ export function useDraftAutosave({
         refsCount,
       })
     ) {
+      // Mirror writeDraftNow: if the user emptied the form mid-debounce,
+      // wipe the previously-saved draft so it doesn't reappear on the
+      // next visit.
+      if (hasWrittenRef.current) {
+        clearLocalDraft();
+        draftDB.clearRefs(userId).catch(() => {});
+        hasWrittenRef.current = false;
+      }
       return;
     }
     const payload = {
@@ -311,8 +319,12 @@ export function useDraftAutosave({
             "draft autosave: refs_count mismatch — restoring text only"
           );
         }
-        if (refs.length === 0 && draft.refs_count > 0) {
-          // IDB lost — fall back to text-only restore.
+        // Drop the partial set so the user doesn't get a confusing
+        // mix of stale references next to fresh text. Best-effort
+        // wipe the now-orphaned IDB record too.
+        refs = [];
+        if (userId) {
+          draftDB.clearRefs(userId).catch(() => {});
         }
       }
 

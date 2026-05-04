@@ -555,10 +555,10 @@ export default function CreatePage() {
         setSubmitting(true);
         try {
           const response = await createJob({ payload: enriched, references: refs });
-          // FE-04: feed the response straight into the archive store so the
-        // page we navigate to renders the QUEUED card immediately.
-        // The store also persists it to IndexedDB so a reload survives.
-        await archiveStore.insertOptimistic(response);
+          // FE-04: feed the response straight into the archive store so
+          // the page we navigate to renders the QUEUED card immediately.
+          // The store also persists it to IndexedDB so a reload survives.
+          await archiveStore.insertOptimistic(response);
           clientRequestIdRef.current = null;
           clearDraft({ silent: true });
           navigate("/archive");

@@ -65,6 +65,9 @@ export default function DraftToast({ value }) {
       data-kind={value.kind}
       data-visible={value.visible ? "true" : "false"}
       key={value.key}
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
       style={{
         display: "inline-flex",
         alignItems: "center",
