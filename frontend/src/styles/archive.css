@@ -725,3 +725,62 @@
     animation: none;
   }
 }
+
+/* ------------------------------------------------------------------
+ * Filter / sort transitions
+ * Used by FilterPopover, SortDropdown, ChipStrip, PaginationPager,
+ * and ArchiveNoMatches. Keep these in one place so the easings stay
+ * coherent across the toolbar surface.
+ * ------------------------------------------------------------------ */
+
+/* Popover & dropdown — soft drop with a touch of overshoot. */
+@keyframes popOpen {
+  0%   { opacity: 0; transform: translateY(-6px) scale(.97); }
+  60%  { opacity: 1; transform: translateY(1px) scale(1.005); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes popClose {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to   { opacity: 0; transform: translateY(-4px) scale(.98); }
+}
+.archive-pop-open  { animation: popOpen  180ms cubic-bezier(.22,.85,.22,1) both; }
+.archive-pop-close { animation: popClose 140ms cubic-bezier(.4,0,.7,.2) both; }
+
+/* Filter property switch — smooth left/right swap on the right panel.
+ * Each panel fades + slides 6px in from below. */
+@keyframes propPanelIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.archive-prop-panel { animation: propPanelIn 200ms cubic-bezier(.22,.85,.22,1) both; }
+
+/* Chip enter — scale + fade from the chip-strip's left anchor. */
+@keyframes chipIn {
+  from { opacity: 0; transform: scale(.7); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* Trigger badge pop — for the "1" notification on `+ filter`. */
+@keyframes chipBadgePop {
+  0%   { transform: scale(.4); opacity: 0; }
+  60%  { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* No-matches frame — gentle fade-in so it doesn't feel jarring when the
+ * grid disappears. */
+@keyframes noMatchesIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .archive-pop-open,
+  .archive-pop-close,
+  .archive-prop-panel,
+  [data-testid='archive-no-matches'],
+  [data-testid^='chip-']:not([data-testid^='chip-remove-']),
+  [aria-label$='filters applied'] {
+    animation: none !important;
+  }
+}

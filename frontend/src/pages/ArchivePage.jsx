@@ -50,9 +50,10 @@ import {
 } from "../components/archive/archiveFilter.js";
 import FilterPopover from "../components/archive/FilterPopover.jsx";
 import SortDropdown from "../components/archive/SortDropdown.jsx";
-import ChipStrip from "../components/archive/ChipStrip.jsx";
+import ChipStrip, { FilterTrigger } from "../components/archive/ChipStrip.jsx";
 import PaginationPager from "../components/archive/PaginationPager.jsx";
 import PullMembrane from "../components/archive/PullMembrane.jsx";
+import ArchiveNoMatches from "../components/archive/ArchiveNoMatches.jsx";
 import useArchivePagination from "../hooks/useArchivePagination.js";
 
 // ---------------------------------------------------------------------------
@@ -781,28 +782,18 @@ export default function ArchivePage() {
               marginTop: 14,
               display: "flex",
               alignItems: "center",
-              gap: 14,
+              gap: 12,
               flexWrap: "nowrap",
               minHeight: 40,
               minWidth: 0,
             }}
           >
-            <div
-              ref={filterTriggerRef}
-              style={{
-                position: "relative",
-                flex: "1 1 0",
-                minWidth: 0,
-                display: "flex",
-                alignItems: "center",
-              }}
-            >
-              <ChipStrip
-                applied={applied}
-                dynamic={dynamicOptions}
-                chipCount={totalChips}
-                onChange={(next) => setApplied(next)}
-                onAddFilter={() => setFilterOpen((o) => !o)}
+            {/* Trigger lives outside the scrollable strip so its
+                top-right notification badge is never clipped. */}
+            <div ref={filterTriggerRef} style={{ position: "relative", flexShrink: 0 }}>
+              <FilterTrigger
+                count={totalChips}
+                onClick={() => setFilterOpen((o) => !o)}
               />
               {filterOpen && (
                 <FilterPopover
@@ -817,6 +808,11 @@ export default function ArchivePage() {
                 />
               )}
             </div>
+            <ChipStrip
+              applied={applied}
+              dynamic={dynamicOptions}
+              onChange={(next) => setApplied(next)}
+            />
 
             <div
               data-testid="archive-matches"
@@ -886,36 +882,7 @@ export default function ArchivePage() {
           {showEmpty && <ArchiveEmptyHero />}
 
           {showNoMatches && (
-            <div
-              data-testid="archive-no-matches"
-              style={{
-                marginTop: 60,
-                padding: "40px 20px",
-                textAlign: "center",
-                fontFamily: "var(--font-mono)",
-                fontSize: 13,
-                color: "var(--ink-3)",
-                border: "1px dashed var(--ink-3)",
-              }}
-            >
-              No items match your filters.
-              <br />
-              <button
-                onClick={() => setApplied(EMPTY_FILTER)}
-                style={{
-                  marginTop: 12,
-                  background: "transparent",
-                  border: "1px solid var(--ink)",
-                  padding: "6px 12px",
-                  cursor: "pointer",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 11,
-                  color: "var(--ink)",
-                }}
-              >
-                clear filters
-              </button>
-            </div>
+            <ArchiveNoMatches onClear={() => setApplied(EMPTY_FILTER)} />
           )}
 
           {!showEmpty && !showNoMatches && (
