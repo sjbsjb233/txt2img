@@ -19,11 +19,7 @@ import json
 
 import pytest
 
-from app.adapters.openai_v1 import (
-    OpenAIV1Adapter,
-    parse_custom_size,
-    validate_custom_size,
-)
+from app.adapters.openai_v1 import OpenAIV1Adapter
 from app.domain.job_validator import validate_against_capabilities
 from app.schemas.jobs import JobCreatePayload
 from app.schemas.models import ModelCapabilities
@@ -33,6 +29,10 @@ from app.schemas.normalized import (
     StandardError,
     StandardErrorKind,
 )
+# The pure helpers live in app.utils.size; the adapter re-exports them
+# for back-compat. We import from utils here so the test suite documents
+# the canonical home.
+from app.utils.size import parse_custom_size, validate_custom_size
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +375,22 @@ def test_selector_capabilities_match_accepts_custom_size_when_opted_in():
     }
     assert _capabilities_match(caps_with_optin, request) is True
     assert _capabilities_match(caps_without_optin, request) is False
+
+
+def test_size_helpers_are_in_utils_not_adapter():
+    """Layering check: ``app.utils.size`` is the canonical home for the
+    pure size helpers. Adapter still re-exports them for back-compat,
+    but the validator (a domain module) MUST import them from utils so
+    a future ``import job_validator`` doesn't drag adapter / httpx in."""
+    import app.domain.job_validator as jv
+    import app.utils.size as us
+
+    assert jv.validate_custom_size is us.validate_custom_size
+
+    # And the adapter's re-export resolves to the same function object.
+    from app.adapters.openai_v1 import validate_custom_size as adapter_re
+
+    assert adapter_re is us.validate_custom_size
 
 
 def test_selector_capabilities_match_thinking_filter():

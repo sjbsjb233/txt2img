@@ -73,20 +73,6 @@ _ALLOWED_QUALITY = {"low", "medium", "high", "auto"}
 _ALLOWED_SIZE_PRESETS = {"1024x1024", "1536x1024", "1024x1536", "auto"}
 _ALLOWED_THINKING = {"off", "low", "medium", "high"}
 
-# OpenAI gpt-image-2 v2 custom-size constraints.
-#
-# Both width and height must be multiples of 16, the longest edge ≤ 3840,
-# total pixels in [655_360, 8_294_400], and aspect ratio (max/min) ≤ 3.0.
-# Sizes >2560x1440 are documented as "experimental" — accepted but
-# stability isn't guaranteed by upstream. We accept them with no
-# distinction here; the admin's ``size`` whitelist (or
-# ``size_allow_custom``) decides whether to expose them.
-_CUSTOM_SIZE_MIN_PIXELS = 655_360
-_CUSTOM_SIZE_MAX_PIXELS = 8_294_400
-_CUSTOM_SIZE_MAX_EDGE = 3840
-_CUSTOM_SIZE_MAX_RATIO = 3.0
-_CUSTOM_SIZE_MULTIPLE = 16
-
 # How many characters of an upstream response body to keep around for
 # debug logs. Enough to see error.message but not enough to dump base64.
 _BODY_EXCERPT_CHARS = 800
@@ -94,51 +80,11 @@ _BODY_EXCERPT_CHARS = 800
 _PROMPT_MAX_CHARS = 32_000
 
 
-def parse_custom_size(raw: str) -> tuple[int, int]:
-    """Decode ``"WIDTHxHEIGHT"`` to ``(w, h)``. Raises ``ValueError`` on
-    malformed input. Both digits required, lower-case ``x`` only.
-    """
-    if not isinstance(raw, str) or "x" not in raw:
-        raise ValueError("size must look like 'WIDTHxHEIGHT'")
-    left, _, right = raw.partition("x")
-    if not left.isdigit() or not right.isdigit():
-        raise ValueError("size must look like 'WIDTHxHEIGHT'")
-    return int(left), int(right)
-
-
-def validate_custom_size(raw: str) -> tuple[bool, str]:
-    """Return ``(ok, reason)`` for a custom (non-preset) size string.
-
-    Encodes the OpenAI gpt-image-2 v2 documented contract:
-
-    1. Both width and height multiples of 16.
-    2. Longest edge ≤ 3840.
-    3. Total pixels in [655_360, 8_294_400].
-    4. Aspect ratio (max/min) ≤ 3:1.
-
-    The "experimental >2K" caveat is **not** an error here — those sizes
-    are accepted at the wire level. Admins can still cap with
-    ``size`` / ``size_allow_custom`` if they want to gate access.
-    """
-    try:
-        w, h = parse_custom_size(raw)
-    except ValueError as exc:
-        return False, str(exc)
-    if w <= 0 or h <= 0:
-        return False, "size dimensions must be positive"
-    if w % _CUSTOM_SIZE_MULTIPLE or h % _CUSTOM_SIZE_MULTIPLE:
-        return False, f"width and height must both be multiples of {_CUSTOM_SIZE_MULTIPLE}"
-    if max(w, h) > _CUSTOM_SIZE_MAX_EDGE:
-        return False, f"longest edge must be ≤ {_CUSTOM_SIZE_MAX_EDGE}px"
-    pixels = w * h
-    if pixels < _CUSTOM_SIZE_MIN_PIXELS:
-        return False, f"total pixels must be ≥ {_CUSTOM_SIZE_MIN_PIXELS}"
-    if pixels > _CUSTOM_SIZE_MAX_PIXELS:
-        return False, f"total pixels must be ≤ {_CUSTOM_SIZE_MAX_PIXELS}"
-    ratio = max(w, h) / min(w, h)
-    if ratio > _CUSTOM_SIZE_MAX_RATIO:
-        return False, f"aspect ratio {ratio:.2f}:1 exceeds {_CUSTOM_SIZE_MAX_RATIO:.0f}:1 cap"
-    return True, ""
+# Pure size helpers live in app.utils.size to keep the validator's
+# import graph free of adapter-layer dependencies (httpx etc). Re-export
+# here for backward compat with existing tests that import them from
+# this module — the adapter is the historical home, not the canonical one.
+from app.utils.size import parse_custom_size, validate_custom_size  # noqa: E402,F401
 
 
 class OpenAIV1Adapter(BaseAdapter):

@@ -21,9 +21,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.adapters.openai_v1 import validate_custom_size
 from app.schemas.jobs import JobCreatePayload
 from app.schemas.models import ModelCapabilities
+from app.utils.size import validate_custom_size
 
 
 @dataclass(frozen=True)

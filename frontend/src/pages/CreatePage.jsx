@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import Icon from "../components/Icon.jsx";
 import TopBar from "../components/TopBar.jsx";
 import TurnstileModal from "../components/TurnstileModal.jsx";
-import SizeCustomModal from "../components/SizeCustomModal.jsx";
+import SizeCustomModal, { isValidSize } from "../components/SizeCustomModal.jsx";
 import DraftToast from "../components/DraftToast.jsx";
 import { getModels } from "../api/models.js";
 import { createJob, precheck as precheckJob } from "../api/jobs.js";
@@ -195,14 +195,20 @@ function reconcileParams(params, capabilities, uiSchema) {
       // trips the backend's INVALID_PARAMETER guard.
       //
       // Special case: ``size`` is allowed to hold a value outside the
-      // chip list when ``capabilities.size_allow_custom`` is true. The
-      // backend validator will check the custom format itself; we just
-      // need to keep the value alive across re-renders.
-      const isCustomSizeOptIn =
-        field.k === "size" && capabilities?.size_allow_custom === true;
+      // chip list when ``capabilities.size_allow_custom`` is true — but
+      // only if the value still parses as a 5-rule-compliant
+      // ``WIDTHxHEIGHT``. Without that gate, a stale ``auto`` (when the
+      // admin removed it from caps) or any non-string would survive
+      // model swaps and trip the backend's INVALID_PARAMETER guard.
+      const isCustomSizeKeep =
+        field.k === "size" &&
+        capabilities?.size_allow_custom === true &&
+        typeof cur === "string" &&
+        /^\d+x\d+$/.test(cur) &&
+        isValidSize(...cur.split("x").map(Number)).ok;
       if (
         cur != null &&
-        !isCustomSizeOptIn &&
+        !isCustomSizeKeep &&
         (!Array.isArray(cap) || !cap.includes(cur))
       ) {
         delete next[pk];
