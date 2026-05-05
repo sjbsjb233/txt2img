@@ -69,6 +69,7 @@ DIR_UPSTREAM = "upstream"
 
 META_FILENAME = "meta.json"
 TIMELINE_FILENAME = "timeline.jsonl"
+ROUTING_FILENAME = "routing.json"
 
 # Mapping from MIME type to the on-disk extension we want to use. We cap
 # this at the formats Pillow can read/write reliably for the project's
@@ -247,6 +248,11 @@ def path_for_upstream_log(hash_id: str, attempt: int) -> Path:
     return path_for_upstream_dir(hash_id) / f"attempt_{attempt}.json"
 
 
+def path_for_routing(hash_id: str) -> Path:
+    """Path for ``routing.json`` (admin-only routing trace dump)."""
+    return path_for_job(hash_id) / ROUTING_FILENAME
+
+
 def _safe_basename(name: str) -> str:
     """Strip a user-supplied filename down to a conservative safe form.
 
@@ -310,6 +316,37 @@ def save_reference(
     target = build_reference_path(hash_id, order, original_filename, mime)
     target.write_bytes(image_bytes)
     return str(target.relative_to(_data_root()))
+
+
+def clone_reference(
+    *,
+    src_rel_path: str,
+    dst_hash_id: str,
+    order: int,
+    original_filename: str,
+    mime: str,
+) -> str | None:
+    """Copy a reference file from one job dir to another.
+
+    Used by ``admin.job.requeue`` so a requeued job's references stop
+    pointing at the source job's directory — otherwise cleanup of the
+    original job (T+30 purge) would silently break the new job's
+    reference thumbnails.
+
+    Returns the new ``rel_path`` on success, or ``None`` when the
+    source file is missing on disk (caller decides whether to fall
+    back to the legacy shared path).
+    """
+    data_root = _data_root()
+    src_abs = (data_root / src_rel_path).resolve()
+    if not src_abs.exists() or not src_abs.is_file():
+        return None
+    if not src_abs.is_relative_to(data_root):
+        return None
+    ensure_job_dirs(dst_hash_id)
+    dst_abs = build_reference_path(dst_hash_id, order, original_filename, mime)
+    dst_abs.write_bytes(src_abs.read_bytes())
+    return str(dst_abs.relative_to(data_root))
 
 
 def make_thumbnail(
@@ -414,6 +451,111 @@ def write_upstream_log(
         encoding="utf-8",
     )
     return target
+
+
+def read_upstream_log(hash_id: str, attempt: int) -> dict[str, Any] | None:
+    """Read one ``upstream/attempt_<n>.json``. Returns None if absent."""
+    target = path_for_upstream_log(hash_id, attempt)
+    if not target.exists():
+        return None
+    try:
+        return json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def list_upstream_attempts(hash_id: str) -> list[int]:
+    """Return the sorted attempt numbers present on disk for the job."""
+    validate_hash_id(hash_id)
+    upstream = path_for_upstream_dir(hash_id)
+    if not upstream.exists():
+        return []
+    out: list[int] = []
+    pat = re.compile(r"^attempt_(\d+)\.json$")
+    for entry in os.scandir(upstream):
+        m = pat.match(entry.name)
+        if m:
+            try:
+                out.append(int(m.group(1)))
+            except ValueError:
+                continue
+    out.sort()
+    return out
+
+
+def write_routing_trace(hash_id: str, payload: dict[str, Any]) -> Path:
+    """Persist the admin-only routing decision trace.
+
+    Append-only from the executor's perspective: the selector writes it
+    once per job and the executor follows up with
+    :func:`update_routing_chosen` after the winning provider is known.
+    Failures here are best-effort — callers wrap the call in a
+    try/except logger.warning so a write failure never blocks job
+    execution.
+    """
+    ensure_job_dirs(hash_id)
+    target = path_for_routing(hash_id)
+    tmp = target.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    os.replace(tmp, target)
+    return target
+
+
+def read_routing_trace(hash_id: str) -> dict[str, Any] | None:
+    """Read ``routing.json`` for the job. Returns None when absent."""
+    target = path_for_routing(hash_id)
+    if not target.exists():
+        return None
+    try:
+        return json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def update_routing_chosen(hash_id: str, provider_id: str) -> None:
+    """Patch ``routing.json`` so the chosen scored row is flagged.
+
+    No-op if the file is missing (legacy job) or already records a
+    different chosen provider — we never overwrite history.
+    """
+    payload = read_routing_trace(hash_id)
+    if not payload:
+        return
+    scored = payload.get("scored")
+    if not isinstance(scored, list):
+        return
+    for row in scored:
+        if isinstance(row, dict):
+            row["chosen"] = bool(row.get("provider_id") == provider_id)
+    write_routing_trace(hash_id, payload)
+
+
+def read_timeline(hash_id: str) -> list[dict[str, Any]]:
+    """Return parsed ``timeline.jsonl`` rows. Empty list when absent or
+    the file is unreadable; bad lines are skipped silently.
+    """
+    target = path_for_timeline(hash_id)
+    if not target.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        with target.open("r", encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    record = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(record, dict):
+                    out.append(record)
+    except OSError:
+        return []
+    return out
 
 
 # ---------------------------------------------------------------------------

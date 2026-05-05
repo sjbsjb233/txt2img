@@ -69,6 +69,8 @@ from typing import Any, Mapping, Sequence
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import asyncio
+
 from app.db.engine import get_session
 from app.db.models import (
     Provider,
@@ -89,6 +91,7 @@ from app.domain.runtime_configs import (
 )
 from app.domain.tier_config import TierConfig, get_tier_config
 from app.schemas.normalized import NormalizedRequest
+from app.services import image_io
 
 logger = logging.getLogger("txt2img.selector")
 
@@ -176,6 +179,7 @@ class ProviderSelector:
         request: NormalizedRequest,
         *,
         top_k: int | None = None,
+        hash_id: str | None = None,
     ) -> list[ScoredCandidate]:
         """Return providers ranked by score for ``user`` + ``request``.
 
@@ -187,18 +191,79 @@ class ProviderSelector:
         ``top_k`` defaults to ``provider_scoring.fallback_top_k``. We
         compute scores for every passing candidate and only truncate
         at the end so the top-1 winner is the global maximum.
+
+        When ``hash_id`` is supplied the full filter+score trace is
+        persisted to ``data/jobs/<hash_id>/routing.json`` so the admin
+        inspector can reconstruct the decision after the fact.
         """
+        filtered_out: list[dict[str, Any]] = []
         async with get_session() as session:
-            candidates = await self._hard_filter(session, user, request)
+            pool_total, candidates = await self._hard_filter(
+                session, user, request, filtered_out=filtered_out
+            )
 
         if not candidates:
+            await self._persist_trace(
+                hash_id,
+                pool_total=pool_total,
+                filtered_out=filtered_out,
+                scored=[],
+            )
             return []
 
         scored = self._score_all(user, request, candidates)
         scored.sort(key=lambda c: c.score, reverse=True)
 
+        await self._persist_trace(
+            hash_id,
+            pool_total=pool_total,
+            filtered_out=filtered_out,
+            scored=scored,
+        )
+
         k = top_k if top_k is not None else self._fallback_top_k()
         return scored[:k]
+
+    async def _persist_trace(
+        self,
+        hash_id: str | None,
+        *,
+        pool_total: int,
+        filtered_out: list[dict[str, Any]],
+        scored: list[ScoredCandidate],
+    ) -> None:
+        if not hash_id:
+            return
+        try:
+            scored_dump: list[dict[str, Any]] = []
+            for rank, sc in enumerate(scored, start=1):
+                scored_dump.append(
+                    {
+                        "rank": rank,
+                        "provider_id": sc.provider.provider_id,
+                        "label": sc.provider.label,
+                        "components": dict(sc.components),
+                        "total_score": float(sc.score),
+                        "chosen": False,
+                    }
+                )
+            payload = {
+                "pool_total": int(pool_total),
+                "pool_survived": len(scored),
+                "pool_scored": len(scored_dump),
+                "filtered_out": filtered_out,
+                "scored": scored_dump,
+                "selector_config": dict(self._scoring.weights),
+            }
+            await asyncio.to_thread(
+                image_io.write_routing_trace, hash_id, payload
+            )
+        except Exception:  # pragma: no cover
+            logger.warning(
+                "selector: failed to persist routing trace for job=%s",
+                hash_id,
+                exc_info=True,
+            )
 
     # -- stage 1: hard filter --------------------------------------------
 
@@ -207,14 +272,41 @@ class ProviderSelector:
         session: AsyncSession,
         user: User,
         request: NormalizedRequest,
-    ) -> list[CandidateProvider]:
+        *,
+        filtered_out: list[dict[str, Any]] | None = None,
+    ) -> tuple[int, list[CandidateProvider]]:
         """Run the §7.4 hard checks and return surviving providers.
+
+        Returns ``(pool_total, candidates)`` so callers tracking the
+        admin routing trace can report how many providers were
+        considered before any filter ran. ``filtered_out`` is mutated
+        in-place when supplied so the same single pass through the
+        provider list does double duty.
 
         Single bulk query for providers + per-model rows + tier-access.
         N+1 here would be a real problem at catalog scale; one
         round-trip per join keeps the path predictable.
         """
+        def _drop(provider_id: str, label: str, reason: str, detail: str | None = None) -> None:
+            if filtered_out is None:
+                return
+            filtered_out.append(
+                {
+                    "provider_id": provider_id,
+                    "label": label,
+                    "reason": reason,
+                    "detail": detail,
+                }
+            )
+
         # 1. Providers that are enabled and have a row for the model.
+        # Pool total includes all enabled providers, regardless of model.
+        pool_total = (
+            await session.execute(
+                select(Provider).where(Provider.enabled == 1)
+            )
+        ).scalars().all()
+        pool_total_count = len(pool_total)
         rows = (
             await session.execute(
                 select(Provider, ProviderModel)
@@ -230,7 +322,15 @@ class ProviderSelector:
             )
         ).all()
         if not rows:
-            return []
+            # All enabled providers lack the model — record them.
+            for p in pool_total:
+                _drop(p.id, p.label, "model_not_supported")
+            return pool_total_count, []
+        # Mark enabled providers that aren't connected to this model.
+        connected_ids = {p.id for (p, _m) in rows}
+        for p in pool_total:
+            if p.id not in connected_ids:
+                _drop(p.id, p.label, "model_not_supported")
 
         provider_ids = [p.id for (p, _m) in rows]
 
@@ -285,11 +385,18 @@ class ProviderSelector:
             if allowed is None:
                 allowed = provider_tiers.get(provider.id, set())
             if user.tier not in allowed:
+                _drop(
+                    provider.id,
+                    provider.label,
+                    "tier_denied",
+                    f"tier {user.tier!r} not in {sorted(allowed) or '∅'}",
+                )
                 continue
 
             # 3b. Capabilities.
             caps = _safe_load_caps(model_row.capabilities_json)
             if not _capabilities_match(caps, request):
+                _drop(provider.id, provider.label, "capability_mismatch")
                 continue
 
             # 3c. Balance threshold. Sub-threshold → DRAINED via the
@@ -299,6 +406,12 @@ class ProviderSelector:
                 # writes the DB; for a small number of low-balance
                 # providers this is fine.
                 await self._breaker.mark_drained(provider.id)
+                _drop(
+                    provider.id,
+                    provider.label,
+                    "balance_low",
+                    f"balance ¥{provider.balance_cny:.2f} < ¥{balance_threshold:.2f}",
+                )
                 continue
 
             # 3d. Circuit state. HEALTHY only. The breaker is the sole
@@ -312,6 +425,17 @@ class ProviderSelector:
             # failure if the call fails.
             persisted_state = provider.circuit_state or HEALTHY
             if persisted_state != HEALTHY:
+                reason = (
+                    "circuit_drained"
+                    if persisted_state == "drained"
+                    else "circuit_open"
+                )
+                _drop(
+                    provider.id,
+                    provider.label,
+                    reason,
+                    f"state={persisted_state}",
+                )
                 continue
 
             # 3e. Concurrency cap.
@@ -319,10 +443,22 @@ class ProviderSelector:
                 self._metrics.current_concurrency(provider.id)
                 >= int(provider.max_concurrency)
             ):
+                _drop(
+                    provider.id,
+                    provider.label,
+                    "concurrency_full",
+                    f"{self._metrics.current_concurrency(provider.id)}/{provider.max_concurrency}",
+                )
                 continue
 
             # 3f. RPM cap (per minute) — bulk lookup, see 3-pre.
             if recent_calls_by_pid.get(provider.id, 0) >= int(provider.rpm_limit):
+                _drop(
+                    provider.id,
+                    provider.label,
+                    "rpm_full",
+                    f"{recent_calls_by_pid.get(provider.id, 0)}/{provider.rpm_limit} rpm",
+                )
                 continue
 
             candidates.append(
@@ -340,7 +476,7 @@ class ProviderSelector:
                 )
             )
 
-        return candidates
+        return pool_total_count, candidates
 
     # -- stage 2: scoring -------------------------------------------------
 
