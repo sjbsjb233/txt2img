@@ -352,7 +352,9 @@ async def get_image_thumb(
     mtime so clients can revalidate cheaply with ``If-None-Match``.
     """
     _check_image_access_allowed(user)
-    job = await _load_owned_job(hash_id, user.id)
+    job = await _load_owned_job(
+        hash_id, user.id, admin_bypass=user.role == "admin"
+    )
     img = await _load_image(job.id, order)
 
     abs_path = _resolve_under_data_root(img.thumb_path)
@@ -379,7 +381,9 @@ async def get_image_original(
     into memory.
     """
     _check_image_access_allowed(user)
-    job = await _load_owned_job(hash_id, user.id)
+    job = await _load_owned_job(
+        hash_id, user.id, admin_bypass=user.role == "admin"
+    )
     img = await _load_image(job.id, order)
 
     abs_path = _resolve_under_data_root(img.original_path)
@@ -420,7 +424,9 @@ async def get_reference_thumb(
     can use the same shape as output thumbnails.
     """
     _check_image_access_allowed(user)
-    job = await _load_owned_job(hash_id, user.id)
+    job = await _load_owned_job(
+        hash_id, user.id, admin_bypass=user.role == "admin"
+    )
     ref = await _load_reference(job.id, order)
 
     abs_path = _resolve_under_data_root(ref.rel_path)
@@ -480,18 +486,23 @@ async def post_image_star(
 # ---------------------------------------------------------------------------
 
 
-async def _load_owned_job(hash_id: str, user_id: str) -> Job:
-    """Fetch a job row owned by ``user_id`` or 404. Filters out DELETED."""
+async def _load_owned_job(
+    hash_id: str, user_id: str, *, admin_bypass: bool = False
+) -> Job:
+    """Fetch a job row owned by ``user_id`` or 404. Filters out DELETED.
+
+    When ``admin_bypass`` is set the ownership predicate is dropped so
+    admin-tooling routes (e.g. the inline JobInspector under the admin
+    user drawer) can stream images for any user's job.
+    """
     async with get_session() as session:
-        row = (
-            await session.execute(
-                select(Job).where(
-                    Job.hash_id == hash_id,
-                    Job.user_id == user_id,
-                    Job.status.in_(_VISIBLE_STATUSES),
-                )
-            )
-        ).scalar_one_or_none()
+        q = select(Job).where(
+            Job.hash_id == hash_id,
+            Job.status.in_(_VISIBLE_STATUSES),
+        )
+        if not admin_bypass:
+            q = q.where(Job.user_id == user_id)
+        row = (await session.execute(q)).scalar_one_or_none()
     if row is None:
         raise api_error(404, "NOT_FOUND", "Job not found.", field="hash_id")
     return row
