@@ -142,9 +142,16 @@ test("01 — admin adds a provider via the UI with thinking + size_allow_custom"
     await chip.click().catch(() => {});
   }
 
-  // Toggle ``size_allow_custom`` to true.
+  // Toggle ``size_allow_custom`` to true. Scroll into view first
+  // because the field sits at the bottom of the (scrollable) capability
+  // editor — useful both for the e2e and for the screenshot we attach.
   const sizeAllow = page.getByTestId("cap-field-size_allow_custom");
+  await sizeAllow.scrollIntoViewIfNeeded();
   await sizeAllow.locator("select").selectOption("true");
+  await page.screenshot({
+    path: "tests-e2e/_screenshots/full_02b_size_allow_custom_visible.png",
+    fullPage: false,
+  });
 
   // n_max — set to 4 so the gpt-image-2 default ``n=4`` doesn't get
   // filtered out by the validator on submit.
