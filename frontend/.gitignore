@@ -6,7 +6,3 @@ dist
 .env
 .env.local
 .env.*.local
-# Playwright artifacts produced by ``pnpm run test:e2e``
-test-results
-playwright-report
-tests-e2e/_screenshots
