@@ -213,7 +213,7 @@ function LifecycleStrip({ lifecycle }) {
   );
 }
 
-function UserStateChips({ state }) {
+function UserStateChips({ state, synthetic = false }) {
   if (!state) {
     return (
       <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
@@ -229,49 +229,102 @@ function UserStateChips({ state }) {
     : "default";
   const softTone = state.soft_quota_triggered ? "warn" : "ok";
   return (
-    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-      <Chip label="tier" value={state.tier} />
-      <Chip
-        label="quota"
-        value={`${state.today_count} / ${state.hard_quota_effective}`}
-      />
-      <Chip
-        label="soft"
-        value={state.soft_quota_triggered ? "triggered" : "below"}
-        tone={softTone}
-      />
-      <Chip
-        label="captcha"
-        value={
-          state.captcha_required
-            ? state.captcha_verified
-              ? "verified"
-              : "required"
-            : "n/a"
-        }
-        tone={captchaTone}
-      />
-      <Chip
-        label="recent fail-rate"
-        value={`${state.recent_fail_rate_n} / ${state.recent_fail_rate_total}`}
-        tone={failTone}
-      />
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      {synthetic && (
+        <div
+          style={{
+            padding: "4px 8px",
+            border: "1px dashed var(--ink-3)",
+            color: "var(--ink-3)",
+            fontFamily: "var(--font-mono)",
+            fontSize: 10,
+          }}
+        >
+          no dispatch-time snapshot recorded · showing current user
+          values from the DB instead of historical state
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <Chip label="tier" value={state.tier} />
+        <Chip
+          label="quota"
+          value={`${state.today_count} / ${state.hard_quota_effective}`}
+        />
+        <Chip
+          label="soft"
+          value={state.soft_quota_triggered ? "triggered" : "below"}
+          tone={softTone}
+        />
+        <Chip
+          label="captcha"
+          value={
+            state.captcha_required
+              ? state.captcha_verified
+                ? "verified"
+                : "required"
+              : "n/a"
+          }
+          tone={captchaTone}
+        />
+        <Chip
+          label="recent fail-rate"
+          value={`${state.recent_fail_rate_n} / ${state.recent_fail_rate_total}`}
+          tone={failTone}
+        />
+      </div>
     </div>
   );
 }
 
-function RoutingPool({ routing }) {
+function RoutingPool({ routing, degraded }) {
+  // The backend now synthesises a minimal trace (chosen provider only)
+  // when routing.json is absent on disk, so a fully ``null`` payload
+  // means one of two distinct things:
+  //   - ``routing_corrupt`` in degraded_sections → the file existed
+  //     on disk but the bytes failed to decode (storage corruption,
+  //     half-flushed write, mismatched schema). Tell the admin to go
+  //     look at the raw file rather than implying it was never
+  //     written.
+  //   - otherwise → the chosen provider couldn't be derived either
+  //     (e.g. job failed admission with no provider_used), so there
+  //     is genuinely nothing to show.
   if (!routing) {
+    const corrupt = !!degraded?.includes("routing_corrupt");
     return (
       <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
-        routing trace unavailable (legacy job)
+        {corrupt
+          ? "routing trace exists on disk but failed to decode — check data/jobs/<hash>/routing.json for corruption."
+          : "no routing trace available — this job either ran before per-job traces were persisted or never reached the routing stage."}
       </div>
     );
   }
   const filtered = routing.filtered_out || [];
   const scored = routing.scored || [];
+  // Synthetic / minimal traces have no filtered_out and a single
+  // scored row whose component breakdown is empty — surface that fact
+  // clearly so admins don't read meaningful scoring into a placeholder.
+  const isSynthetic =
+    !!degraded?.includes("routing") &&
+    filtered.length === 0 &&
+    scored.length <= 1 &&
+    scored.every(
+      (s) => !s.components || Object.keys(s.components).length === 0,
+    );
   return (
     <div style={{ fontFamily: "var(--font-mono)", fontSize: 11 }}>
+      {isSynthetic && (
+        <div
+          style={{
+            marginBottom: 8,
+            padding: "4px 8px",
+            border: "1px dashed var(--ink-3)",
+            color: "var(--ink-3)",
+            fontSize: 10,
+          }}
+        >
+          historical trace not recorded · showing chosen provider only
+        </div>
+      )}
       <div data-testid="ji-routing-summary" style={{ color: "var(--ink-3)" }}>
         {routing.pool_total} registered ·{" "}
         <strong style={{ color: "var(--ink)" }}>
@@ -960,12 +1013,20 @@ export default function JobInspector({ hashId }) {
 
       <div style={{ marginBottom: 14 }}>
         <SectionTitle>USER STATE AT DISPATCH</SectionTitle>
-        <UserStateChips state={inspect.user_state_at_submit} />
+        <UserStateChips
+          state={inspect.user_state_at_submit}
+          synthetic={
+            !!inspect.degraded_sections?.includes("user_state_synthetic")
+          }
+        />
       </div>
 
       <div style={{ marginBottom: 14 }}>
         <SectionTitle>ROUTING — PROVIDER POOL</SectionTitle>
-        <RoutingPool routing={inspect.routing} />
+        <RoutingPool
+          routing={inspect.routing}
+          degraded={inspect.degraded_sections}
+        />
       </div>
 
       <div style={{ marginBottom: 14 }}>
