@@ -611,6 +611,7 @@ _LIST_PARAM_KEYS: tuple[tuple[str, str], ...] = (
     ("output_format", "output_format"),
     ("background", "background"),
     ("moderation", "moderation"),
+    ("thinking", "thinking"),
     ("thinking_level", "thinking_level"),
 )
 
@@ -641,6 +642,15 @@ def _capabilities_match(caps: Mapping[str, Any], request: NormalizedRequest) -> 
         if req_value is None:
             continue
         if req_value not in cap_values:
+            # Custom-size escape hatch (mirrors job_validator's logic):
+            # when the provider opts into ``size_allow_custom``, any
+            # WIDTHxHEIGHT that already cleared the validator's strict
+            # 5-rule check is acceptable here too. Without this branch,
+            # a user-picked custom size would never reach a provider
+            # that opted into custom even though the validator already
+            # said the size is fine.
+            if req_field == "size" and caps.get("size_allow_custom") is True:
+                continue
             return False
 
     # 2. n_max

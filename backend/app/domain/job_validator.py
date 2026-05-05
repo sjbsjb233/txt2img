@@ -23,6 +23,7 @@ from dataclasses import dataclass
 
 from app.schemas.jobs import JobCreatePayload
 from app.schemas.models import ModelCapabilities
+from app.utils.size import validate_custom_size
 
 
 @dataclass(frozen=True)
@@ -64,14 +65,16 @@ def validate_against_capabilities(
         )
 
     # 2. List-valued discrete choices. Each pair: payload field + cap field.
+    # ``size`` is checked separately below because it has an opt-in escape
+    # hatch (``size_allow_custom``) for arbitrary WIDTHxHEIGHT.
     list_pairs: tuple[tuple[str, str | None, list[str] | None], ...] = (
-        ("size", payload.size, caps.size),
         ("aspect_ratio", payload.aspect_ratio, caps.aspect_ratio),
         ("image_size", payload.image_size, caps.image_size),
         ("quality", payload.quality, caps.quality),
         ("output_format", payload.output_format, caps.output_format),
         ("background", payload.background, caps.background),
         ("moderation", payload.moderation, caps.moderation),
+        ("thinking", payload.thinking, caps.thinking),
         ("thinking_level", payload.thinking_level, caps.thinking_level),
     )
     for field, value, allowed in list_pairs:
@@ -94,6 +97,46 @@ def validate_against_capabilities(
                     f"{sorted(allowed)} for model {payload.model!r}."
                 ),
             )
+
+    # 2a. ``size`` — a value listed in ``caps.size`` is always accepted.
+    # Anything else is treated as a *custom* size and must (a) be opted-in
+    # via ``caps.size_allow_custom`` and (b) satisfy OpenAI gpt-image-2
+    # v2's documented contract (16-multiple, max-edge 3840, total-pixels
+    # 655 360 – 8 294 400, ratio ≤ 3:1). When the user is unreachable to
+    # any provider exposing this field at all, ``caps.size`` is None and
+    # we keep the original "not allowed" semantics.
+    if payload.size is not None:
+        in_preset_list = (
+            isinstance(caps.size, list) and payload.size in caps.size
+        )
+        if not in_preset_list:
+            if caps.size is None and not caps.size_allow_custom:
+                return ValidationFailure(
+                    field="size",
+                    message=(
+                        f"size={payload.size!r} is not allowed for model "
+                        f"{payload.model!r}."
+                    ),
+                )
+            if not caps.size_allow_custom:
+                return ValidationFailure(
+                    field="size",
+                    message=(
+                        f"size={payload.size!r} is not in the allowed set "
+                        f"{sorted(caps.size or [])} for model "
+                        f"{payload.model!r}."
+                    ),
+                )
+            # Provider opts into custom — enforce the 5-rule contract.
+            ok, reason = validate_custom_size(payload.size)
+            if not ok:
+                return ValidationFailure(
+                    field="size",
+                    message=(
+                        f"size={payload.size!r} is not a valid custom size: "
+                        f"{reason}."
+                    ),
+                )
 
     # 3. partial_images upper bound — only meaningful with stream=true.
     if payload.partial_images:

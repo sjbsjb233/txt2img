@@ -102,6 +102,13 @@ class NormalizedRequest(BaseModel):
     output_compression: int | None = Field(default=None, ge=0, le=100)
     background: str | None = None
     moderation: str | None = None
+    # gpt-image-2 v2 controls how much "thinking" the model applies to the
+    # generation. Higher values handle complex compositions better at the
+    # cost of latency. Valid: ``off`` / ``low`` / ``medium`` / ``high``.
+    # Distinct from the gemini ``thinking_level`` field below — both flow
+    # through the same NormalizedRequest but only the matching adapter
+    # forwards them; the other adapter rejects with INVALID_PARAMETER.
+    thinking: str | None = None
     stream: bool = False
     partial_images: int = Field(default=0, ge=0, le=3)
     user: str | None = None

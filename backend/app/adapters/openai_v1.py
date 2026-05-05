@@ -71,12 +71,20 @@ _ALLOWED_OUTPUT_FORMAT = {"png", "jpeg", "webp"}
 _ALLOWED_MODERATION = {"auto", "low"}
 _ALLOWED_QUALITY = {"low", "medium", "high", "auto"}
 _ALLOWED_SIZE_PRESETS = {"1024x1024", "1536x1024", "1024x1536", "auto"}
+_ALLOWED_THINKING = {"off", "low", "medium", "high"}
 
 # How many characters of an upstream response body to keep around for
 # debug logs. Enough to see error.message but not enough to dump base64.
 _BODY_EXCERPT_CHARS = 800
 
 _PROMPT_MAX_CHARS = 32_000
+
+
+# Pure size helpers live in app.utils.size to keep the validator's
+# import graph free of adapter-layer dependencies (httpx etc). Re-export
+# here for backward compat with existing tests that import them from
+# this module — the adapter is the historical home, not the canonical one.
+from app.utils.size import parse_custom_size, validate_custom_size  # noqa: E402,F401
 
 
 class OpenAIV1Adapter(BaseAdapter):
@@ -105,7 +113,12 @@ class OpenAIV1Adapter(BaseAdapter):
             CapabilityFieldList(
                 k="size",
                 options=sorted(_ALLOWED_SIZE_PRESETS),
-                help="Allowed size presets. Empty list disables the control.",
+                help=(
+                    "Allowed size presets. Empty list disables the control. "
+                    "Toggle ``size_allow_custom`` to additionally let users "
+                    "input arbitrary WIDTHxHEIGHT (must satisfy OpenAI's "
+                    "16-multiple / 3:1 / 3840-edge / pixel-budget rules)."
+                ),
             ),
             CapabilityFieldList(
                 k="quality",
@@ -127,6 +140,15 @@ class OpenAIV1Adapter(BaseAdapter):
                 k="moderation",
                 options=sorted(_ALLOWED_MODERATION),
             ),
+            CapabilityFieldList(
+                k="thinking",
+                # Semantic order matches the dial intent (off → high).
+                options=["off", "low", "medium", "high"],
+                help=(
+                    "v2 reasoning dial. Higher = better complex composition, "
+                    "longer latency. Empty list disables the control."
+                ),
+            ),
             CapabilityFieldInt(k="n_max", min=1, max=10),
             CapabilityFieldInt(k="partial_images_max", min=0, max=3),
             CapabilityFieldInt(k="max_reference_images", min=0, max=16),
@@ -142,6 +164,16 @@ class OpenAIV1Adapter(BaseAdapter):
                 help=(
                     "gpt-image-2 does not actually support transparent "
                     "background; reserved for future relays."
+                ),
+            ),
+            CapabilityFieldBool(
+                k="size_allow_custom",
+                help=(
+                    "Let users input arbitrary WIDTHxHEIGHT in addition to "
+                    "the preset chips above. Backend enforces OpenAI v2's "
+                    "16-multiple / 3:1 / max-edge 3840 / 655 360 – "
+                    "8 294 400 px rules. Enable only on relays that honour "
+                    "custom sizes (e.g. canonical OpenAI)."
                 ),
             ),
         ]
@@ -219,6 +251,16 @@ class OpenAIV1Adapter(BaseAdapter):
                 order=40,
                 options=sorted(_ALLOWED_MODERATION),
             ),
+            ModelUIField(
+                k="thinking",
+                control="chip-row",
+                label="Thinking",
+                hint="reasoning depth · v2",
+                group="advanced",
+                order=50,
+                # Semantic order — off → high reads as a dial.
+                options=["off", "low", "medium", "high"],
+            ),
         ]
 
     def _validate(self, request: NormalizedRequest) -> None:
@@ -257,16 +299,18 @@ class OpenAIV1Adapter(BaseAdapter):
             )
 
         if request.size is not None and request.size not in _ALLOWED_SIZE_PRESETS:
-            # Custom resolutions are technically allowed by the design doc
-            # ("超过即视为实验性 2K") — we forward them as-is rather than
-            # block. Only reject obviously malformed strings that aren't
-            # WIDTHxHEIGHT either.
-            if "x" not in request.size or not all(
-                part.isdigit() for part in request.size.split("x", 1)
-            ):
+            # Non-preset value: must satisfy the documented OpenAI v2
+            # custom-size contract (16-multiple / max-edge / total-pixels /
+            # aspect-ratio). Whether the *provider* even allows custom
+            # sizes is a separate decision that lives on
+            # ``capabilities.size_allow_custom`` and is enforced in the
+            # job validator before the request reaches us. Here we only
+            # guard the wire format itself.
+            ok, reason = validate_custom_size(request.size)
+            if not ok:
                 raise StandardError(
                     StandardErrorKind.INVALID_PARAMETER,
-                    f"size {request.size!r} is not a recognised value",
+                    f"size {request.size!r} is invalid: {reason}",
                     field="size",
                 )
 
@@ -321,6 +365,14 @@ class OpenAIV1Adapter(BaseAdapter):
                 StandardErrorKind.INVALID_PARAMETER,
                 f"moderation {request.moderation!r} not supported",
                 field="moderation",
+            )
+
+        if request.thinking is not None and request.thinking not in _ALLOWED_THINKING:
+            raise StandardError(
+                StandardErrorKind.INVALID_PARAMETER,
+                f"thinking {request.thinking!r} not supported "
+                f"(must be one of {sorted(_ALLOWED_THINKING)})",
+                field="thinking",
             )
 
         if request.partial_images and not request.stream:
@@ -407,6 +459,8 @@ class OpenAIV1Adapter(BaseAdapter):
             body["background"] = request.background
         if request.moderation is not None:
             body["moderation"] = request.moderation
+        if request.thinking is not None:
+            body["thinking"] = request.thinking
         if request.stream:
             body["stream"] = True
             if request.partial_images:
@@ -487,6 +541,8 @@ class OpenAIV1Adapter(BaseAdapter):
             data["background"] = request.background
         if request.moderation is not None:
             data["moderation"] = request.moderation
+        if request.thinking is not None:
+            data["thinking"] = request.thinking
         if request.user is not None:
             data["user"] = request.user
         return files, data

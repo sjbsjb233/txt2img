@@ -68,6 +68,7 @@ class ProviderModelCapabilities(BaseModel):
     output_format: list[str] | None = None
     background: list[str] | None = None
     moderation: list[str] | None = None
+    thinking: list[str] | None = None
     thinking_level: list[str] | None = None
 
     # Numeric / boolean knobs
@@ -81,6 +82,14 @@ class ProviderModelCapabilities(BaseModel):
     stream: bool | None = None
     supports_transparent_bg: bool | None = None
     supports_mask: bool | None = None
+    # When true, callers may pass an arbitrary ``WIDTHxHEIGHT`` to ``size``
+    # in addition to the values listed in ``size``. The validator enforces
+    # the OpenAI gpt-image-2 v2 size rules (16-multiple, max edge 3840,
+    # ratio ≤ 3:1, total pixels in [655360, 8294400]). Set true only when
+    # the upstream is known to honour custom sizes (e.g. the canonical
+    # OpenAI API or a relay that mirrors it strictly). Leaving this off
+    # confines callers to the preset list above.
+    size_allow_custom: bool | None = None
 
     # Free-form text — for admin notes that don't deserve a proper field.
     extra_notes: str | None = Field(default=None, max_length=500)

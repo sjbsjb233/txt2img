@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import Icon from "../components/Icon.jsx";
 import TopBar from "../components/TopBar.jsx";
 import TurnstileModal from "../components/TurnstileModal.jsx";
+import SizeCustomModal, { isValidSize } from "../components/SizeCustomModal.jsx";
 import DraftToast from "../components/DraftToast.jsx";
 import { getModels } from "../api/models.js";
 import { createJob, precheck as precheckJob } from "../api/jobs.js";
@@ -192,7 +193,24 @@ function reconcileParams(params, capabilities, uiSchema) {
       // renders it disabled and the user can't clear the value
       // themselves, but the default still ends up on the wire and
       // trips the backend's INVALID_PARAMETER guard.
-      if (cur != null && (!Array.isArray(cap) || !cap.includes(cur))) {
+      //
+      // Special case: ``size`` is allowed to hold a value outside the
+      // chip list when ``capabilities.size_allow_custom`` is true — but
+      // only if the value still parses as a 5-rule-compliant
+      // ``WIDTHxHEIGHT``. Without that gate, a stale ``auto`` (when the
+      // admin removed it from caps) or any non-string would survive
+      // model swaps and trip the backend's INVALID_PARAMETER guard.
+      const isCustomSizeKeep =
+        field.k === "size" &&
+        capabilities?.size_allow_custom === true &&
+        typeof cur === "string" &&
+        /^\d+x\d+$/.test(cur) &&
+        isValidSize(...cur.split("x").map(Number)).ok;
+      if (
+        cur != null &&
+        !isCustomSizeKeep &&
+        (!Array.isArray(cap) || !cap.includes(cur))
+      ) {
         delete next[pk];
       }
     } else if (field.control === "number") {
@@ -349,6 +367,7 @@ export default function CreatePage() {
   const [submitError, setSubmitError] = useState(null);
   const [showTurnstile, setShowTurnstile] = useState(false);
   const [turnstileSiteKey, setTurnstileSiteKey] = useState(null);
+  const [showSizeCustom, setShowSizeCustom] = useState(false);
   const pendingSubmitRef = useRef(null); // payload waiting for cf token
   const lastFetchAtRef = useRef(0);
   const clientRequestIdRef = useRef(null);
@@ -1280,6 +1299,7 @@ export default function CreatePage() {
               params={params}
               setParam={setParam}
               capabilities={selectedModel?.capabilities || {}}
+              onOpenSizeCustom={() => setShowSizeCustom(true)}
             />
           </div>
 
@@ -1343,6 +1363,16 @@ export default function CreatePage() {
           pendingSubmitRef.current = null;
         }}
         onSuccess={onCaptchaSuccess}
+      />
+
+      <SizeCustomModal
+        open={showSizeCustom}
+        initialValue={params.size || null}
+        onClose={() => setShowSizeCustom(false)}
+        onSelect={(sizeStr) => {
+          setParam("size", sizeStr);
+          setShowSizeCustom(false);
+        }}
       />
     </div>
   );
@@ -1730,7 +1760,13 @@ function imageSizeRenderOption(opt, on) {
   );
 }
 
-function FieldRenderer({ plan, value, onChange, capabilities }) {
+function FieldRenderer({
+  plan,
+  value,
+  onChange,
+  capabilities,
+  onOpenSizeCustom,
+}) {
   const { field, allowedOptions, fieldDisabled, disabledReason } = plan;
   const isAllowed = (opt) =>
     allowedOptions ? allowedOptions.has(opt) : true;
@@ -1744,20 +1780,84 @@ function FieldRenderer({ plan, value, onChange, capabilities }) {
     if (field.k === "aspect_ratio") renderOption = aspectRatioRenderOption;
     else if (field.k === "image_size") renderOption = imageSizeRenderOption;
 
+    // Size field gets a special "Custom…" affordance when the merged
+    // capability surface opts in. The current custom value (if any —
+    // i.e. value is set but not in the chip options) renders as a
+    // selected pill below the chip grid so users can see / clear it.
+    const showSizeCustom =
+      field.k === "size" &&
+      capabilities?.size_allow_custom === true &&
+      typeof onOpenSizeCustom === "function";
+    const hasCustomValue =
+      field.k === "size" &&
+      typeof value === "string" &&
+      Array.isArray(field.options) &&
+      !field.options.includes(value);
+
     return (
-      <ChipGroup
-        label={field.label}
-        hint={field.hint || null}
-        options={field.options || []}
-        value={value ?? null}
-        onChange={onChange}
-        renderOption={renderOption}
-        layout={field.control === "chip-row" ? "row" : "grid"}
-        isOptionAllowed={isAllowed}
-        fieldDisabled={fieldDisabled}
-        disabledReason={disabledReason}
-        showHairline={false}
-      />
+      <div data-field={field.k}>
+        <ChipGroup
+          label={field.label}
+          hint={field.hint || null}
+          options={field.options || []}
+          value={value ?? null}
+          onChange={onChange}
+          renderOption={renderOption}
+          layout={field.control === "chip-row" ? "row" : "grid"}
+          isOptionAllowed={isAllowed}
+          fieldDisabled={fieldDisabled}
+          disabledReason={disabledReason}
+          showHairline={false}
+        />
+        {showSizeCustom ? (
+          <div
+            style={{
+              marginTop: 6,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              flexWrap: "wrap",
+            }}
+          >
+            {hasCustomValue ? (
+              <button
+                data-testid="size-custom-current"
+                onClick={() => onChange(null)}
+                title="Clear custom size"
+                className="mono"
+                style={{
+                  padding: "6px 10px",
+                  background: "var(--ink)",
+                  color: "var(--paper)",
+                  border: "1px solid var(--ink)",
+                  fontSize: 11,
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                }}
+              >
+                <span style={{ fontWeight: 700 }}>{value}</span>
+                <Icon name="close" size={9} />
+              </button>
+            ) : null}
+            <button
+              data-testid="size-custom-open"
+              onClick={() => onOpenSizeCustom?.(value)}
+              disabled={fieldDisabled}
+              className="btn"
+              style={{
+                padding: "6px 10px",
+                fontSize: 11,
+                opacity: fieldDisabled ? 0.5 : 1,
+                cursor: fieldDisabled ? "not-allowed" : "pointer",
+              }}
+            >
+              {hasCustomValue ? "Edit custom…" : "Custom…"}
+            </button>
+          </div>
+        ) : null}
+      </div>
     );
   }
 
@@ -1765,36 +1865,48 @@ function FieldRenderer({ plan, value, onChange, capabilities }) {
     const cap = capabilities?.[field.k];
     const max = typeof cap === "number" ? cap : field.max ?? null;
     return (
-      <NumberPresets
-        label={field.label}
-        hint={field.hint || null}
-        presets={field.presets || [1, 2, 4, 8]}
-        max={max}
-        value={typeof value === "number" ? value : 1}
-        onChange={onChange}
-        fieldDisabled={fieldDisabled}
-        disabledReason={disabledReason}
-      />
+      <div data-field={field.k}>
+        <NumberPresets
+          label={field.label}
+          hint={field.hint || null}
+          presets={field.presets || [1, 2, 4, 8]}
+          max={max}
+          value={typeof value === "number" ? value : 1}
+          onChange={onChange}
+          fieldDisabled={fieldDisabled}
+          disabledReason={disabledReason}
+        />
+      </div>
     );
   }
 
   if (field.control === "toggle") {
     return (
-      <Toggle
-        label={field.label}
-        hint={field.hint || null}
-        value={!!value}
-        onChange={onChange}
-        fieldDisabled={fieldDisabled}
-        disabledReason={disabledReason}
-      />
+      <div data-field={field.k}>
+        <Toggle
+          label={field.label}
+          hint={field.hint || null}
+          value={!!value}
+          onChange={onChange}
+          fieldDisabled={fieldDisabled}
+          disabledReason={disabledReason}
+        />
+      </div>
     );
   }
 
-  return null;
+  // Other field controls without their own wrapper get an inert one for
+  // e2e selectors. Catch-all to keep the contract uniform.
+  return <div data-field={field.k} />;
 }
 
-function SchemaParamsPanel({ plan, params, setParam, capabilities }) {
+function SchemaParamsPanel({
+  plan,
+  params,
+  setParam,
+  capabilities,
+  onOpenSizeCustom,
+}) {
   if (!plan.primary.length && !plan.advanced.length) {
     return (
       <div
@@ -1816,6 +1928,7 @@ function SchemaParamsPanel({ plan, params, setParam, capabilities }) {
               value={params[pk]}
               onChange={(v) => setParam(pk, v)}
               capabilities={capabilities}
+              onOpenSizeCustom={onOpenSizeCustom}
             />
             {idx < plan.primary.length - 1 ? (
               <div className="hair" style={{ margin: "18px 0" }} />
@@ -1856,6 +1969,7 @@ function SchemaParamsPanel({ plan, params, setParam, capabilities }) {
                     value={params[pk]}
                     onChange={(v) => setParam(pk, v)}
                     capabilities={capabilities}
+                    onOpenSizeCustom={onOpenSizeCustom}
                   />
                 );
               })}
