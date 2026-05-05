@@ -25,6 +25,7 @@ from app.api.admin.approvals import router as admin_approvals_router
 from app.api.admin.audit import router as admin_audit_router
 from app.api.admin.cleanup import router as admin_cleanup_router
 from app.api.admin.config import router as admin_config_router
+from app.api.admin.jobs import router as admin_jobs_router
 from app.api.admin.metrics import router as admin_metrics_router
 from app.api.admin.providers import router as admin_providers_router
 from app.api.admin.sse import router as admin_sse_router
@@ -291,6 +292,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_audit_router)
     app.include_router(admin_cleanup_router)
     app.include_router(admin_config_router)
+    app.include_router(admin_jobs_router)
     app.include_router(admin_metrics_router)
     app.include_router(admin_providers_router)
     app.include_router(admin_sse_router)

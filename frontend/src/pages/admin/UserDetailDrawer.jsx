@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import Icon from "../../components/Icon.jsx";
 import * as adminUsers from "../../api/admin/users.js";
 import { Hair, TierPill } from "./atoms.jsx";
+import JobInspector from "./JobInspector.jsx";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -211,6 +212,12 @@ export default function UserDetailDrawer({ userId, onClose, onChanged, currentAd
   // Bottom-of-drawer admin job listing (lazy)
   const [jobs, setJobs] = useState(null);
   const [jobsLoading, setJobsLoading] = useState(false);
+  // Per-row expansion state for the inline JobInspector accordion.
+  const [expandedJobs, setExpandedJobs] = useState({});
+
+  const toggleJob = (hashId) => {
+    setExpandedJobs((prev) => ({ ...prev, [hashId]: !prev[hashId] }));
+  };
 
   const refreshDetail = async () => {
     setLoading(true);
@@ -757,7 +764,8 @@ export default function UserDetailDrawer({ userId, onClose, onChanged, currentAd
               <div
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "200px 220px 110px 140px 100px 80px 80px",
+                  gridTemplateColumns:
+                    "200px 220px 110px 140px 100px 80px 80px 24px",
                   gap: 12,
                   padding: "8px 14px",
                   background: "var(--ink)",
@@ -776,6 +784,7 @@ export default function UserDetailDrawer({ userId, onClose, onChanged, currentAd
                 <div>RETRIES</div>
                 <div>COST</div>
                 <div>WHEN</div>
+                <div></div>
               </div>
               {jobs.length === 0 && (
                 <div
@@ -790,35 +799,74 @@ export default function UserDetailDrawer({ userId, onClose, onChanged, currentAd
                   no jobs yet
                 </div>
               )}
-              {jobs.map((j, i) => (
-                <div
-                  key={j.hash_id}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "200px 220px 110px 140px 100px 80px 80px",
-                    gap: 12,
-                    padding: "8px 14px",
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 11,
-                    borderTop: i ? "1px solid var(--rule)" : "none",
-                    alignItems: "center",
-                  }}
-                >
-                  <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {j.hash_id}
+              {jobs.map((j, i) => {
+                const expanded = !!expandedJobs[j.hash_id];
+                return (
+                  <div key={j.hash_id}>
+                    <div
+                      data-testid="admin-job-row"
+                      data-hash={j.hash_id}
+                      data-expanded={expanded ? "1" : "0"}
+                      onClick={() => toggleJob(j.hash_id)}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns:
+                          "200px 220px 110px 140px 100px 80px 80px 24px",
+                        gap: 12,
+                        padding: "8px 14px",
+                        fontFamily: "var(--font-mono)",
+                        fontSize: 11,
+                        borderTop: i ? "1px solid var(--rule)" : "none",
+                        alignItems: "center",
+                        cursor: "pointer",
+                        background: expanded
+                          ? "var(--banana-soft, #fbe9a1)"
+                          : "transparent",
+                        fontWeight: expanded ? 600 : "normal",
+                      }}
+                    >
+                      <div
+                        style={{
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {j.hash_id}
+                      </div>
+                      <div
+                        style={{
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {j.model}
+                      </div>
+                      <div style={{ fontWeight: 700 }}>{j.status}</div>
+                      <div>{j.provider_used || "—"}</div>
+                      <div>{j.retries}</div>
+                      <div>¥{(j.cost_cny || 0).toFixed(3)}</div>
+                      <div style={{ color: "var(--ink-3)" }}>
+                        {formatRelative(j.created_at)}
+                      </div>
+                      <div
+                        data-testid="admin-job-row-toggle"
+                        style={{
+                          fontWeight: expanded ? 700 : 400,
+                          color: expanded
+                            ? "var(--ink)"
+                            : "var(--ink-3)",
+                          textAlign: "center",
+                        }}
+                      >
+                        {expanded ? "▾" : "▸"}
+                      </div>
+                    </div>
+                    {expanded && <JobInspector hashId={j.hash_id} />}
                   </div>
-                  <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {j.model}
-                  </div>
-                  <div style={{ fontWeight: 700 }}>{j.status}</div>
-                  <div>{j.provider_used || "—"}</div>
-                  <div>{j.retries}</div>
-                  <div>¥{(j.cost_cny || 0).toFixed(3)}</div>
-                  <div style={{ color: "var(--ink-3)" }}>
-                    {formatRelative(j.created_at)}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

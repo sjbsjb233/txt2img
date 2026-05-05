@@ -57,6 +57,7 @@ from app.schemas.normalized import (
 from app.services import image_io
 from app.utils.crypto import decrypt
 from app.utils.ids import new_image_id
+from app.utils.redact import redact_payload, redact_upstream_body
 
 logger = logging.getLogger("txt2img.executor")
 
@@ -130,6 +131,7 @@ class JobExecutor:
             ctx.user,
             ctx.request,
             top_k=self._max_retries_per_job(),
+            hash_id=ctx.hash_id,
         )
         if not candidates:
             await self._fail(ctx, "NO_PROVIDER_AVAILABLE", refund_quota=True)
@@ -178,6 +180,7 @@ class JobExecutor:
 
     async def _mark_running(self, ctx: JobExecutionContext) -> None:
         now = datetime.now(timezone.utc)
+        user_state = await self._snapshot_user_state(ctx)
         async with get_session() as session:
             await session.execute(
                 update(Job)
@@ -188,9 +191,71 @@ class JobExecutor:
                 ctx.hash_id,
                 RUNNING,
                 session=session,
-                extra_timeline={"worker_id": "local"},
+                extra_timeline={
+                    "worker_id": "local",
+                    "user_state": user_state,
+                },
             )
         await self._lifecycle.publish_transition(result)
+
+    async def _snapshot_user_state(
+        self, ctx: JobExecutionContext
+    ) -> dict[str, Any]:
+        """Capture the user's quota / penalty state at submit time.
+
+        Persisted in ``timeline.jsonl`` so the admin inspector can
+        reconstruct what the user looked like when scheduling decided
+        to run them. Best-effort — every field has a default so a
+        missing tier config never breaks job execution.
+        """
+        try:
+            today_count = await self._quota_guard.today_count(ctx.user.id)
+        except Exception:  # pragma: no cover
+            today_count = int(getattr(ctx.user, "today_count", 0) or 0)
+
+        try:
+            from app.domain.tier_config import get_tier_config
+
+            soft, hard = get_tier_config().effective_quotas(ctx.user)
+        except Exception:  # pragma: no cover
+            soft, hard = 0, 0
+
+        try:
+            recent_n = await self._recent_failures(ctx.user.id, ctx.hash_id)
+        except Exception:  # pragma: no cover
+            recent_n = 0
+
+        return {
+            "tier": ctx.user.tier,
+            "today_count": int(today_count or 0),
+            "soft_quota_effective": int(soft or 0),
+            "hard_quota_effective": int(hard or 0),
+            "soft_quota_triggered": bool(
+                ctx.flags.get("SOFT_QUOTA_EXCEEDED") or False
+            ),
+            "captcha_required": bool(ctx.flags.get("captcha_required") or False),
+            "captcha_verified": bool(ctx.flags.get("captcha_verified") or False),
+            "recent_fail_rate_n": int(recent_n),
+            "recent_fail_rate_total": 10,
+        }
+
+    async def _recent_failures(self, user_id: str, exclude_hash_id: str) -> int:
+        async with get_session() as session:
+            rows = list(
+                (
+                    await session.execute(
+                        select(Job.status)
+                        .where(
+                            Job.user_id == user_id,
+                            Job.hash_id != exclude_hash_id,
+                            Job.status.in_(("SUCCEEDED", "FAILED", "CANCELLED")),
+                        )
+                        .order_by(Job.finished_at.desc(), Job.created_at.desc())
+                        .limit(10)
+                    )
+                ).all()
+            )
+        return sum(1 for (s,) in rows if s == "FAILED")
 
     async def _apply_soft_penalty(self, ctx: JobExecutionContext) -> bool:
         today_count = await self._quota_guard.today_count(ctx.user.id)
@@ -283,6 +348,17 @@ class JobExecutor:
                 retries=attempt_no - 1,
                 cost_cny=deduction.cost_cny,
             )
+            try:
+                await asyncio.to_thread(
+                    image_io.update_routing_chosen,
+                    ctx.hash_id,
+                    provider.provider_id,
+                )
+            except Exception:  # pragma: no cover
+                logger.warning(
+                    "executor: failed to record chosen provider for job=%s",
+                    ctx.hash_id,
+                )
             await self._publish_success_result(
                 ctx,
                 image_payloads=image_payloads,
@@ -314,6 +390,15 @@ class JobExecutor:
             adapter_type=provider.adapter_type,
         )
 
+        # Capture provider state at the moment of dispatch — admin
+        # inspector reads this back to explain failure / latency. Done
+        # before the lease so the concurrency value reflects the queue
+        # the call is about to enter, not after it incremented.
+        snapshot = self._capture_provider_snapshot(provider, request.model)
+        started_at_iso = datetime.now(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+
         started = time.perf_counter()
         self._metrics.lease_concurrency(provider.provider_id)
         try:
@@ -338,9 +423,11 @@ class JobExecutor:
                 {
                     "provider_id": provider.provider_id,
                     "ok": True,
+                    "started_at": started_at_iso,
                     "latency_ms": round(latency_ms, 3),
-                    "response": _json_safe(response.raw),
+                    "response": redact_payload(_json_safe(response.raw)),
                     "image_count": len(response.images),
+                    "provider_snapshot": snapshot,
                 },
             )
             return response
@@ -355,6 +442,11 @@ class JobExecutor:
                 error_kind=normalized.kind,
             )
             await self._breaker.observe(provider.provider_id, success=False)
+            error_payload = normalized.to_dict()
+            if isinstance(error_payload, dict):
+                msg = error_payload.get("message")
+                if isinstance(msg, str):
+                    error_payload["message"] = redact_upstream_body(msg)
             await asyncio.to_thread(
                 image_io.write_upstream_log,
                 hash_id,
@@ -362,8 +454,10 @@ class JobExecutor:
                 {
                     "provider_id": provider.provider_id,
                     "ok": False,
+                    "started_at": started_at_iso,
                     "latency_ms": round(latency_ms, 3),
-                    "error": normalized.to_dict(),
+                    "error": error_payload,
+                    "provider_snapshot": snapshot,
                 },
             )
             raise normalized from exc
@@ -471,6 +565,58 @@ class JobExecutor:
                     updated_at=datetime.now(timezone.utc),
                 )
             )
+
+    def _capture_provider_snapshot(
+        self, provider: CandidateProvider, model: str
+    ) -> dict[str, Any]:
+        """Snapshot the provider's live state for an attempt log.
+
+        Read-only; never raises. Missing data points come back as
+        ``None`` so the inspector UI can render a ``—`` placeholder.
+        """
+        try:
+            success_5m = float(self._metrics.success_rate(provider.provider_id, model))
+        except Exception:  # pragma: no cover
+            success_5m = None
+        try:
+            p50 = self._metrics.p50_ms(provider.provider_id, model)
+        except Exception:  # pragma: no cover
+            p50 = None
+        try:
+            current_conc = int(self._metrics.current_concurrency(provider.provider_id))
+        except Exception:  # pragma: no cover
+            current_conc = None
+        try:
+            current_rpm = int(self._metrics.recent_calls_in_60s(provider.provider_id))
+        except Exception:  # pragma: no cover
+            current_rpm = None
+
+        circuit_state = "healthy"
+        try:
+            from app.domain.circuit_breaker import get_circuit_breaker
+
+            # The breaker exposes ``get_state`` as async; we must not
+            # await here (this is a sync helper) but we can read the
+            # in-memory state struct via the cached path. Falling back
+            # to the persisted column avoids a DB hit; misses just
+            # default to ``healthy``.
+            breaker = self._breaker if self._breaker else get_circuit_breaker()
+            cached = getattr(breaker, "_states", {}).get(provider.provider_id)
+            if cached is not None:
+                circuit_state = getattr(cached, "state", "healthy")
+        except Exception:  # pragma: no cover
+            circuit_state = "healthy"
+
+        return {
+            "circuit_state": circuit_state,
+            "success_rate_5m": success_5m,
+            "p50_latency_ms": p50,
+            "current_concurrency": current_conc,
+            "max_concurrency": int(provider.max_concurrency or 0),
+            "current_rpm": current_rpm,
+            "rpm_limit": int(provider.rpm_limit or 0),
+            "extra": {},
+        }
 
     async def _mark_started(self, hash_id: str) -> None:
         async with get_session() as session:
