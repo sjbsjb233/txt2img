@@ -50,7 +50,7 @@ class ProviderConfig(BaseModel):
     # Per-call timeout in seconds; the executor may shorten this for
     # provider probes. Default is generous because image generation can
     # take 30-60s on cold paths.
-    timeout_seconds: float = Field(default=120.0, gt=0)
+    timeout_seconds: float = Field(default=600.0, gt=0)
 
 
 # ---------------------------------------------------------------------------
