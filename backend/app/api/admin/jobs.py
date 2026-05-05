@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -212,12 +213,31 @@ def _derive_lifecycle(job: Job, attempts: list[dict[str, Any]]) -> JobLifecycleS
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class _TierAtSubmitView:
+    """Adapter so :meth:`TierConfig.effective_quotas` can resolve a job's
+    historical tier without resolving the user's *current* tier.
+
+    Carries the user's quota-override columns (those don't have a
+    historical record either, but they're operator-set values that
+    rarely change between submit and inspect). Stops the synthetic
+    snapshot from showing ``tier=free`` next to ``hard_quota=200``
+    when the user has been promoted in the meantime.
+    """
+
+    tier: str
+    override_soft_quota: int | None
+    override_hard_quota: int | None
+
+
 def _build_user_state(
     user: User,
     job: Job,
     timeline_rows: list[dict[str, Any]],
     recent_fail_n: int,
     recent_fail_total: int,
+    *,
+    job_flags: dict[str, Any] | None = None,
 ) -> tuple[UserStateSnapshot, bool]:
     """Pull state from timeline.jsonl when present; fall back to live row.
 
@@ -239,22 +259,56 @@ def _build_user_state(
             snapshot = us
             break
 
-    soft_eff, hard_eff = get_tier_config().effective_quotas(user)
     if snapshot is None:
+        # Resolve quotas against the *historical* tier so the synthetic
+        # snapshot stays internally consistent. ``job.tier_at_submit``
+        # is locked at job creation; ``user.tier`` may have changed
+        # since. Fall back to the live user when the historical column
+        # is missing (legacy schemas).
+        synthetic_tier = str(job.tier_at_submit or user.tier)
+        view = _TierAtSubmitView(
+            tier=synthetic_tier,
+            override_soft_quota=user.override_soft_quota,
+            override_hard_quota=user.override_hard_quota,
+        )
+        soft_eff, hard_eff = get_tier_config().effective_quotas(view)
+        # Several flags survive on ``jobs.flags_json`` even though the
+        # timeline ``user_state`` block was never written. Read them
+        # back so soft-quota / captcha-gated jobs don't render as
+        # "below" / "n/a".
+        flags = job_flags or {}
+        soft_triggered = bool(flags.get("SOFT_QUOTA_EXCEEDED") is True)
+        captcha_verified = bool(
+            flags.get("captcha_verified") is True
+            or flags.get("CAPTCHA_VERIFIED") is True
+            or flags.get("turnstile_verified") is True
+        )
+        # ``captcha_required`` was historically derived from the soft
+        # penalty plan and not persisted on the row. The closest
+        # observable proxy is "the verified bit was set" (proves the
+        # gate fired). Surface it as ``required`` only when we have
+        # positive evidence.
+        captcha_required = captcha_verified or bool(
+            flags.get("captcha_required") is True
+        )
         return (
             UserStateSnapshot(
-                tier=str(job.tier_at_submit or user.tier),
+                tier=synthetic_tier,
                 today_count=int(user.today_count or 0),
                 soft_quota_effective=int(soft_eff),
                 hard_quota_effective=int(hard_eff),
-                soft_quota_triggered=False,
-                captcha_required=False,
-                captcha_verified=False,
+                soft_quota_triggered=soft_triggered,
+                captcha_required=captcha_required,
+                captcha_verified=captcha_verified,
                 recent_fail_rate_n=recent_fail_n,
                 recent_fail_rate_total=recent_fail_total,
             ),
             True,
         )
+
+    # Recorded snapshot path: still resolve the live quotas as a
+    # *fallback* in case the recorded row is missing the numeric values.
+    soft_eff, hard_eff = get_tier_config().effective_quotas(user)
 
     # Use a sentinel-aware getter so a recorded ``0`` (e.g. a free-tier
     # user with hard_quota=0) is preserved instead of being silently
@@ -555,6 +609,7 @@ async def inspect_job(
                         Provider.max_concurrency,
                         Provider.rpm_limit,
                         Provider.circuit_state,
+                        Provider.enabled,
                     )
                 )
             ).all()
@@ -568,6 +623,11 @@ async def inspect_job(
             }
             for row in provider_rows
         }
+        # Real routing traces define ``pool_total`` as the count of
+        # *enabled* providers considered before model filtering. Mirror
+        # that contract in the synthetic fallback so the summary line
+        # doesn't disagree with current traces for the same catalog.
+        enabled_provider_count = sum(1 for row in provider_rows if int(row[5] or 0) == 1)
 
     # Off the event loop: read the per-job filesystem artefacts in parallel.
     timeline_task = asyncio.to_thread(image_io.read_timeline, hash_id)
@@ -652,8 +712,17 @@ async def inspect_job(
             job_row.user_id, job_row.id
         )
         recent_total = recent_total if recent_total > 0 else 10
+        # Pre-decode flags so the synthetic branch can read SOFT_QUOTA_*
+        # and captcha bits straight off the row (timeline didn't carry
+        # them for legacy jobs).
+        _job_flags_for_state = _safe_load_json(job_row.flags_json)
         user_state, user_state_synthetic = _build_user_state(
-            user_row, job_row, timeline_rows, recent_n, recent_total
+            user_row,
+            job_row,
+            timeline_rows,
+            recent_n,
+            recent_total,
+            job_flags=_job_flags_for_state,
         )
         if user_state_synthetic:
             # Distinct from the failure flag — the section is *valid*
@@ -679,11 +748,16 @@ async def inspect_job(
                 for s in routing.scored:
                     s.chosen = s.provider_id == chosen_provider_id
         except Exception:
+            # ``routing.json`` exists but the bytes don't decode into a
+            # valid trace — distinct from "no file at all". Surface it
+            # as a separate degraded marker so the UI can advise on
+            # storage corruption rather than telling the operator the
+            # trace was never recorded.
             logger.exception(
                 "inspect: routing trace decode failed for job=%s", hash_id
             )
             routing = None
-            degraded.append("routing")
+            degraded.append("routing_corrupt")
     else:
         # No recorded trace on disk — pre-Phase-2 jobs ran before the
         # selector started persisting the trace, and there is no way to
@@ -691,9 +765,23 @@ async def inspect_job(
         # fact. We still synthesise a minimal trace that pins the
         # chosen provider so admins see *something* useful instead of
         # an opaque "trace unavailable" placeholder.
-        if chosen_provider_id and chosen_provider_id in provider_label_by_id:
+        if chosen_provider_id:
+            # Try the live ``providers`` row first for a friendlier
+            # label, but fall back to the raw id when the provider has
+            # since been deleted from the catalog. ``provider_used`` on
+            # the job row is the only piece of routing context we still
+            # have for those jobs and we'd rather show it than nothing.
+            label = provider_label_by_id.get(
+                chosen_provider_id, chosen_provider_id
+            )
             routing = RoutingTrace(
-                pool_total=len(provider_label_by_id),
+                # ``enabled_provider_count`` mirrors the real selector's
+                # ``pool_total`` definition (enabled providers, before
+                # model filtering); falling back to "at least the chosen
+                # one" guarantees a non-zero baseline even for empty
+                # catalogs (the chosen provider provably existed at
+                # dispatch even if it has since been removed).
+                pool_total=max(enabled_provider_count, 1),
                 pool_survived=1,
                 pool_scored=1,
                 filtered_out=[],
@@ -701,9 +789,7 @@ async def inspect_job(
                     ScoredProvider(
                         rank=1,
                         provider_id=chosen_provider_id,
-                        label=provider_label_by_id.get(
-                            chosen_provider_id, chosen_provider_id
-                        ),
+                        label=label,
                         components={},
                         total_score=0.0,
                         chosen=True,
@@ -826,8 +912,33 @@ async def inspect_job(
     except Exception:
         logger.exception("inspect: audit write failed for job=%s", hash_id)
 
-    # Cache hint — terminal jobs are immutable; live ones must not cache.
-    if job_row.status in _VISIBLE_TERMINAL:
+    # Cache hint:
+    # - Terminal jobs whose payload is fully sourced from immutable
+    #   per-job artefacts (timeline.jsonl, attempt logs, routing.json)
+    #   may cache for a minute — those bytes don't change after the
+    #   job lands. Even partial degradation (a missing attempt log)
+    #   doesn't break that contract because the *missing* file won't
+    #   reappear.
+    # - But once any synthetic / live-DB fallback has been folded into
+    #   the response (provider snapshot caps, synthesised routing
+    #   trace, synthesised user_state) the payload depends on the
+    #   live ``providers`` / ``users`` rows and an admin edit must
+    #   show up immediately. Switch those responses to ``no-store``.
+    # - Live (non-terminal) jobs always opt out of caching.
+    fallback_markers = {"user_state_synthetic", "routing"}
+    response_uses_live_data = (
+        any(m in degraded for m in fallback_markers)
+        # If any attempt actually pulled values from the live Provider
+        # row, the response is also live-coupled. Easiest check: was
+        # any attempt's snapshot missing the recorded ``rpm_limit`` /
+        # ``circuit_state``? We surface that via the same flag as the
+        # routing fallback for cache-control purposes.
+        or any(
+            not (raw_attempt or {}).get("provider_snapshot")
+            for raw_attempt in attempt_payloads
+        )
+    )
+    if job_row.status in _VISIBLE_TERMINAL and not response_uses_live_data:
         response.headers["Cache-Control"] = "private, max-age=60"
     else:
         response.headers["Cache-Control"] = "no-store"

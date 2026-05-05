@@ -175,8 +175,12 @@ async def test_inspect_returns_admin_only_fields(
     assert body["user_username"] == "bob"
     assert "lifecycle" in body
     assert body["lifecycle"]["queued_at"] is not None
-    # Terminal job → cacheable hint
-    assert resp.headers.get("cache-control", "").startswith("private")
+    # No timeline / routing / attempts on disk for this seed, so the
+    # response is built from current DB rows and must opt out of the
+    # 60-second admin cache window. The "fully-recorded" cacheable
+    # path is exercised by ``test_inspect_terminal_with_full_data_caches``
+    # below.
+    assert resp.headers.get("cache-control") == "no-store"
 
 
 @pytest.mark.asyncio
@@ -496,6 +500,183 @@ async def test_inspect_marks_user_state_synthetic_when_timeline_missing(
     body = resp.json()
     assert body["user_state_at_submit"] is not None
     assert "user_state_synthetic" in body["degraded_sections"]
+
+
+@pytest.mark.asyncio
+async def test_inspect_synthetic_user_state_quotas_track_tier_at_submit(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Synthetic snapshot must keep ``tier`` and ``hard_quota`` in sync.
+
+    Bumping the user's tier *after* a job ran shouldn't show the new
+    tier's quotas next to the old tier label.
+    """
+    uid = await _seed_user(username="legacy_tier", password="legacypw1")
+    hash_id = await _seed_job(user_id=uid)
+    # Demote the user *after* the job exists. tier_at_submit on the
+    # job stays "free"; user.tier becomes "vip".
+    from app.db.engine import get_session
+    from app.db.models import Job, User
+
+    async with get_session() as session:
+        u = (
+            await session.execute(select(User).where(User.id == uid))
+        ).scalar_one()
+        u.tier = "vip"
+        j = (
+            await session.execute(select(Job).where(Job.hash_id == hash_id))
+        ).scalar_one()
+        j.tier_at_submit = "free"
+
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get(
+        f"/api/admin/jobs/{hash_id}/inspect", headers=_auth(token)
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    state = body["user_state_at_submit"]
+    assert state["tier"] == "free"
+    # vip's hard_quota is materially larger than free's; ensuring we
+    # picked the historical tier's quota means the synthetic snapshot
+    # is internally consistent rather than self-contradictory.
+    free_hard = state["hard_quota_effective"]
+    # If we accidentally used the live tier ("vip"), this number would
+    # reflect vip's quota instead. Just compare against the seed's
+    # default tiers — vip ≥ premium ≥ standard ≥ free.
+    from app.domain.tier_config import get_tier_config
+
+    vip_hard = get_tier_config().get("vip").hard_quota
+    assert free_hard < vip_hard
+
+
+@pytest.mark.asyncio
+async def test_inspect_synthetic_user_state_reads_flags(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """SOFT_QUOTA_EXCEEDED + captcha_verified survive on flags_json
+    even for legacy jobs; the synthetic snapshot must reflect them
+    instead of hardcoding ``False``.
+    """
+    uid = await _seed_user(username="legacy_flags", password="legacypw2")
+    hash_id = await _seed_job(
+        user_id=uid,
+        flags={"SOFT_QUOTA_EXCEEDED": True, "captcha_verified": True},
+    )
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get(
+        f"/api/admin/jobs/{hash_id}/inspect", headers=_auth(token)
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    state = body["user_state_at_submit"]
+    assert state["soft_quota_triggered"] is True
+    assert state["captcha_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_inspect_synthesises_routing_when_provider_was_deleted(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """``provider_used`` is the only routing context left when the
+    chosen provider has since been removed from the catalog. The
+    fallback must still surface that context instead of returning
+    null routing.
+    """
+    uid = await _seed_user(username="legacy_gone", password="legacypw3")
+    hash_id = await _seed_job(
+        user_id=uid, status="SUCCEEDED", provider_used="ghost_provider"
+    )
+    # No matching Provider row seeded — simulates a deleted catalog row.
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get(
+        f"/api/admin/jobs/{hash_id}/inspect", headers=_auth(token)
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["routing"] is not None
+    assert body["routing"]["scored"][0]["provider_id"] == "ghost_provider"
+    assert body["routing"]["scored"][0]["chosen"] is True
+
+
+@pytest.mark.asyncio
+async def test_inspect_synthetic_pool_total_counts_enabled_only(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Synthetic ``pool_total`` should mirror real traces' definition:
+    enabled providers, before model filtering. A disabled row must not
+    inflate the count.
+    """
+    uid = await _seed_user(username="legacy_pool", password="legacypw4")
+    await _seed_provider(provider_id="enabled_a", label="A")
+    await _seed_provider(provider_id="enabled_b", label="B")
+    # A disabled provider in the same catalog.
+    from app.db.engine import get_session
+    from app.db.models import Provider
+
+    async with get_session() as session:
+        session.add(
+            Provider(
+                id="disabled_x",
+                label="X",
+                adapter_type="openai",
+                base_url="https://example.com",
+                api_key_enc="enc:dummy",
+                cost_per_image_cny=0.1,
+                initial_balance_cny=100.0,
+                balance_cny=99.0,
+                enabled=0,
+                max_concurrency=8,
+                rpm_limit=60,
+                circuit_state="healthy",
+            )
+        )
+
+    hash_id = await _seed_job(
+        user_id=uid, status="SUCCEEDED", provider_used="enabled_a"
+    )
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get(
+        f"/api/admin/jobs/{hash_id}/inspect", headers=_auth(token)
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # 2 enabled, 1 disabled → pool_total should be 2 (not 3).
+    assert body["routing"]["pool_total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_inspect_corrupt_routing_json_uses_distinct_marker(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """A ``routing.json`` that exists but doesn't decode should be
+    tagged with ``routing_corrupt`` rather than the generic ``routing``
+    so the UI can distinguish 'never recorded' from 'on disk but
+    unreadable'."""
+    uid = await _seed_user(username="legacy_corrupt", password="legacypw5")
+    hash_id = await _seed_job(user_id=uid, status="SUCCEEDED")
+
+    from app.services import image_io
+
+    # Bypass ``write_routing_trace`` so we can write malformed bytes
+    # that ``read_routing_trace`` decodes successfully (as a string)
+    # but ``_build_routing_trace`` then chokes on. Easier path: write
+    # a JSON shape that ``_build_routing_trace`` can't parse — a list
+    # at the top level instead of a dict.
+    image_io.ensure_job_dirs(hash_id)
+    # Truthy-but-malformed payload: a non-empty list passes the
+    # "is something there" check but explodes inside
+    # ``_build_routing_trace`` when it dereferences ``.get("filtered_out")``.
+    image_io.path_for_routing(hash_id).write_text("[1]", encoding="utf-8")
+
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get(
+        f"/api/admin/jobs/{hash_id}/inspect", headers=_auth(token)
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["routing"] is None
+    assert "routing_corrupt" in body["degraded_sections"]
+    assert "routing" not in body["degraded_sections"]
 
 
 @pytest.mark.asyncio

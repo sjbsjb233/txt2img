@@ -278,15 +278,23 @@ function UserStateChips({ state, synthetic = false }) {
 
 function RoutingPool({ routing, degraded }) {
   // The backend now synthesises a minimal trace (chosen provider only)
-  // when routing.json is absent on disk, so a fully ``null`` payload is
-  // rare. We still treat ``routing == null`` as "no data at all" and
-  // tell the admin why.
+  // when routing.json is absent on disk, so a fully ``null`` payload
+  // means one of two distinct things:
+  //   - ``routing_corrupt`` in degraded_sections → the file existed
+  //     on disk but the bytes failed to decode (storage corruption,
+  //     half-flushed write, mismatched schema). Tell the admin to go
+  //     look at the raw file rather than implying it was never
+  //     written.
+  //   - otherwise → the chosen provider couldn't be derived either
+  //     (e.g. job failed admission with no provider_used), so there
+  //     is genuinely nothing to show.
   if (!routing) {
+    const corrupt = !!degraded?.includes("routing_corrupt");
     return (
       <div className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
-        no routing trace recorded — this job ran before per-job traces
-        were persisted, and the historical filter / score breakdown can
-        no longer be reconstructed.
+        {corrupt
+          ? "routing trace exists on disk but failed to decode — check data/jobs/<hash>/routing.json for corruption."
+          : "no routing trace available — this job either ran before per-job traces were persisted or never reached the routing stage."}
       </div>
     );
   }
