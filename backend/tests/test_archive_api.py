@@ -736,6 +736,42 @@ async def test_get_image_thumb_cross_tenant_returns_404(
 
 
 @pytest.mark.asyncio
+async def test_admin_can_stream_other_users_image_thumb(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """The admin JobInspector hits the user-scoped /thumb URL and must
+    succeed cross-tenant; otherwise the inline image preview is broken
+    when admins view another user's recent jobs."""
+    _, owner_id = await _login_user(seeded_app, username="admin_thumb_owner")
+    job_id = await _seed_job(
+        user_id=owner_id, hash_id="j_adminthumb01", seq_no=1
+    )
+    await _seed_image_on_disk(
+        job_id=job_id, hash_id="j_adminthumb01", order=1
+    )
+
+    admin_login = await seeded_app.post(
+        "/api/auth/login",
+        json={"username": "admin", "password": "test-admin-password"},
+    )
+    assert admin_login.status_code == 200, admin_login.text
+    admin_token = admin_login.json()["access_token"]
+
+    resp = await seeded_app.get(
+        "/api/jobs/j_adminthumb01/images/1/thumb",
+        headers=_auth(admin_token),
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/webp"
+
+    resp_orig = await seeded_app.get(
+        "/api/jobs/j_adminthumb01/images/1/original",
+        headers=_auth(admin_token),
+    )
+    assert resp_orig.status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_get_reference_thumb(
     seeded_app: httpx.AsyncClient,
 ) -> None:

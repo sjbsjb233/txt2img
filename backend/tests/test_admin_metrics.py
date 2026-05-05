@@ -123,6 +123,29 @@ async def test_overview_jobs_today_counts(seeded_app):
 
 
 @pytest.mark.asyncio
+async def test_overview_with_populated_metrics_engine(seeded_app):
+    """Overview must not 500 when the in-process MetricsEngine has
+    samples for at least one (provider, model) pair.
+
+    Regression: the providers-summary path called ``qps(window=300)``,
+    but ``MetricsEngine.qps`` accepts no ``window`` kwarg, so any
+    request after a real provider call landed in metrics returned
+    500 from the populated branch only."""
+    from app.domain.metrics_engine import get_metrics_engine
+
+    metrics = get_metrics_engine()
+    metrics.record_call(
+        "p_smoke", "model_smoke", ok=True, latency_ms=120.0
+    )
+
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get(
+        "/api/admin/metrics/overview", headers=_auth(token)
+    )
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
 async def test_overview_requires_admin(seeded_app):
     # Forge a token-less request so the guard fires the same way it
     # would for any non-admin caller.

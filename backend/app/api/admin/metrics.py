@@ -191,8 +191,9 @@ async def _providers_summary() -> list[ProviderSummaryView]:
             p50: float | None = (
                 sum(p50_values) / len(p50_values) if p50_values else None
             )
+            window_s = metrics.window_seconds()
             calls = sum(
-                metrics.qps(p.id, m, window=300) * 300
+                metrics.qps(p.id, m) * window_s
                 for m in sample_models
             )
         else:
