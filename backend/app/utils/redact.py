@@ -14,7 +14,20 @@ from typing import Any
 
 
 _BEARER_RE = re.compile(
-    r"(Authorization\s*:\s*\S+|Bearer\s+[A-Za-z0-9._\-+/=]{16,}|sk-[A-Za-z0-9_\-]{16,})",
+    # Three patterns, applied across the same scan:
+    # 1. Full ``Authorization: ...`` header value — eat everything up
+    #    to a CRLF / comma / semicolon so a "Bearer eyJxxx" tail is
+    #    swallowed in one go (otherwise the prefix gets scrubbed but
+    #    the token survives in the substring that follows the space).
+    # 2. Bare ``Bearer xxxxxxxx`` outside an Authorization header.
+    # 3. OpenAI-style ``sk-...`` keys.
+    # 4. JWT-shaped ``eyJ...`` tokens (header.payload.signature).
+    r"("
+    r"Authorization\s*:\s*[^\r\n,;]+"
+    r"|Bearer\s+[A-Za-z0-9._\-+/=]{8,}"
+    r"|sk-[A-Za-z0-9_\-]{16,}"
+    r"|eyJ[A-Za-z0-9._\-]{20,}"
+    r")",
     re.IGNORECASE,
 )
 

@@ -18,6 +18,18 @@ def test_redact_strips_bearer_tokens() -> None:
     assert "REDACTED" in cleaned
 
 
+def test_redact_strips_full_authorization_header_value() -> None:
+    # Regression: the prior regex stopped at "Bearer", leaving the JWT
+    # body itself intact in the cleaned string.
+    text = (
+        "got 401 Authorization: Bearer "
+        "eyJabcdefghijklmnopqrstuvwxyz0123456789.payload.sig\nbody=..."
+    )
+    cleaned = redact_upstream_body(text)
+    assert "eyJabcdefghij" not in cleaned
+    assert "REDACTED" in cleaned
+
+
 def test_redact_strips_sensitive_json_keys() -> None:
     body = json.dumps(
         {

@@ -318,6 +318,37 @@ def save_reference(
     return str(target.relative_to(_data_root()))
 
 
+def clone_reference(
+    *,
+    src_rel_path: str,
+    dst_hash_id: str,
+    order: int,
+    original_filename: str,
+    mime: str,
+) -> str | None:
+    """Copy a reference file from one job dir to another.
+
+    Used by ``admin.job.requeue`` so a requeued job's references stop
+    pointing at the source job's directory — otherwise cleanup of the
+    original job (T+30 purge) would silently break the new job's
+    reference thumbnails.
+
+    Returns the new ``rel_path`` on success, or ``None`` when the
+    source file is missing on disk (caller decides whether to fall
+    back to the legacy shared path).
+    """
+    data_root = _data_root()
+    src_abs = (data_root / src_rel_path).resolve()
+    if not src_abs.exists() or not src_abs.is_file():
+        return None
+    if not src_abs.is_relative_to(data_root):
+        return None
+    ensure_job_dirs(dst_hash_id)
+    dst_abs = build_reference_path(dst_hash_id, order, original_filename, mime)
+    dst_abs.write_bytes(src_abs.read_bytes())
+    return str(dst_abs.relative_to(data_root))
+
+
 def make_thumbnail(
     src_path: Path | str,
     dst_path: Path | str,

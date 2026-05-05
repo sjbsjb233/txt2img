@@ -259,6 +259,87 @@ async def test_upstream_log_404_when_missing(seeded_app: httpx.AsyncClient) -> N
 
 
 @pytest.mark.asyncio
+async def test_upstream_log_writes_audit_row(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    uid = await _seed_user(username="grace2", password="grace2pw")
+    hash_id = await _seed_job(user_id=uid)
+    from app.services import image_io
+
+    image_io.write_upstream_log(
+        hash_id, 1, {"provider_id": "bltcy", "ok": True}
+    )
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get(
+        f"/api/admin/jobs/{hash_id}/upstream/1", headers=_auth(token)
+    )
+    assert resp.status_code == 200
+
+    from app.db.engine import get_session
+    from app.db.models import AuditLog
+
+    async with get_session() as session:
+        rows = list(
+            (
+                await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.action == "admin.job.upstream_log"
+                    )
+                )
+            ).scalars().all()
+        )
+    assert len(rows) == 1
+    assert rows[0].target_id == hash_id
+
+
+@pytest.mark.asyncio
+async def test_inspect_surfaces_nested_upstream_status_and_body(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Executor writes upstream_status / upstream_body_excerpt under
+    the nested ``error`` dict; inspector should surface both.
+    """
+    uid = await _seed_user(username="izzy", password="izzypw123")
+    hash_id = await _seed_job(
+        user_id=uid, status="FAILED", provider_used=None
+    )
+    from app.services import image_io
+
+    image_io.write_upstream_log(
+        hash_id,
+        1,
+        {
+            "provider_id": "bltcy",
+            "ok": False,
+            "started_at": "2026-05-05T07:30:01Z",
+            "latency_ms": 9.9,
+            "error": {
+                "kind": "RATE_LIMITED",
+                "message": "rate limit hit",
+                "upstream_status": 429,
+                "upstream_body_excerpt": "Too Many Requests",
+            },
+            "provider_snapshot": {
+                "circuit_state": "healthy",
+                "max_concurrency": 8,
+                "rpm_limit": 60,
+            },
+        },
+    )
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get(
+        f"/api/admin/jobs/{hash_id}/inspect", headers=_auth(token)
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["attempts"]) == 1
+    a = body["attempts"][0]
+    assert a["upstream_status"] == 429
+    assert a["upstream_body_excerpt"] == "Too Many Requests"
+    assert a["error_kind"] == "RATE_LIMITED"
+
+
+@pytest.mark.asyncio
 async def test_upstream_log_redacts_sensitive_keys(
     seeded_app: httpx.AsyncClient,
 ) -> None:

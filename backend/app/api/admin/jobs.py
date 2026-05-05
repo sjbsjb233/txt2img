@@ -147,25 +147,34 @@ def _derive_lifecycle(job: Job, attempts: list[dict[str, Any]]) -> JobLifecycleS
     last_attempt_end = None
     if attempts:
         attempts_total_ms = 0.0
+        from datetime import timedelta as _td
+
         for a in attempts:
             ts = a.get("started_at")
-            if ts and first_attempt_started is None:
+            attempt_started: datetime | None = None
+            if ts:
                 try:
-                    first_attempt_started = datetime.fromisoformat(
-                        ts.replace("Z", "+00:00")
+                    attempt_started = datetime.fromisoformat(
+                        str(ts).replace("Z", "+00:00")
                     )
                 except (TypeError, ValueError):
-                    pass
+                    attempt_started = None
+            if attempt_started and first_attempt_started is None:
+                first_attempt_started = attempt_started
+
             lat = a.get("latency_ms")
             if isinstance(lat, (int, float)):
                 attempts_total_ms += float(lat)
-                if first_attempt_started:
-                    try:
-                        last_attempt_end = first_attempt_started.replace(
-                            tzinfo=first_attempt_started.tzinfo
-                        )
-                    except Exception:  # pragma: no cover
-                        pass
+                # Track the *latest* attempt's end time so finalize is
+                # measured from the last attempt, not the first. Falling
+                # back to ``first_attempt_started + cumulative`` keeps a
+                # rough estimate alive when individual attempt timestamps
+                # are missing from legacy logs.
+                base = attempt_started or first_attempt_started
+                if base is not None:
+                    candidate = base + _td(milliseconds=float(lat))
+                    if last_attempt_end is None or candidate > last_attempt_end:
+                        last_attempt_end = candidate
         attempts_seconds = round(attempts_total_ms / 1000.0, 3) if attempts else None
 
     if started and first_attempt_started:
@@ -238,19 +247,34 @@ def _build_user_state(
             recent_fail_rate_total=recent_fail_total,
         )
 
+    # Use a sentinel-aware getter so a recorded ``0`` (e.g. a free-tier
+    # user with hard_quota=0) is preserved instead of being silently
+    # replaced by the live tier defaults via ``... or fallback``.
+    def _pick_int(key: str, fallback: int) -> int:
+        if key in snapshot and isinstance(snapshot[key], (int, float, bool)):
+            return int(snapshot[key])
+        return int(fallback)
+
+    def _pick_bool(key: str) -> bool:
+        if key in snapshot:
+            return bool(snapshot[key])
+        return False
+
+    tier_value = snapshot.get("tier")
+    if not isinstance(tier_value, str) or not tier_value:
+        tier_value = user.tier
+
     return UserStateSnapshot(
-        tier=str(snapshot.get("tier") or user.tier),
-        today_count=int(snapshot.get("today_count") or 0),
-        soft_quota_effective=int(snapshot.get("soft_quota_effective") or soft_eff),
-        hard_quota_effective=int(snapshot.get("hard_quota_effective") or hard_eff),
-        soft_quota_triggered=bool(snapshot.get("soft_quota_triggered") or False),
-        captcha_required=bool(snapshot.get("captcha_required") or False),
-        captcha_verified=bool(snapshot.get("captcha_verified") or False),
-        recent_fail_rate_n=int(
-            snapshot.get("recent_fail_rate_n", recent_fail_n) or 0
-        ),
-        recent_fail_rate_total=int(
-            snapshot.get("recent_fail_rate_total", recent_fail_total) or 10
+        tier=str(tier_value),
+        today_count=_pick_int("today_count", 0),
+        soft_quota_effective=_pick_int("soft_quota_effective", soft_eff),
+        hard_quota_effective=_pick_int("hard_quota_effective", hard_eff),
+        soft_quota_triggered=_pick_bool("soft_quota_triggered"),
+        captcha_required=_pick_bool("captcha_required"),
+        captcha_verified=_pick_bool("captcha_verified"),
+        recent_fail_rate_n=_pick_int("recent_fail_rate_n", recent_fail_n),
+        recent_fail_rate_total=_pick_int(
+            "recent_fail_rate_total", recent_fail_total
         ),
     )
 
@@ -340,11 +364,15 @@ def _build_attempt_detail(
         rpm_limit=snap_raw.get("rpm_limit"),
         extra=snap_raw.get("extra") or {},
     )
+    # Prefer the upstream body excerpt the executor stored on the error
+    # dict; fall back to the normalized message when the adapter never
+    # captured a body (timeouts, network errors).
     body_excerpt = None
     if not raw.get("ok"):
-        # Build a short excerpt from the normalized error message.
-        msg = error.get("message") if isinstance(error, dict) else None
-        body_excerpt = excerpt_for_response(msg)
+        body_value = None
+        if isinstance(error, dict):
+            body_value = error.get("upstream_body_excerpt") or error.get("message")
+        body_excerpt = excerpt_for_response(body_value)
 
     started_at = None
     ts = raw.get("started_at")
@@ -360,6 +388,16 @@ def _build_attempt_detail(
         if isinstance(kind_value, str):
             error_kind = kind_value
 
+    # ``upstream_status`` lives on the nested error dict (executor
+    # writes it through ``StandardError.to_dict``), not at the top
+    # level of the attempt log. The top-level fallback covers any
+    # future caller that promotes the field.
+    upstream_status = None
+    if isinstance(error, dict):
+        upstream_status = error.get("upstream_status") or error.get("http_status")
+    if upstream_status is None:
+        upstream_status = raw.get("upstream_status")
+
     return AttemptDetail(
         attempt_no=n,
         provider_id=provider_id,
@@ -368,7 +406,7 @@ def _build_attempt_detail(
         latency_ms=raw.get("latency_ms"),
         ok=bool(raw.get("ok")),
         error_kind=error_kind,
-        upstream_status=raw.get("upstream_status"),
+        upstream_status=upstream_status,
         upstream_body_excerpt=body_excerpt,
         provider_snapshot=snap,
         raw_log_url=f"/api/admin/jobs/{hash_id}/upstream/{n}",
@@ -512,12 +550,35 @@ async def inspect_job(
         d["attempt_no"] = n
         attempt_dicts.append(d)
 
-    attempts_models = [
-        _build_attempt_detail(
-            hash_id, n, p, provider_label_by_id, chosen_provider_id
-        )
-        for n, p in zip(attempt_indices, attempt_payloads)
-    ]
+    attempts_models: list[AttemptDetail] = []
+    attempt_decode_failed = False
+    for n, p in zip(attempt_indices, attempt_payloads):
+        try:
+            attempts_models.append(
+                _build_attempt_detail(
+                    hash_id, n, p, provider_label_by_id, chosen_provider_id
+                )
+            )
+        except Exception:
+            # Legacy / malformed log → keep the section alive by
+            # emitting a placeholder row instead of 500-ing the whole
+            # inspector response. The placeholder mirrors the
+            # ``raw is None`` branch of ``_build_attempt_detail``.
+            logger.exception(
+                "inspect: failed to decode attempt %d for job=%s", n, hash_id
+            )
+            attempt_decode_failed = True
+            try:
+                attempts_models.append(
+                    _build_attempt_detail(
+                        hash_id, n, None, provider_label_by_id, chosen_provider_id
+                    )
+                )
+            except Exception:  # pragma: no cover - extremely defensive
+                pass
+
+    if attempt_decode_failed:
+        degraded.append("attempts")
 
     # ---- Lifecycle ----
     try:
@@ -694,7 +755,8 @@ async def inspect_job(
 async def get_upstream_log(
     hash_id: str,
     attempt_no: int,
-    _ctx: CurrentAdminContext,
+    ctx: CurrentAdminContext,
+    request: Request,
 ) -> Any:
     if not image_io.is_valid_hash_id(hash_id):
         raise api_error(404, "NOT_FOUND", "Job not found.", field="hash_id")
@@ -702,19 +764,45 @@ async def get_upstream_log(
         raise api_error(404, "NOT_FOUND", "Attempt not found.", field="attempt_no")
 
     async with get_session() as session:
-        exists = (
+        row = (
             await session.execute(
-                select(Job.id).where(Job.hash_id == hash_id)
+                select(Job.id, Job.user_id).where(Job.hash_id == hash_id)
             )
-        ).scalar_one_or_none()
-        if exists is None:
+        ).one_or_none()
+        if row is None:
             raise api_error(404, "NOT_FOUND", "Job not found.", field="hash_id")
+        target_user_id = row[1]
 
     payload = await asyncio.to_thread(
         image_io.read_upstream_log, hash_id, attempt_no
     )
     if payload is None:
         raise api_error(404, "NOT_FOUND", "Attempt log not found.")
+
+    # Raw upstream payloads are the most sensitive surface in the
+    # admin tooling — every successful read leaves an audit row so
+    # access is reconstructable after the fact.
+    try:
+        async with get_session() as session:
+            await write_audit(
+                session,
+                actor_user_id=ctx.user.id,
+                action="admin.job.upstream_log",
+                target_kind="job",
+                target_id=hash_id,
+                payload={
+                    "attempt_no": int(attempt_no),
+                    "target_user_id": target_user_id,
+                },
+                ip=_client_ip(request),
+            )
+    except Exception:  # pragma: no cover - best-effort
+        logger.exception(
+            "inspect: audit write failed for upstream log job=%s attempt=%d",
+            hash_id,
+            attempt_no,
+        )
+
     return redact_payload(payload)
 
 
@@ -733,6 +821,7 @@ async def requeue_job(
     if not image_io.is_valid_hash_id(hash_id):
         raise api_error(404, "NOT_FOUND", "Job not found.", field="hash_id")
 
+    from app.db.jobs_repository import JobsRepository
     from app.domain.job_queue import get_job_queue
     from app.utils.ids import new_job_hash_id, new_job_internal_id
 
@@ -750,12 +839,13 @@ async def requeue_job(
                 field="status",
             )
 
-        # Resolve next seq_no for that user atomically inside this tx.
-        max_seq = (
-            await session.execute(
-                select(func.max(Job.seq_no)).where(Job.user_id == src.user_id)
-            )
-        ).scalar_one() or 0
+        # Atomic seq_no allocation — using ``UPDATE ... RETURNING`` on
+        # ``users.last_seq_no`` keeps two concurrent requeues for the
+        # same user from colliding on the unique ``(user_id, seq_no)``
+        # index that a SELECT MAX(...) approach would race with.
+        allocation = await JobsRepository().allocate_seq_no(
+            src.user_id, session=session
+        )
 
         now = datetime.now(timezone.utc)
         new_id = new_job_internal_id()
@@ -765,7 +855,7 @@ async def requeue_job(
             hash_id=new_hash,
             user_id=src.user_id,
             tier_at_submit=src.tier_at_submit,
-            seq_no=int(max_seq) + 1,
+            seq_no=allocation.seq_no,
             set_id=None,
             session_id=src.session_id,
             model=src.model,
@@ -783,10 +873,12 @@ async def requeue_job(
         )
         session.add(new_job)
 
-        # Clone references — they live on disk under the source hash so
-        # we re-record the rows pointing at the same rel_path. Disk
-        # cloning is omitted — the original files are kept (job rows
-        # don't own the bytes; they reference them).
+        # Clone reference rows AND the underlying files into the new
+        # job's data directory. Pointing at the source job's rel_path
+        # would break the requeued job once the source is purged
+        # (account-deletion T+30 / cleanup keeper). When the file
+        # genuinely can't be copied we keep the row alive with the
+        # legacy rel_path so the requeue at least carries metadata.
         ref_rows = list(
             (
                 await session.execute(
@@ -795,13 +887,21 @@ async def requeue_job(
             ).scalars().all()
         )
         for r in ref_rows:
+            new_rel = await asyncio.to_thread(
+                image_io.clone_reference,
+                src_rel_path=r.rel_path,
+                dst_hash_id=new_hash,
+                order=int(r.ref_order),
+                original_filename=r.filename,
+                mime=r.mime,
+            )
             session.add(
                 JobReference(
                     job_id=new_id,
                     ref_order=r.ref_order,
                     filename=r.filename,
                     mime=r.mime,
-                    rel_path=r.rel_path,
+                    rel_path=new_rel or r.rel_path,
                 )
             )
 
@@ -829,7 +929,7 @@ async def requeue_job(
             tier=src.tier_at_submit,
             model=src.model,
             queued_at=now,
-            seq_no=int(max_seq) + 1,
+            seq_no=allocation.seq_no,
         )
     )
     return RequeueResponse(new_hash_id=new_hash, source_hash_id=hash_id)

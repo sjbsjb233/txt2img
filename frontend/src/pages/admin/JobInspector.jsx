@@ -385,7 +385,63 @@ function fmtScore(v) {
   return Number(v).toFixed(2);
 }
 
-function AttemptCard({ a }) {
+// The raw upstream log endpoint requires admin auth and lives under
+// the configured ``api_base``, so a plain ``<a href>`` neither attaches
+// the bearer token nor lands on the right origin in environments where
+// the frontend talks to a remote backend. Fetch via the shared
+// apiFetch wrapper, then open the response as a blob URL in a new tab.
+function RawLogLink({ hashId, attemptNo }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const open = async () => {
+    if (busy || !hashId) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const payload = await adminJobs.getUpstreamLog(hashId, attemptNo);
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const w = window.open(url, "_blank", "noopener,noreferrer");
+      // Browsers GC the blob URL when nothing references it; keep
+      // it alive ~30s so the new tab has time to finish loading.
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      if (!w) setErr("popup blocked");
+    } catch (e) {
+      setErr(e.message || "load failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={open}
+      disabled={busy}
+      style={{
+        background: "transparent",
+        border: "none",
+        cursor: busy ? "wait" : "pointer",
+        fontFamily: "var(--font-mono)",
+        fontSize: 10,
+        color: err ? "var(--bad)" : "var(--ink-3)",
+        padding: 0,
+      }}
+      title={err || "open raw upstream log in a new tab"}
+    >
+      {busy
+        ? "loading…"
+        : err
+          ? `attempt_${attemptNo}.json (${err})`
+          : `attempt_${attemptNo}.json ↗`}
+    </button>
+  );
+}
+
+function AttemptCard({ a, hashId }) {
   const isOk = a.ok;
   const bg = isOk ? "#dceadf" : "#fdecea";
   const badgeBg = isOk ? "var(--ok)" : "var(--bad)";
@@ -440,14 +496,8 @@ function AttemptCard({ a }) {
           </span>
         )}
         <div style={{ flex: 1 }} />
-        <a
-          href={a.raw_log_url}
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{ fontSize: 10, color: "var(--ink-3)" }}
-        >
-          attempt_{a.attempt_no}.json ↗
-        </a>
+        <RawLogLink hashId={hashId} attemptNo={a.attempt_no} />
+        {/* end raw log */}
         <span style={{ fontSize: 11, fontWeight: 600 }}>
           {fmtMs(a.latency_ms)}
         </span>
@@ -909,7 +959,7 @@ export default function JobInspector({ hashId }) {
       </div>
 
       <div style={{ marginBottom: 14 }}>
-        <SectionTitle>USER STATE AT SUBMIT</SectionTitle>
+        <SectionTitle>USER STATE AT DISPATCH</SectionTitle>
         <UserStateChips state={inspect.user_state_at_submit} />
       </div>
 
@@ -928,7 +978,13 @@ export default function JobInspector({ hashId }) {
             no attempts (job failed admission)
           </div>
         ) : (
-          inspect.attempts.map((a) => <AttemptCard key={a.attempt_no} a={a} />)
+          inspect.attempts.map((a) => (
+            <AttemptCard
+              key={a.attempt_no}
+              a={a}
+              hashId={inspect.hash_id}
+            />
+          ))
         )}
       </div>
 

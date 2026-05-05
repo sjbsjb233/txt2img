@@ -57,7 +57,7 @@ from app.schemas.normalized import (
 from app.services import image_io
 from app.utils.crypto import decrypt
 from app.utils.ids import new_image_id
-from app.utils.redact import redact_payload, redact_upstream_body
+from app.utils.redact import redact_payload
 
 logger = logging.getLogger("txt2img.executor")
 
@@ -442,11 +442,12 @@ class JobExecutor:
                 error_kind=normalized.kind,
             )
             await self._breaker.observe(provider.provider_id, success=False)
-            error_payload = normalized.to_dict()
-            if isinstance(error_payload, dict):
-                msg = error_payload.get("message")
-                if isinstance(msg, str):
-                    error_payload["message"] = redact_upstream_body(msg)
+            # Redact the *whole* normalized error payload, not just the
+            # human-readable ``message``: ``to_dict`` may also expose
+            # ``upstream_body_excerpt`` / nested headers that can echo a
+            # token verbatim. The walking redactor scrubs every string
+            # leaf and every sensitive JSON key in one pass.
+            error_payload = redact_payload(normalized.to_dict())
             await asyncio.to_thread(
                 image_io.write_upstream_log,
                 hash_id,

@@ -807,7 +807,18 @@ export default function UserDetailDrawer({ userId, onClose, onChanged, currentAd
                       data-testid="admin-job-row"
                       data-hash={j.hash_id}
                       data-expanded={expanded ? "1" : "0"}
+                      role="button"
+                      tabIndex={0}
+                      aria-expanded={expanded}
+                      aria-controls={`job-inspector-${j.hash_id}`}
+                      aria-label={`Inspect job ${j.hash_id}`}
                       onClick={() => toggleJob(j.hash_id)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          toggleJob(j.hash_id);
+                        }
+                      }}
                       style={{
                         display: "grid",
                         gridTemplateColumns:
@@ -823,6 +834,14 @@ export default function UserDetailDrawer({ userId, onClose, onChanged, currentAd
                           ? "var(--banana-soft, #fbe9a1)"
                           : "transparent",
                         fontWeight: expanded ? 600 : "normal",
+                        outline: "none",
+                      }}
+                      onFocus={(e) => {
+                        e.currentTarget.style.boxShadow =
+                          "inset 0 0 0 2px var(--ink)";
+                      }}
+                      onBlur={(e) => {
+                        e.currentTarget.style.boxShadow = "none";
                       }}
                     >
                       <div
@@ -863,7 +882,15 @@ export default function UserDetailDrawer({ userId, onClose, onChanged, currentAd
                         {expanded ? "▾" : "▸"}
                       </div>
                     </div>
-                    {expanded && <JobInspector hashId={j.hash_id} />}
+                    {expanded && (
+                      <div
+                        id={`job-inspector-${j.hash_id}`}
+                        role="region"
+                        aria-label={`Diagnostics for job ${j.hash_id}`}
+                      >
+                        <JobInspector hashId={j.hash_id} />
+                      </div>
+                    )}
                   </div>
                 );
               })}
