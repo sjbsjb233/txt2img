@@ -489,6 +489,7 @@ _LIST_KEYS: tuple[str, ...] = (
     "output_format",
     "background",
     "moderation",
+    "thinking",
     "thinking_level",
 )
 
@@ -508,6 +509,7 @@ _BOOL_KEYS: tuple[str, ...] = (
     "stream",
     "supports_transparent_bg",
     "supports_mask",
+    "size_allow_custom",
 )
 
 

@@ -109,6 +109,7 @@ class JobCreatePayload(BaseModel):
     output_compression: int | None = Field(default=None, ge=0, le=100)
     background: str | None = Field(default=None, max_length=32)
     moderation: str | None = Field(default=None, max_length=32)
+    thinking: str | None = Field(default=None, max_length=16)
     stream: bool = False
     partial_images: int = Field(default=0, ge=0, le=16)
 

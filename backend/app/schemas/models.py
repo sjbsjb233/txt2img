@@ -47,6 +47,7 @@ class ModelCapabilities(BaseModel):
     output_format: list[str] | None = None
     background: list[str] | None = None
     moderation: list[str] | None = None
+    thinking: list[str] | None = None
     thinking_level: list[str] | None = None
 
     # Numeric upper bounds.
@@ -62,6 +63,11 @@ class ModelCapabilities(BaseModel):
     stream: bool | None = None
     supports_transparent_bg: bool | None = None
     supports_mask: bool | None = None
+    # True iff at least one reachable provider sets ``size_allow_custom``.
+    # When true, frontend exposes a "Custom…" button for ``size`` that
+    # opens a picker letting the user input arbitrary WIDTHxHEIGHT in
+    # addition to the preset chips.
+    size_allow_custom: bool | None = None
 
 
 class ModelDefaults(BaseModel):
@@ -81,6 +87,7 @@ class ModelDefaults(BaseModel):
     output_format: str | None = None
     background: str | None = None
     moderation: str | None = None
+    thinking: str | None = None
     aspect_ratio: str | None = None
     image_size: str | None = None
     thinking_level: str | None = None
