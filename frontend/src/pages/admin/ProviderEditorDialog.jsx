@@ -814,7 +814,7 @@ export default function ProviderEditorDialog({
 
 function Field({ label, mono, children }) {
   return (
-    <div>
+    <div data-field={label}>
       <div
         className="mono caps"
         style={{ fontSize: 9, color: "var(--ink-3)", marginBottom: 4 }}

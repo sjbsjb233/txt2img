@@ -342,3 +342,49 @@ def test_validator_rejects_thinking_when_value_not_in_caps():
     )
     assert f is not None
     assert f.field == "thinking"
+
+
+# ---------------------------------------------------------------------------
+# provider_selector — custom size escape hatch must mirror the validator
+# ---------------------------------------------------------------------------
+
+
+def test_selector_capabilities_match_accepts_custom_size_when_opted_in():
+    """A non-preset size that satisfies the 5-rule contract MUST pass
+    the provider selector's per-(provider, model) capability check when
+    ``size_allow_custom`` is true. Without this, a custom size would
+    clear the validator only to be silently dropped by the selector,
+    landing as ``NO_PROVIDER_AVAILABLE`` even when a healthy provider
+    explicitly opted into custom sizes.
+    """
+    from app.domain.provider_selector import _capabilities_match
+    from app.schemas.normalized import NormalizedRequest
+
+    request = NormalizedRequest(
+        model="gpt-image-2",
+        prompt="x",
+        n=1,
+        size="1280x720",
+    )
+    caps_with_optin = {
+        "size": ["1024x1024", "1024x1536", "1536x1024", "auto"],
+        "size_allow_custom": True,
+    }
+    caps_without_optin = {
+        "size": ["1024x1024", "1024x1536", "1536x1024", "auto"],
+    }
+    assert _capabilities_match(caps_with_optin, request) is True
+    assert _capabilities_match(caps_without_optin, request) is False
+
+
+def test_selector_capabilities_match_thinking_filter():
+    from app.domain.provider_selector import _capabilities_match
+    from app.schemas.normalized import NormalizedRequest
+
+    request = NormalizedRequest(
+        model="gpt-image-2", prompt="x", n=1, thinking="medium"
+    )
+    assert _capabilities_match({"thinking": ["off", "low", "medium", "high"]}, request)
+    assert not _capabilities_match({"thinking": ["off", "low"]}, request)
+    # cap missing entirely → no opinion → accept (matches list-key semantics)
+    assert _capabilities_match({}, request)
