@@ -5,3 +5,6 @@ __pycache__/
 *.db-journal
 .env
 .env.local
+# Real upstream API keys for the optional `pytest -m real` suite.
+# Never commit these — they are billable credentials.
+tests/real/.env.real
