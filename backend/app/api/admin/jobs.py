@@ -218,8 +218,14 @@ def _build_user_state(
     timeline_rows: list[dict[str, Any]],
     recent_fail_n: int,
     recent_fail_total: int,
-) -> UserStateSnapshot:
-    """Pull state from timeline.jsonl when present; fall back to live row."""
+) -> tuple[UserStateSnapshot, bool]:
+    """Pull state from timeline.jsonl when present; fall back to live row.
+
+    Returns ``(snapshot, is_synthetic)``. ``is_synthetic=True`` means the
+    timeline record was not found and the snapshot is reconstructed from
+    today's DB row + tier defaults — admins should treat the values as
+    "current" rather than "at dispatch".
+    """
     snapshot: dict[str, Any] | None = None
     for row in timeline_rows:
         extra = row.get("extra")
@@ -235,16 +241,19 @@ def _build_user_state(
 
     soft_eff, hard_eff = get_tier_config().effective_quotas(user)
     if snapshot is None:
-        return UserStateSnapshot(
-            tier=str(job.tier_at_submit or user.tier),
-            today_count=int(user.today_count or 0),
-            soft_quota_effective=int(soft_eff),
-            hard_quota_effective=int(hard_eff),
-            soft_quota_triggered=False,
-            captcha_required=False,
-            captcha_verified=False,
-            recent_fail_rate_n=recent_fail_n,
-            recent_fail_rate_total=recent_fail_total,
+        return (
+            UserStateSnapshot(
+                tier=str(job.tier_at_submit or user.tier),
+                today_count=int(user.today_count or 0),
+                soft_quota_effective=int(soft_eff),
+                hard_quota_effective=int(hard_eff),
+                soft_quota_triggered=False,
+                captcha_required=False,
+                captcha_verified=False,
+                recent_fail_rate_n=recent_fail_n,
+                recent_fail_rate_total=recent_fail_total,
+            ),
+            True,
         )
 
     # Use a sentinel-aware getter so a recorded ``0`` (e.g. a free-tier
@@ -264,18 +273,21 @@ def _build_user_state(
     if not isinstance(tier_value, str) or not tier_value:
         tier_value = user.tier
 
-    return UserStateSnapshot(
-        tier=str(tier_value),
-        today_count=_pick_int("today_count", 0),
-        soft_quota_effective=_pick_int("soft_quota_effective", soft_eff),
-        hard_quota_effective=_pick_int("hard_quota_effective", hard_eff),
-        soft_quota_triggered=_pick_bool("soft_quota_triggered"),
-        captcha_required=_pick_bool("captcha_required"),
-        captcha_verified=_pick_bool("captcha_verified"),
-        recent_fail_rate_n=_pick_int("recent_fail_rate_n", recent_fail_n),
-        recent_fail_rate_total=_pick_int(
-            "recent_fail_rate_total", recent_fail_total
+    return (
+        UserStateSnapshot(
+            tier=str(tier_value),
+            today_count=_pick_int("today_count", 0),
+            soft_quota_effective=_pick_int("soft_quota_effective", soft_eff),
+            hard_quota_effective=_pick_int("hard_quota_effective", hard_eff),
+            soft_quota_triggered=_pick_bool("soft_quota_triggered"),
+            captcha_required=_pick_bool("captcha_required"),
+            captcha_verified=_pick_bool("captcha_verified"),
+            recent_fail_rate_n=_pick_int("recent_fail_rate_n", recent_fail_n),
+            recent_fail_rate_total=_pick_int(
+                "recent_fail_rate_total", recent_fail_total
+            ),
         ),
+        False,
     )
 
 
@@ -341,6 +353,7 @@ def _build_attempt_detail(
     raw: dict[str, Any] | None,
     provider_label_by_id: dict[str, str],
     chosen_provider_id: str | None,
+    provider_static_by_id: dict[str, dict[str, Any]] | None = None,
 ) -> AttemptDetail:
     if raw is None:
         return AttemptDetail(
@@ -354,14 +367,25 @@ def _build_attempt_detail(
     provider_id = str(raw.get("provider_id") or "?")
     error = raw.get("error") or {}
     snap_raw = raw.get("provider_snapshot") or {}
+    static = (
+        (provider_static_by_id or {}).get(provider_id) or {}
+    )
+
+    def _fallback(key: str) -> Any:
+        """Return the snapshotted value if recorded; otherwise the
+        provider's current value as a best-effort fill-in."""
+        if key in snap_raw and snap_raw[key] is not None:
+            return snap_raw[key]
+        return static.get(key)
+
     snap = ProviderSnapshotAtAttempt(
-        circuit_state=snap_raw.get("circuit_state"),
+        circuit_state=_fallback("circuit_state"),
         success_rate_5m=snap_raw.get("success_rate_5m"),
         p50_latency_ms=snap_raw.get("p50_latency_ms"),
         current_concurrency=snap_raw.get("current_concurrency"),
-        max_concurrency=snap_raw.get("max_concurrency"),
+        max_concurrency=_fallback("max_concurrency"),
         current_rpm=snap_raw.get("current_rpm"),
-        rpm_limit=snap_raw.get("rpm_limit"),
+        rpm_limit=_fallback("rpm_limit"),
         extra=snap_raw.get("extra") or {},
     )
     # Prefer the upstream body excerpt the executor stored on the error
@@ -514,12 +538,36 @@ async def inspect_job(
                 set_id=job_row.set_id, image_count=int(count or 0)
             )
 
+        # Pull the static + currently-persisted dynamic columns so the
+        # inspector can backfill the per-attempt provider snapshot when
+        # the recorded ``provider_snapshot`` block is missing fields
+        # (legacy jobs that ran before Phase 2 instrumentation, or rows
+        # whose write was truncated). ``max_concurrency`` / ``rpm_limit``
+        # rarely change, so showing today's value beats a row of em
+        # dashes; ``circuit_state`` is the live debugger view of a
+        # provider and is informative even when not historical.
         provider_rows = list(
             (
-                await session.execute(select(Provider.id, Provider.label))
+                await session.execute(
+                    select(
+                        Provider.id,
+                        Provider.label,
+                        Provider.max_concurrency,
+                        Provider.rpm_limit,
+                        Provider.circuit_state,
+                    )
+                )
             ).all()
         )
-        provider_label_by_id = {pid: label for (pid, label) in provider_rows}
+        provider_label_by_id = {row[0]: row[1] for row in provider_rows}
+        provider_static_by_id: dict[str, dict[str, Any]] = {
+            row[0]: {
+                "max_concurrency": int(row[2]) if row[2] is not None else None,
+                "rpm_limit": int(row[3]) if row[3] is not None else None,
+                "circuit_state": row[4] or None,
+            }
+            for row in provider_rows
+        }
 
     # Off the event loop: read the per-job filesystem artefacts in parallel.
     timeline_task = asyncio.to_thread(image_io.read_timeline, hash_id)
@@ -556,7 +604,12 @@ async def inspect_job(
         try:
             attempts_models.append(
                 _build_attempt_detail(
-                    hash_id, n, p, provider_label_by_id, chosen_provider_id
+                    hash_id,
+                    n,
+                    p,
+                    provider_label_by_id,
+                    chosen_provider_id,
+                    provider_static_by_id,
                 )
             )
         except Exception:
@@ -571,7 +624,12 @@ async def inspect_job(
             try:
                 attempts_models.append(
                     _build_attempt_detail(
-                        hash_id, n, None, provider_label_by_id, chosen_provider_id
+                        hash_id,
+                        n,
+                        None,
+                        provider_label_by_id,
+                        chosen_provider_id,
+                        provider_static_by_id,
                     )
                 )
             except Exception:  # pragma: no cover - extremely defensive
@@ -594,9 +652,15 @@ async def inspect_job(
             job_row.user_id, job_row.id
         )
         recent_total = recent_total if recent_total > 0 else 10
-        user_state = _build_user_state(
+        user_state, user_state_synthetic = _build_user_state(
             user_row, job_row, timeline_rows, recent_n, recent_total
         )
+        if user_state_synthetic:
+            # Distinct from the failure flag — the section is *valid*
+            # but reconstructed from current DB rows rather than the
+            # snapshot taken at dispatch. The frontend uses this flag
+            # to render a "current values" disclaimer.
+            degraded.append("user_state_synthetic")
     except Exception:
         logger.exception(
             "inspect: user-state derivation failed for job=%s", hash_id
@@ -621,7 +685,32 @@ async def inspect_job(
             routing = None
             degraded.append("routing")
     else:
-        # Not necessarily an error — legacy jobs predate routing.json.
+        # No recorded trace on disk — pre-Phase-2 jobs ran before the
+        # selector started persisting the trace, and there is no way to
+        # reconstruct the historical filter / score breakdown after the
+        # fact. We still synthesise a minimal trace that pins the
+        # chosen provider so admins see *something* useful instead of
+        # an opaque "trace unavailable" placeholder.
+        if chosen_provider_id and chosen_provider_id in provider_label_by_id:
+            routing = RoutingTrace(
+                pool_total=len(provider_label_by_id),
+                pool_survived=1,
+                pool_scored=1,
+                filtered_out=[],
+                scored=[
+                    ScoredProvider(
+                        rank=1,
+                        provider_id=chosen_provider_id,
+                        label=provider_label_by_id.get(
+                            chosen_provider_id, chosen_provider_id
+                        ),
+                        components={},
+                        total_score=0.0,
+                        chosen=True,
+                    )
+                ],
+                selector_config={},
+            )
         if job_row.status in _VISIBLE_TERMINAL:
             degraded.append("routing")
 

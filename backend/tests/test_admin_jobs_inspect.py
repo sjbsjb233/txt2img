@@ -380,6 +380,124 @@ async def test_upstream_log_redacts_sensitive_keys(
 # ---------------------------------------------------------------------------
 
 
+async def _seed_provider(
+    *,
+    provider_id: str = "bltcy_oai_pro",
+    label: str = "Bltcy OAI Pro",
+    max_concurrency: int = 8,
+    rpm_limit: int = 60,
+    circuit_state: str = "healthy",
+) -> None:
+    from app.db.engine import get_session
+    from app.db.models import Provider
+
+    async with get_session() as session:
+        session.add(
+            Provider(
+                id=provider_id,
+                label=label,
+                adapter_type="openai",
+                base_url="https://example.com",
+                api_key_enc="enc:dummy",
+                cost_per_image_cny=0.1,
+                initial_balance_cny=100.0,
+                balance_cny=99.0,
+                enabled=1,
+                max_concurrency=max_concurrency,
+                rpm_limit=rpm_limit,
+                circuit_state=circuit_state,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_inspect_falls_back_to_provider_static_when_snapshot_missing(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Legacy job: attempt log has no ``provider_snapshot`` block.
+    Inspector should fill ``max_concurrency`` / ``rpm_limit`` /
+    ``circuit_state`` from the live Provider row instead of returning
+    a row of em-dashes.
+    """
+    uid = await _seed_user(username="legacy1", password="legacy1pw")
+    await _seed_provider()
+    hash_id = await _seed_job(
+        user_id=uid, status="SUCCEEDED", provider_used="bltcy_oai_pro"
+    )
+    from app.services import image_io
+
+    image_io.write_upstream_log(
+        hash_id,
+        1,
+        {
+            "provider_id": "bltcy_oai_pro",
+            "ok": True,
+            "started_at": "2026-05-05T05:47:48Z",
+            "latency_ms": 169000,
+            # Note: no ``provider_snapshot`` field — pre-Phase-2 shape.
+        },
+    )
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get(
+        f"/api/admin/jobs/{hash_id}/inspect", headers=_auth(token)
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["attempts"]) == 1
+    snap = body["attempts"][0]["provider_snapshot"]
+    assert snap["max_concurrency"] == 8
+    assert snap["rpm_limit"] == 60
+    assert snap["circuit_state"] == "healthy"
+    # Dynamic fields stay null because we genuinely don't know.
+    assert snap["success_rate_5m"] is None
+    assert snap["p50_latency_ms"] is None
+
+
+@pytest.mark.asyncio
+async def test_inspect_synthesises_minimal_routing_trace_when_missing(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Legacy job: no routing.json on disk. The endpoint should still
+    pin the chosen provider in the ``scored`` list and report the
+    ``routing`` degraded section so the UI can show a disclaimer.
+    """
+    uid = await _seed_user(username="legacy2", password="legacy2pw")
+    await _seed_provider()
+    hash_id = await _seed_job(
+        user_id=uid, status="SUCCEEDED", provider_used="bltcy_oai_pro"
+    )
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get(
+        f"/api/admin/jobs/{hash_id}/inspect", headers=_auth(token)
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["routing"] is not None
+    assert body["routing"]["scored"][0]["provider_id"] == "bltcy_oai_pro"
+    assert body["routing"]["scored"][0]["chosen"] is True
+    assert "routing" in body["degraded_sections"]
+
+
+@pytest.mark.asyncio
+async def test_inspect_marks_user_state_synthetic_when_timeline_missing(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Legacy job: no timeline.jsonl user_state record. Endpoint falls
+    back to live DB row + tier defaults but flags the section as
+    synthetic so admins know not to read historical meaning into it.
+    """
+    uid = await _seed_user(username="legacy3", password="legacy3pw")
+    hash_id = await _seed_job(user_id=uid)
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get(
+        f"/api/admin/jobs/{hash_id}/inspect", headers=_auth(token)
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["user_state_at_submit"] is not None
+    assert "user_state_synthetic" in body["degraded_sections"]
+
+
 @pytest.mark.asyncio
 async def test_requeue_clones_into_fresh_queued_job(
     seeded_app: httpx.AsyncClient,
