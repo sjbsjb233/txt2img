@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as draftDB from "../storage/draftDB.js";
 
-const STORAGE_KEY = "txt2img:create:draft:v1";
-const DRAFT_VERSION = 1;
+// Draft v2 — model_id and params have moved into the Sticky layer
+// (txt2img:create:sticky:v1). This payload now only owns the ephemeral
+// trio that should be wiped on Generate-success / Clear / 7-day expiry.
+const STORAGE_KEY = "txt2img:create:draft:v2";
+const DRAFT_VERSION = 2;
 const DEBOUNCE_MS = 600;
 const VISIBLE_HOLD_SAVED_MS = 1600;
 const VISIBLE_HOLD_CLEARED_MS = 1100;
@@ -56,31 +59,27 @@ function clearLocalDraft() {
   }
 }
 
-function paramsAreDefault(params) {
-  if (!params || typeof params !== "object") return true;
-  return Object.keys(params).length === 0;
-}
-
-function isDraftNonEmpty({ prompt, params, refsCount }) {
+function isDraftNonEmpty({ prompt, refsCount, sessionId }) {
   if (prompt && prompt.trim().length > 0) return true;
   if (refsCount > 0) return true;
-  if (!paramsAreDefault(params)) return true;
+  if (sessionId) return true;
   return false;
 }
 
 /**
- * Drives autosave + restore for CreatePage. Returns the toast value
- * to render and a `clearDraft()` API the page wires to its Clear button
- * and to the post-Generate cleanup.
+ * Drives autosave + restore for the *ephemeral* part of CreatePage state
+ * (prompt, references, bound session). Returns the toast value to render
+ * and a `clearDraft()` API the page wires to its Clear button and to the
+ * post-Generate cleanup.
+ *
+ * Model + params persistence is handled separately by useStickyState —
+ * see frontend/src/hooks/useStickyState.js.
  */
 export function useDraftAutosave({
   userId,
   prompt,
-  params,
   refs,
-  modelId,
   sessionId,
-  catalog,
   enabled,
   onRestore,
 }) {
@@ -104,10 +103,10 @@ export function useDraftAutosave({
 
   // Mirror the "live" form state so the beforeunload flush can read the
   // most-recent values without re-rendering the hook on every keystroke.
-  const liveRef = useRef({ prompt, params, refs, modelId, sessionId });
+  const liveRef = useRef({ prompt, refs, sessionId });
   useEffect(() => {
-    liveRef.current = { prompt, params, refs, modelId, sessionId };
-  }, [prompt, params, refs, modelId, sessionId]);
+    liveRef.current = { prompt, refs, sessionId };
+  }, [prompt, refs, sessionId]);
 
   const onRestoreRef = useRef(onRestore);
   useEffect(() => {
@@ -153,8 +152,6 @@ export function useDraftAutosave({
       cancelToastTimers();
       toastKeyRef.current += 1;
       const key = toastKeyRef.current;
-      // Mount visible — the component fades in via CSS @keyframes
-      // (which run on element mount).
       setToast({ kind, text, key, visible: true });
       fadeOutTimerRef.current = setTimeout(() => {
         fadeOutTimerRef.current = null;
@@ -171,10 +168,6 @@ export function useDraftAutosave({
     [beginCooldown, cancelToastTimers]
   );
 
-  // Editing during a visible toast → snap it shut + go straight to cooldown.
-  // Read ``toast`` from a ref so a fresh toast doesn't recreate this
-  // callback, which would otherwise re-fire the autosave effect and
-  // immediately snap the just-shown toast shut.
   const toastRef = useRef(null);
   useEffect(() => {
     toastRef.current = toast;
@@ -195,11 +188,10 @@ export function useDraftAutosave({
     const refsCount = Array.isArray(live.refs) ? live.refs.length : 0;
     const draftIsEmpty = !isDraftNonEmpty({
       prompt: live.prompt,
-      params: live.params,
       refsCount,
+      sessionId: live.sessionId,
     });
     if (draftIsEmpty) {
-      // Nothing meaningful to save — and if we'd written before, clear out.
       if (hasWrittenRef.current) {
         clearLocalDraft();
         try {
@@ -215,10 +207,8 @@ export function useDraftAutosave({
       v: DRAFT_VERSION,
       saved_at: new Date().toISOString(),
       user_id: userId,
-      model_id: live.modelId || null,
       session_id: live.sessionId || null,
       prompt: live.prompt || "",
-      params: live.params || {},
       refs_count: refsCount,
     };
     const text = writeLocalDraft(payload);
@@ -236,20 +226,16 @@ export function useDraftAutosave({
   }, [userId]);
 
   const writeDraftSync = useCallback(() => {
-    // localStorage piece, sync. IDB is best-effort during unload.
     if (!userId) return;
     const live = liveRef.current;
     const refsCount = Array.isArray(live.refs) ? live.refs.length : 0;
     if (
       !isDraftNonEmpty({
         prompt: live.prompt,
-        params: live.params,
         refsCount,
+        sessionId: live.sessionId,
       })
     ) {
-      // Mirror writeDraftNow: if the user emptied the form mid-debounce,
-      // wipe the previously-saved draft so it doesn't reappear on the
-      // next visit.
       if (hasWrittenRef.current) {
         clearLocalDraft();
         draftDB.clearRefs(userId).catch(() => {});
@@ -261,15 +247,11 @@ export function useDraftAutosave({
       v: DRAFT_VERSION,
       saved_at: new Date().toISOString(),
       user_id: userId,
-      model_id: live.modelId || null,
       session_id: live.sessionId || null,
       prompt: live.prompt || "",
-      params: live.params || {},
       refs_count: refsCount,
     };
     writeLocalDraft(payload);
-    // Best-effort fire-and-forget IDB write — browsers may finish it
-    // before the page fully unloads.
     draftDB.putRefs(userId, live.refs || []).catch(() => {});
   }, [userId]);
 
@@ -278,7 +260,7 @@ export function useDraftAutosave({
   // ---------------------------------------------------------------
 
   useEffect(() => {
-    if (!enabled || !userId || !catalog || restoredRef.current) return;
+    if (!enabled || !userId || restoredRef.current) return;
     restoredRef.current = true;
     (async () => {
       const draft = readLocalDraft();
@@ -294,13 +276,6 @@ export function useDraftAutosave({
         }
         return;
       }
-
-      const allModels = catalog?.models || [];
-      const modelStillThere =
-        draft.model_id &&
-        allModels.find(
-          (m) => m.model_id === draft.model_id && m.available !== false
-        );
 
       let refs = [];
       try {
@@ -319,9 +294,6 @@ export function useDraftAutosave({
             "draft autosave: refs_count mismatch — restoring text only"
           );
         }
-        // Drop the partial set so the user doesn't get a confusing
-        // mix of stale references next to fresh text. Best-effort
-        // wipe the now-orphaned IDB record too.
         refs = [];
         if (userId) {
           draftDB.clearRefs(userId).catch(() => {});
@@ -330,16 +302,14 @@ export function useDraftAutosave({
 
       const restored = {
         prompt: draft.prompt || "",
-        params: modelStillThere ? draft.params || {} : {},
         refs,
-        modelId: modelStillThere ? draft.model_id : null,
         sessionId: draft.session_id || null,
       };
 
       const empty = !isDraftNonEmpty({
         prompt: restored.prompt,
-        params: restored.params,
         refsCount: restored.refs.length,
+        sessionId: restored.sessionId,
       });
       if (empty) return;
 
@@ -353,7 +323,7 @@ export function useDraftAutosave({
         stayMs: VISIBLE_HOLD_RESTORED_MS,
       });
     })();
-  }, [enabled, userId, catalog, showToast]);
+  }, [enabled, userId, showToast]);
 
   // ---------------------------------------------------------------
   // Debounced autosave on state change
@@ -365,7 +335,6 @@ export function useDraftAutosave({
       ignoreOnceRef.current = false;
       return undefined;
     }
-    // Touch the toast: if visible, snap it shut.
     onEditTouch();
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current);
@@ -374,7 +343,7 @@ export function useDraftAutosave({
       debounceTimerRef.current = null;
       const wrote = await writeDraftNow();
       if (!wrote) return;
-      if (inCooldownRef.current) return; // silent write
+      if (inCooldownRef.current) return;
       showToast({
         kind: "saved",
         text: "DRAFT SAVED",
@@ -391,9 +360,7 @@ export function useDraftAutosave({
     enabled,
     userId,
     prompt,
-    params,
     refs,
-    modelId,
     sessionId,
     onEditTouch,
     showToast,
@@ -432,7 +399,9 @@ export function useDraftAutosave({
   );
 
   // ---------------------------------------------------------------
-  // External clear
+  // External clear — wipes only the ephemeral layer (prompt/refs/session).
+  // Sticky (model + per-model params) is intentionally untouched here;
+  // see design doc §4.2 / §4.8.
   // ---------------------------------------------------------------
 
   const clearDraft = useCallback(
@@ -450,11 +419,7 @@ export function useDraftAutosave({
         }
       }
       hasWrittenRef.current = false;
-      // Reset cooldown so a follow-up save reflects honestly. Clearing
-      // is itself a user action; leave any cooldown timer alone (it'll
-      // expire on its own and the explicit toast below bypasses it).
       if (silent) return;
-      // User-initiated action → bypass cooldown.
       inCooldownRef.current = false;
       if (cooldownTimerRef.current) {
         clearTimeout(cooldownTimerRef.current);
