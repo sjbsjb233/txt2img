@@ -25,6 +25,12 @@ export function readSticky(userId) {
     if (!parsed.params_by_model || typeof parsed.params_by_model !== "object") {
       parsed.params_by_model = {};
     }
+    if (
+      !parsed.advanced_open_by_model ||
+      typeof parsed.advanced_open_by_model !== "object"
+    ) {
+      parsed.advanced_open_by_model = {};
+    }
     return parsed;
   } catch {
     return null;
@@ -42,6 +48,15 @@ export function writeSticky(payload) {
       params_by_model:
         payload.params_by_model && typeof payload.params_by_model === "object"
           ? payload.params_by_model
+          : {},
+      // Per-model open/closed state for the right-rail "◢ Advanced"
+      // <details> block. Tracked alongside params so it follows the
+      // same per-model sticky lifecycle. Missing entries mean
+      // "use the model's default closed state".
+      advanced_open_by_model:
+        payload.advanced_open_by_model &&
+        typeof payload.advanced_open_by_model === "object"
+          ? payload.advanced_open_by_model
           : {},
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(safe));
@@ -105,6 +120,7 @@ export function migrateFromLegacyDraft(userId) {
       user_id: userId,
       last_model_id: legacy.model_id || existing?.last_model_id || null,
       params_by_model,
+      advanced_open_by_model: existing?.advanced_open_by_model || {},
     });
 
     // Promote the trimmed payload to draft v2.

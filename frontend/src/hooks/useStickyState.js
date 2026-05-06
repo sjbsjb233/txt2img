@@ -30,16 +30,18 @@ function hydrateOnce(userId) {
  * Track + persist the user's "long-lived" Create page preferences:
  *   - last_model_id (the most recent model the user actually selected)
  *   - params_by_model (per-model parameter snapshots)
+ *   - advanced_open_by_model (per-model "◢ Advanced" expansion state)
  *
- * This hook only reads the current ``selectedModelId`` and ``params``
- * the page is using; it does not own that state. Writes happen on a
- * debounced timer; ``flushSticky()`` lets the page force an immediate
- * write before risky operations (e.g. switching models).
+ * This hook only reads the current state the page is using; it does
+ * not own it. Writes happen on a debounced timer; ``flushSticky()``
+ * forces an immediate write before risky operations (e.g. switching
+ * models).
  */
 export function useStickyState({
   userId,
   selectedModelId,
   paramsForCurrentModel,
+  advancedOpenForCurrentModel,
 }) {
   // Synchronous hydrate so the consumer can read sticky on first render
   // (model resolution chain in CreatePage relies on this).
@@ -51,8 +53,16 @@ export function useStickyState({
   }
 
   const writeTimerRef = useRef(null);
-  const liveRef = useRef({ selectedModelId, paramsForCurrentModel });
-  liveRef.current = { selectedModelId, paramsForCurrentModel };
+  const liveRef = useRef({
+    selectedModelId,
+    paramsForCurrentModel,
+    advancedOpenForCurrentModel,
+  });
+  liveRef.current = {
+    selectedModelId,
+    paramsForCurrentModel,
+    advancedOpenForCurrentModel,
+  };
 
   const persistNow = useCallback(() => {
     if (!userId) return;
@@ -61,16 +71,28 @@ export function useStickyState({
       user_id: userId,
       last_model_id: null,
       params_by_model: {},
+      advanced_open_by_model: {},
     };
     const params_by_model = { ...(prev.params_by_model || {}) };
+    const advanced_open_by_model = { ...(prev.advanced_open_by_model || {}) };
     if (live.selectedModelId) {
       const params = live.paramsForCurrentModel || {};
       params_by_model[live.selectedModelId] = { ...params };
+      // Only track when the consumer actually has an opinion (boolean).
+      // Anything else (null sentinel from the page during a model
+      // switch, plain undefined before first hydration, etc.) means
+      // "page hasn't decided yet" — preserve the existing entry so a
+      // render-before-resolution doesn't wipe it.
+      if (typeof live.advancedOpenForCurrentModel === "boolean") {
+        advanced_open_by_model[live.selectedModelId] =
+          live.advancedOpenForCurrentModel;
+      }
     }
     const payload = {
       user_id: userId,
       last_model_id: live.selectedModelId || prev.last_model_id || null,
       params_by_model,
+      advanced_open_by_model,
     };
     writeSticky(payload);
     cacheRef.current = payload;
@@ -84,9 +106,9 @@ export function useStickyState({
     persistNow();
   }, [persistNow]);
 
-  // Debounced write whenever model or params change. We don't care
-  // about the prompt/refs/session part of state here — those are
-  // owned by the Draft layer (useDraftAutosave).
+  // Debounced write whenever model, params, or advanced-open change.
+  // We don't care about the prompt/refs/session part of state here —
+  // those are owned by the Draft layer (useDraftAutosave).
   useEffect(() => {
     if (!userId || !selectedModelId) return undefined;
     if (writeTimerRef.current) clearTimeout(writeTimerRef.current);
@@ -100,7 +122,13 @@ export function useStickyState({
         writeTimerRef.current = null;
       }
     };
-  }, [userId, selectedModelId, paramsForCurrentModel, persistNow]);
+  }, [
+    userId,
+    selectedModelId,
+    paramsForCurrentModel,
+    advancedOpenForCurrentModel,
+    persistNow,
+  ]);
 
   // Sync flush on tab unload — same defensive posture as draft.
   useEffect(() => {
@@ -140,9 +168,21 @@ export function useStickyState({
     return found ? { ...found } : null;
   }, []);
 
+  // Returns the saved expansion state for the given model, or null
+  // when nothing has been saved yet. Caller decides the default
+  // (typically false / collapsed).
+  const getAdvancedOpenFor = useCallback((modelId) => {
+    if (!modelId) return null;
+    const cached = cacheRef.current;
+    if (!cached || !cached.advanced_open_by_model) return null;
+    const found = cached.advanced_open_by_model[modelId];
+    return typeof found === "boolean" ? found : null;
+  }, []);
+
   return {
     hydratedSticky: cacheRef.current,
     flushSticky,
     getParamsFor,
+    getAdvancedOpenFor,
   };
 }

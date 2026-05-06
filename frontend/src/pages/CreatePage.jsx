@@ -347,13 +347,27 @@ export default function CreatePage() {
   const [refs, setRefs] = useState([]); // array of File objects (insertion order)
   const [sessionId, setSessionId] = useState(null);
 
+  // Per-model expansion state for the right-rail "◢ Advanced" block.
+  // ``null`` is "not decided yet" — the model-change effect below
+  // resolves it from sticky (or false) once the active model lands,
+  // and the hook ignores the null so a render-before-resolution
+  // doesn't wipe an existing sticky entry.
+  const [advancedOpen, setAdvancedOpen] = useState(null);
+
   // Sticky layer — long-lived per-user model preference + per-model
-  // params. Lives across page reloads, navigation, and Generate
-  // success. Independent of the (ephemeral) Draft layer below.
-  const { hydratedSticky, flushSticky, getParamsFor } = useStickyState({
+  // params + per-model advanced-open. Lives across page reloads,
+  // navigation, and Generate success. Independent of the (ephemeral)
+  // Draft layer below.
+  const {
+    hydratedSticky,
+    flushSticky,
+    getParamsFor,
+    getAdvancedOpenFor,
+  } = useStickyState({
     userId,
     selectedModelId: selectedModel?.model_id || null,
     paramsForCurrentModel: params,
+    advancedOpenForCurrentModel: advancedOpen,
   });
 
   // Draft restore lands prompt / refs / session_id into the form
@@ -411,6 +425,10 @@ export default function CreatePage() {
           ? all.find((m) => m.model_id === preferredId && m.available)
           : null;
         const firstOk = all.find((m) => m.available) || all[0] || null;
+        // Reset advancedOpen synchronously so the next render doesn't
+        // briefly show the prior model's open state — the model-change
+        // effect picks up the right value on the same commit.
+        setAdvancedOpen(null);
         setSelectedModel(fromSticky || preferred || firstOk);
       } else {
         setSelectedModel(stillThere);
@@ -463,6 +481,11 @@ export default function CreatePage() {
         selectedModel.ui_schema
       )
     );
+    // Hydrate the Advanced block's expansion state for this model.
+    // Falls back to ``false`` (collapsed) when nothing is saved yet —
+    // matches the previous uncontrolled <details> default.
+    const stickyAdvanced = getAdvancedOpenFor(selectedModel.model_id);
+    setAdvancedOpen(typeof stickyAdvanced === "boolean" ? stickyAdvanced : false);
   }, [selectedModel?.model_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Draft autosave + restore — only the ephemeral trio (prompt / refs /
@@ -1118,6 +1141,11 @@ export default function CreatePage() {
                       // debounce gets clobbered by the new model's
                       // params reset (design doc §4.4 / §8.1).
                       flushSticky();
+                      // Reset advancedOpen alongside the model swap so
+                      // the next render doesn't briefly show the prior
+                      // model's open state before the model-change
+                      // effect resolves the new value from sticky.
+                      setAdvancedOpen(null);
                       setSelectedModel(m);
                     }}
                     disabled={disabled}
@@ -1341,6 +1369,8 @@ export default function CreatePage() {
               setParam={setParam}
               capabilities={selectedModel?.capabilities || {}}
               onOpenSizeCustom={() => setShowSizeCustom(true)}
+              advancedOpen={advancedOpen === true}
+              onToggleAdvanced={(next) => setAdvancedOpen(!!next)}
             />
           </div>
 
@@ -1947,6 +1977,8 @@ function SchemaParamsPanel({
   setParam,
   capabilities,
   onOpenSizeCustom,
+  advancedOpen,
+  onToggleAdvanced,
 }) {
   if (!plan.primary.length && !plan.advanced.length) {
     return (
@@ -1980,7 +2012,11 @@ function SchemaParamsPanel({
       {plan.advanced.length > 0 ? (
         <>
           <div className="hair" style={{ margin: "18px 0" }} />
-          <details>
+          <details
+            data-testid="advanced-details"
+            open={!!advancedOpen}
+            onToggle={(e) => onToggleAdvanced?.(e.currentTarget.open)}
+          >
             <summary
               className="mono caps"
               style={{
