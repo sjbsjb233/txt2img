@@ -13,6 +13,7 @@ import * as archiveStore from "../store/archive.js";
 import { usePreferences } from "../store/preferences.js";
 import { useAuth } from "../store/auth.js";
 import { useDraftAutosave } from "../hooks/useDraftAutosave.js";
+import { useStickyState } from "../hooks/useStickyState.js";
 
 // ---------------------------------------------------------------------------
 // Visual atoms
@@ -312,14 +313,13 @@ export default function CreatePage() {
   const { prefs: userPrefs } = usePreferences();
   const { user } = useAuth();
   const userId = user?.id || null;
-  // Snapshot the user's "default ratio / batch size / model" once on
-  // mount so changing them in /settings while the page is open does
-  // not silently reset whatever the user has already configured here.
+  // Snapshot the user's preferred default model once on mount so a
+  // change in /settings while this page is open doesn't yank the
+  // active model from under the user. Aspect ratio / batch size are
+  // now sourced from sticky on a per-model basis instead.
   const initialPrefsRef = useRef(null);
   if (initialPrefsRef.current === null) {
     initialPrefsRef.current = {
-      aspect_ratio: userPrefs?.generation?.default_aspect_ratio || null,
-      batch_size: userPrefs?.generation?.default_batch_size || 1,
       model_id: userPrefs?.generation?.default_model_id || null,
     };
   }
@@ -329,36 +329,33 @@ export default function CreatePage() {
   const [loadError, setLoadError] = useState("");
   const [selectedModel, setSelectedModel] = useState(null);
 
-  // Form state. Seed params with the user's preferred defaults so a
-  // power user with "ratio=3:2, batch=2" set never has to re-pick
-  // them on every visit.
+  // Form state. Params seeding is handled by the model-resolution
+  // chain (sticky → user pref defaults → model.defaults) once the
+  // catalog lands; until then params is empty and the right rail
+  // renders no values, which is fine because the model picker is
+  // empty too.
   const [prompt, setPrompt] = useState("");
-  const [params, setParams] = useState(() => {
-    const seed = {};
-    const initial = initialPrefsRef.current;
-    if (initial.aspect_ratio) seed.aspect_ratio = initial.aspect_ratio;
-    if (initial.batch_size && initial.batch_size > 1) seed.n = initial.batch_size;
-    return seed;
-  });
+  const [params, setParams] = useState({});
   const [refs, setRefs] = useState([]); // array of File objects (insertion order)
   const [sessionId, setSessionId] = useState(null);
 
-  // Autosave & restore — applied via the useDraftAutosave hook below.
-  // Restore lands one snapshot of state into the form before any user
-  // interaction. We stash a pending model id (the schema-defaults
-  // useEffect later picks it up) so it doesn't fight the catalog loader.
-  const pendingRestoreModelIdRef = useRef(null);
+  // Sticky layer — long-lived per-user model preference + per-model
+  // params. Lives across page reloads, navigation, and Generate
+  // success. Independent of the (ephemeral) Draft layer below.
+  const { hydratedSticky, flushSticky, getParamsFor } = useStickyState({
+    userId,
+    selectedModelId: selectedModel?.model_id || null,
+    paramsForCurrentModel: params,
+  });
+
+  // Draft restore lands prompt / refs / session_id into the form
+  // before any user interaction. Model + params come from sticky
+  // independently and are not part of the restore payload.
   const handleRestoreDraft = useCallback((restored) => {
     if (typeof restored.prompt === "string") setPrompt(restored.prompt);
     if (Array.isArray(restored.refs)) setRefs(restored.refs);
-    if (restored.params && typeof restored.params === "object") {
-      setParams(restored.params);
-    }
     if (typeof restored.sessionId === "string" || restored.sessionId === null) {
       setSessionId(restored.sessionId);
-    }
-    if (restored.modelId) {
-      pendingRestoreModelIdRef.current = restored.modelId;
     }
   }, []);
 
@@ -378,35 +375,35 @@ export default function CreatePage() {
       setCatalog(data);
       lastFetchAtRef.current = Date.now();
       setLoadError("");
-      // If the currently-selected model disappeared (admin disabled a
-      // provider), fall back to the user's preferred default — and
-      // then to the first available model when that's unavailable.
+      // Mount + refresh model resolution chain (design doc §4.6):
+      //   1. sticky.last_model_id (cross-reload "remember my pick")
+      //   2. user preferences default_model_id
+      //   3. first available model
+      //   4. catalog[0] as a final tiebreaker
+      // We always re-evaluate this so a sticky change made elsewhere
+      // (or a refresh after a model going down) lands on the right pick.
       const all = data?.models || [];
       const stillThere = all.find(
         (m) => m.model_id === (selectedModel?.model_id || "")
       );
       if (!stillThere) {
-        // Restored draft model takes precedence over the user's default
-        // pref so a refresh lands the user back on the model they were
-        // last editing with.
-        const restoredId = pendingRestoreModelIdRef.current;
-        const restored = restoredId
-          ? all.find((m) => m.model_id === restoredId && m.available)
+        const stickyId = hydratedSticky?.last_model_id || null;
+        const fromSticky = stickyId
+          ? all.find((m) => m.model_id === stickyId && m.available)
           : null;
-        if (restored) pendingRestoreModelIdRef.current = null;
         const preferredId = initialPrefsRef.current?.model_id;
         const preferred = preferredId
           ? all.find((m) => m.model_id === preferredId && m.available)
           : null;
         const firstOk = all.find((m) => m.available) || all[0] || null;
-        setSelectedModel(restored || preferred || firstOk);
+        setSelectedModel(fromSticky || preferred || firstOk);
       } else {
         setSelectedModel(stillThere);
       }
     } catch (err) {
       setLoadError(err?.message || "Failed to load models.");
     }
-  }, [selectedModel?.model_id]);
+  }, [selectedModel?.model_id, hydratedSticky]);
 
   // Load on mount.
   useEffect(() => {
@@ -420,30 +417,32 @@ export default function CreatePage() {
     return off;
   }, [refresh]);
 
-  // Apply the new model's defaults whenever the active model changes.
+  // Whenever the active model changes, replace right-rail params with
+  // the user's last-saved snapshot for that model (sticky), or fall
+  // back to the model's own defaults. Schema-validate either way:
+  // ``applyDefaults`` drops keys that aren't in the new ui_schema and
+  // clamps values to current capabilities.
   useEffect(() => {
     if (!selectedModel) return;
-    setParams((prev) =>
+    const stickyParams = getParamsFor(selectedModel.model_id);
+    setParams(
       applyDefaults(
         selectedModel.defaults,
-        prev,
+        stickyParams || {},
         selectedModel.capabilities,
         selectedModel.ui_schema
       )
     );
   }, [selectedModel?.model_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Draft autosave + restore. Driven entirely client-side; no backend
-  // calls. The hook waits for the catalog before kicking in so the
-  // restored model_id can be validated against the user's tier.
+  // Draft autosave + restore — only the ephemeral trio (prompt / refs /
+  // session). Model + params persistence lives in the Sticky layer
+  // above so it survives Generate-success and Clear.
   const { toast: draftToast, clearDraft } = useDraftAutosave({
     userId,
     prompt,
-    params,
     refs,
-    modelId: selectedModel?.model_id || null,
     sessionId,
-    catalog,
     enabled: !!catalog && !!userId,
     onRestore: handleRestoreDraft,
   });
@@ -696,8 +695,12 @@ export default function CreatePage() {
             <button
               className="btn sm ghost"
               onClick={() => {
+                // Clear button — ephemeral trio only. Sticky (model +
+                // per-model params) is intentionally preserved here;
+                // see design doc §4.2.
                 setPrompt("");
                 clearRefs();
+                setSessionId(null);
                 clientRequestIdRef.current = null;
                 clearDraft();
               }}
@@ -1078,7 +1081,15 @@ export default function CreatePage() {
                 return (
                   <button
                     key={m.model_id}
-                    onClick={() => !disabled && setSelectedModel(m)}
+                    onClick={() => {
+                      if (disabled) return;
+                      // Flush any pending sticky write for the *current*
+                      // model before swapping — otherwise the in-flight
+                      // debounce gets clobbered by the new model's
+                      // params reset (design doc §4.4 / §8.1).
+                      flushSticky();
+                      setSelectedModel(m);
+                    }}
                     disabled={disabled}
                     title={disabled ? unavailableReasonCopy(m.available_reason) : undefined}
                     style={{

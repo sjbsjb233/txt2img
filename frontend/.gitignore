@@ -6,3 +6,8 @@ dist
 .env
 .env.local
 .env.*.local
+
+# Playwright run artefacts — only the *.spec.js sources should be committed.
+tests/e2e/.results/
+tests/e2e/.report/
+tests/e2e/.shots/
