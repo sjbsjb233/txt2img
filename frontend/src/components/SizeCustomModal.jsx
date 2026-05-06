@@ -1,5 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import Icon from "./Icon.jsx";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 // Size picker — a recommended catalog grouped by aspect ratio plus a
 // manual W×H input that mirrors the OpenAI gpt-image-2 v2 contract.
@@ -8,9 +7,10 @@ import Icon from "./Icon.jsx";
 // this validator is a strict mirror so the user gets immediate feedback
 // instead of a 422 round-trip.
 //
-// Catalog stays in lock-step with the upstream-quirks finding from
-// commit history: every entry below passes all five rules. New rows
-// must run through ``isValidSize`` before being added.
+// The 2026-05 redesign keeps the public API (props, exports, testids)
+// identical to the previous version so it remains a drop-in replacement
+// for ``CreatePage``. Visuals follow the Claude Design hand-off bundle
+// ``SizeCustomModal.html`` from ``stable-nano-2``.
 
 const SIZE_LIMITS = Object.freeze({
   multiple: 16,
@@ -18,8 +18,8 @@ const SIZE_LIMITS = Object.freeze({
   minPixels: 655_360,
   maxPixels: 8_294_400,
   maxRatio: 3,
-  experimentalEdge: 2560,  // longest-edge threshold for the "experimental" tag
-  experimentalShort: 1440, // shorter-edge threshold for the experimental tag
+  experimentalEdge: 2560,
+  experimentalShort: 1440,
 });
 
 export function isValidSize(width, height) {
@@ -69,8 +69,6 @@ export function isValidSize(width, height) {
   return { ok: true, reason: "", experimental };
 }
 
-// Curated catalog. Each row passes ``isValidSize``. Groups appear in
-// the order users tend to pick them — common aspect ratios first.
 const CATALOG = [
   {
     title: "16:9 / 9:16",
@@ -96,10 +94,10 @@ const CATALOG = [
     title: "4:3 / 3:4",
     note: "classic monitor / photo print",
     items: [
-      { label: "Landscape (small)", w: 1280, h: 960 },
-      { label: "Portrait (small)", w: 960, h: 1280 },
-      { label: "Landscape (medium)", w: 1600, h: 1200 },
-      { label: "Portrait (medium)", w: 1200, h: 1600 },
+      { label: "Landscape — small", w: 1280, h: 960 },
+      { label: "Portrait — small", w: 960, h: 1280 },
+      { label: "Landscape — medium", w: 1600, h: 1200 },
+      { label: "Portrait — medium", w: 1200, h: 1600 },
     ],
   },
   {
@@ -107,70 +105,110 @@ const CATALOG = [
     note: "Instagram, posters",
     items: [
       { label: "IG portrait", w: 1024, h: 1280 },
-      { label: "IG portrait (large)", w: 1280, h: 1600 },
+      { label: "IG portrait — large", w: 1280, h: 1600 },
       { label: "5:4 landscape", w: 1280, h: 1024 },
     ],
   },
   {
-    title: "21:9",
+    title: "21:9 cinema",
     note: "ultrawide, cinematic",
     items: [
-      { label: "Cinema (small)", w: 1680, h: 720 },
-      { label: "Cinema (medium)", w: 2240, h: 960 },
-      { label: "Cinema (large)", w: 3360, h: 1440 },
+      { label: "Cinema — small", w: 1680, h: 720 },
+      { label: "Cinema — medium", w: 2240, h: 960 },
+      { label: "Cinema — large", w: 3360, h: 1440 },
     ],
   },
   {
-    title: "3:1",
-    note: "extreme banners — note: some relays clamp ratio at 2:1",
+    title: "3:1 banner",
+    note: "extreme banners — some relays clamp at 2:1",
     items: [
-      { label: "Banner (small)", w: 1536, h: 512 },
-      { label: "Banner (medium)", w: 2304, h: 768 },
-      { label: "Banner (max)", w: 3840, h: 1280 },
+      { label: "Banner — small", w: 1536, h: 512 },
+      { label: "Banner — medium", w: 2304, h: 768 },
+      { label: "Banner — max", w: 3840, h: 1280 },
     ],
   },
   {
     title: "Square / 4K",
     note: "experimental, may take longer to render",
     items: [
-      { label: "Square (large)", w: 1280, h: 1280 },
-      { label: "Square (2K)", w: 2048, h: 2048 },
+      { label: "Square — large", w: 1280, h: 1280 },
+      { label: "Square — 2K", w: 2048, h: 2048 },
       { label: "4K UHD", w: 3840, h: 2160 },
     ],
   },
 ];
 
-function summariseSize(w, h) {
-  const px = (w * h) / 1_000_000;
-  return `${w}×${h} · ${px.toFixed(2)} MP`;
+// Largest preset edge used to scale the per-card ratio glyph. Computed
+// once at module load so each card keeps its true relative aspect.
+const MAX_PRESET_EDGE = CATALOG.reduce((acc, group) => {
+  group.items.forEach((it) => {
+    if (it.w > acc) acc = it.w;
+    if (it.h > acc) acc = it.h;
+  });
+  return acc;
+}, 0);
+const RATIO_STAGE_PX = 56;
+
+function ratioBoxStyle(w, h) {
+  const scale = RATIO_STAGE_PX / MAX_PRESET_EDGE;
+  const dispW = Math.max(8, Math.round(w * scale));
+  const dispH = Math.max(8, Math.round(h * scale));
+  return { width: `${dispW}px`, height: `${dispH}px` };
+}
+
+function cleanRatio(w, h) {
+  const a = Math.max(1, Math.round(w));
+  const b = Math.max(1, Math.round(h));
+  const gcd = (x, y) => (y ? gcd(y, x % y) : x);
+  const g = gcd(a, b);
+  const rw = a / g;
+  const rh = b / g;
+  if (rw < 100 && rh < 100) return `${rw}:${rh}`;
+  return `${(w / h).toFixed(2)}:1`;
+}
+
+function pickPresetLabel(w, h) {
+  for (const group of CATALOG) {
+    for (const it of group.items) {
+      if (it.w === w && it.h === h) return it.label;
+    }
+  }
+  return "Custom";
 }
 
 export default function SizeCustomModal({ open, initialValue, onSelect, onClose }) {
   const [w, setW] = useState("");
   const [h, setH] = useState("");
   const [touched, setTouched] = useState(false);
+  // Visual preview state — separate from the manual inputs so a preset
+  // click instantly refreshes the right pane even before the controlled
+  // state pushes back to the parent on apply.
+  const [preview, setPreview] = useState({ w: 2560, h: 1440, label: "2K landscape" });
   const firstButtonRef = useRef(null);
   const wInputRef = useRef(null);
+  const stageRef = useRef(null);
+  const [stageSize, setStageSize] = useState({ w: 280, h: 240 });
 
-  // Pre-fill the W/H inputs when a custom value is already selected.
   useEffect(() => {
     if (!open) {
       setTouched(false);
       return;
     }
     if (typeof initialValue === "string" && initialValue.match(/^\d+x\d+$/i)) {
-      const [iw, ih] = initialValue.split(/x/i);
-      setW(iw);
-      setH(ih);
+      const [iw, ih] = initialValue.split(/x/i).map((s) => parseInt(s, 10));
+      setW(String(iw));
+      setH(String(ih));
+      if (Number.isFinite(iw) && Number.isFinite(ih)) {
+        setPreview({ w: iw, h: ih, label: pickPresetLabel(iw, ih) });
+      }
     } else {
       setW("");
       setH("");
+      setPreview({ w: 2560, h: 1440, label: "2K landscape" });
     }
-    // Focus the first picker chip for keyboard users.
     setTimeout(() => firstButtonRef.current?.focus(), 50);
   }, [open, initialValue]);
 
-  // Esc closes; Enter on the manual input commits if valid.
   useEffect(() => {
     if (!open) return;
     const onKey = (e) => {
@@ -179,6 +217,26 @@ export default function SizeCustomModal({ open, initialValue, onSelect, onClose 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+
+  // Track the stage size so the preview frame can scale proportionally
+  // without overflowing on smaller viewports.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const node = stageRef.current;
+    if (!node) return;
+    const update = () => {
+      const rect = node.getBoundingClientRect();
+      setStageSize({ w: Math.max(40, rect.width), h: Math.max(40, rect.height) });
+    };
+    update();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(update) : null;
+    ro?.observe(node);
+    window.addEventListener("resize", update);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener("resize", update);
+    };
+  }, [open]);
 
   const manualCheck = useMemo(() => {
     const wn = Number(w);
@@ -195,6 +253,10 @@ export default function SizeCustomModal({ open, initialValue, onSelect, onClose 
   if (!open) return null;
 
   const pickFromCatalog = (item) => {
+    setW(String(item.w));
+    setH(String(item.h));
+    setPreview({ w: item.w, h: item.h, label: item.label });
+    setTouched(false);
     onSelect?.(`${item.w}x${item.h}`);
   };
 
@@ -205,16 +267,54 @@ export default function SizeCustomModal({ open, initialValue, onSelect, onClose 
   };
 
   const onWChange = (e) => {
-    setW(e.target.value.replace(/[^\d]/g, ""));
+    const next = e.target.value.replace(/[^\d]/g, "");
+    setW(next);
     setTouched(true);
+    const wn = parseInt(next, 10);
+    const hn = parseInt(h, 10);
+    if (Number.isFinite(wn) && wn > 0 && Number.isFinite(hn) && hn > 0) {
+      setPreview({ w: wn, h: hn, label: pickPresetLabel(wn, hn) });
+    }
   };
   const onHChange = (e) => {
-    setH(e.target.value.replace(/[^\d]/g, ""));
+    const next = e.target.value.replace(/[^\d]/g, "");
+    setH(next);
     setTouched(true);
+    const wn = parseInt(w, 10);
+    const hn = parseInt(next, 10);
+    if (Number.isFinite(wn) && wn > 0 && Number.isFinite(hn) && hn > 0) {
+      setPreview({ w: wn, h: hn, label: pickPresetLabel(wn, hn) });
+    }
   };
   const onManualKey = (e) => {
     if (e.key === "Enter") submitManual();
   };
+
+  // Frame size inside the live-preview stage. Honors the actual aspect
+  // ratio of ``preview`` and uses ~92% of the stage on the constraining
+  // axis (matching the design's max-width/max-height: 92% rule).
+  const frame = (() => {
+    const { w: pw, h: ph } = preview;
+    if (!pw || !ph) return { width: 0, height: 0 };
+    const stageW = stageSize.w * 0.92;
+    const stageH = stageSize.h * 0.92;
+    const ratio = pw / ph;
+    let fw = stageW;
+    let fh = fw / ratio;
+    if (fh > stageH) {
+      fh = stageH;
+      fw = fh * ratio;
+    }
+    return { width: Math.max(20, fw), height: Math.max(20, fh) };
+  })();
+
+  const previewValid = isValidSize(preview.w, preview.h);
+  const ratioStr = cleanRatio(preview.w, preview.h);
+  const pixelsMP = ((preview.w * preview.h) / 1_000_000).toFixed(2);
+  const currentSizeStr = `${preview.w}x${preview.h}`;
+
+  const previewStatusOk = previewValid.ok;
+  const applyDisabled = !manualCheck.ok;
 
   return (
     <div
@@ -229,6 +329,7 @@ export default function SizeCustomModal({ open, initialValue, onSelect, onClose 
         background: "#19171488",
         backdropFilter: "blur(2px)",
         animation: "scsFade 160ms ease-out",
+        padding: 24,
       }}
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose?.();
@@ -236,319 +337,837 @@ export default function SizeCustomModal({ open, initialValue, onSelect, onClose 
     >
       <style>{`
         @keyframes scsFade { from { opacity: 0; } to { opacity: 1; } }
-        @keyframes scsPop { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+        @keyframes scsPop { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: none; } }
+
+        .scs-modal {
+          width: 920px;
+          max-width: 100%;
+          max-height: calc(100vh - 48px);
+          background: var(--paper);
+          border: 1.5px solid var(--ink);
+          box-shadow: 10px 10px 0 var(--ink);
+          display: flex;
+          flex-direction: column;
+          animation: scsPop 220ms cubic-bezier(.2,.85,.2,1);
+        }
+
+        .scs-head {
+          display: grid;
+          grid-template-columns: 1fr auto;
+          align-items: center;
+          background: var(--ink);
+          color: var(--paper);
+          padding: 14px 22px;
+          border-bottom: 1.5px solid var(--ink);
+          gap: 16px;
+        }
+        .scs-crumbs {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          font-family: var(--font-mono);
+          font-size: 10px;
+          letter-spacing: 0.18em;
+          text-transform: uppercase;
+          color: var(--paper);
+          flex-wrap: wrap;
+        }
+        .scs-crumbs .scs-dot { color: var(--banana); }
+        .scs-crumbs .scs-now {
+          color: var(--banana);
+          border: 1px solid var(--banana);
+          padding: 2px 8px;
+        }
+        .scs-head h2 {
+          grid-column: 1 / -1;
+          margin: 8px 0 0;
+          font-family: var(--font-display);
+          font-weight: 500;
+          font-size: 26px;
+          letter-spacing: -0.01em;
+          color: var(--paper);
+          line-height: 1.05;
+        }
+        .scs-head h2 em {
+          color: var(--banana);
+          font-style: italic;
+          font-weight: 700;
+        }
+        .scs-x-btn {
+          align-self: start;
+          background: transparent;
+          border: 1px solid var(--paper);
+          color: var(--paper);
+          width: 28px; height: 28px;
+          display: inline-flex; align-items: center; justify-content: center;
+          cursor: pointer;
+          font-family: var(--font-mono);
+          font-size: 12px;
+          padding: 0;
+        }
+        .scs-x-btn:hover {
+          background: var(--banana);
+          color: var(--ink);
+          border-color: var(--banana);
+        }
+
+        .scs-strip {
+          display: grid;
+          grid-template-columns: repeat(5, 1fr);
+          border-bottom: 1.5px solid var(--ink);
+          background: var(--paper-2);
+        }
+        .scs-strip .cell {
+          padding: 10px 14px;
+          border-right: 1px solid var(--rule-2);
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+        .scs-strip .cell:last-child { border-right: none; }
+        .scs-strip .k {
+          font-family: var(--font-mono);
+          font-size: 9px;
+          letter-spacing: 0.16em;
+          text-transform: uppercase;
+          color: var(--ink-3);
+        }
+        .scs-strip .v {
+          font-family: var(--font-mono);
+          font-weight: 700;
+          font-size: 13px;
+          color: var(--ink);
+        }
+        .scs-strip .v small {
+          color: var(--ink-3);
+          font-weight: 400;
+          margin-left: 4px;
+        }
+
+        .scs-body {
+          display: grid;
+          grid-template-columns: 1fr 320px;
+          flex: 1;
+          min-height: 0;
+        }
+        .scs-catalog {
+          overflow-y: auto;
+          padding: 18px 22px 22px;
+          border-right: 1.5px solid var(--ink);
+          min-width: 0;
+        }
+        .scs-preview {
+          background: var(--paper-2);
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+          min-width: 0;
+        }
+
+        .scs-step {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          margin-bottom: 14px;
+        }
+        .scs-step .num {
+          width: 22px; height: 22px;
+          border: 1px solid var(--ink);
+          background: var(--banana);
+          display: inline-flex; align-items: center; justify-content: center;
+          font-family: var(--font-mono);
+          font-size: 11px;
+          font-weight: 700;
+          color: var(--ink);
+        }
+        .scs-step .t {
+          font-family: var(--font-display);
+          font-size: 18px;
+          font-weight: 500;
+          letter-spacing: -0.005em;
+          color: var(--ink);
+        }
+        .scs-step .h {
+          margin-left: auto;
+          font-family: var(--font-mono);
+          font-size: 10px;
+          color: var(--ink-3);
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
+        }
+
+        .scs-group { margin-bottom: 18px; }
+        .scs-group-head {
+          display: grid;
+          grid-template-columns: 86px 1fr;
+          align-items: center;
+          gap: 14px;
+          padding: 6px 0 8px;
+          border-top: 1px solid var(--rule-2);
+        }
+        .scs-group:first-child .scs-group-head {
+          border-top: none;
+          padding-top: 2px;
+        }
+        .scs-group-tag {
+          font-family: var(--font-mono);
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.06em;
+          color: var(--ink);
+          background: var(--paper-soft, #fffdf7);
+          border: 1px solid var(--ink);
+          padding: 4px 8px;
+          text-align: center;
+        }
+        .scs-group-note {
+          font-size: 11px;
+          color: var(--ink-3);
+          line-height: 1.4;
+        }
+
+        .scs-preset-grid {
+          display: grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap: 8px;
+          margin-top: 8px;
+        }
+        @media (max-width: 720px) {
+          .scs-preset-grid { grid-template-columns: repeat(2, 1fr); }
+          .scs-body { grid-template-columns: 1fr; }
+          .scs-catalog { border-right: none; border-bottom: 1.5px solid var(--ink); }
+        }
+
+        .scs-preset {
+          position: relative;
+          border: 1px solid var(--ink);
+          background: var(--paper-soft, #fffdf7);
+          padding: 10px;
+          cursor: pointer;
+          text-align: left;
+          font-family: inherit;
+          color: var(--ink);
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          transition: transform 80ms ease, background 80ms ease, box-shadow 80ms ease;
+        }
+        .scs-preset:hover {
+          background: var(--paper-2);
+          transform: translate(-1px, -1px);
+          box-shadow: 2px 2px 0 var(--ink);
+        }
+        .scs-preset[data-on="true"] {
+          background: var(--ink);
+          color: var(--paper);
+        }
+        .scs-preset[data-on="true"] .scs-ratio-box {
+          background: var(--banana);
+          border-color: var(--banana);
+        }
+        .scs-preset[data-on="true"] .scs-px-info {
+          color: var(--paper-2);
+        }
+        .scs-preset[data-on="true"] .scs-exp-tag {
+          background: var(--banana);
+          color: var(--ink);
+          border-color: var(--banana);
+        }
+        .scs-preset:focus-visible {
+          outline: 2px solid var(--banana);
+          outline-offset: 2px;
+        }
+
+        .scs-ratio-stage {
+          height: 64px;
+          background:
+            linear-gradient(to right, transparent 0, transparent 49.5%, #19171420 49.5%, #19171420 50.5%, transparent 50.5%),
+            linear-gradient(to bottom, transparent 0, transparent 49.5%, #19171420 49.5%, #19171420 50.5%, transparent 50.5%),
+            repeating-linear-gradient(45deg, transparent 0 6px, #19171410 6px 7px);
+          border: 1px dashed var(--rule-2);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 4px;
+        }
+        .scs-preset[data-on="true"] .scs-ratio-stage {
+          background:
+            linear-gradient(to right, transparent 0, transparent 49.5%, #f4efe630 49.5%, #f4efe630 50.5%, transparent 50.5%),
+            linear-gradient(to bottom, transparent 0, transparent 49.5%, #f4efe630 49.5%, #f4efe630 50.5%, transparent 50.5%),
+            repeating-linear-gradient(45deg, transparent 0 6px, #f4efe610 6px 7px);
+          border-color: #f4efe630;
+        }
+        .scs-ratio-box {
+          background: var(--ink);
+          border: 1px solid var(--ink);
+        }
+
+        .scs-label-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 6px;
+        }
+        .scs-label {
+          font-size: 12px;
+          font-weight: 700;
+          letter-spacing: -0.005em;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .scs-px-info {
+          font-family: var(--font-mono);
+          font-size: 10px;
+          color: var(--ink-3);
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        }
+        .scs-exp-tag {
+          display: inline-block;
+          padding: 1px 5px;
+          border: 1px solid var(--ink);
+          background: var(--banana-soft);
+          font-family: var(--font-mono);
+          font-size: 8px;
+          font-weight: 700;
+          letter-spacing: 0.12em;
+          text-transform: uppercase;
+          color: var(--ink);
+        }
+
+        .scs-pv-head {
+          padding: 14px 18px 8px;
+          border-bottom: 1px solid var(--rule-2);
+        }
+        .scs-pv-stage {
+          flex: 1;
+          min-height: 240px;
+          position: relative;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background:
+            repeating-linear-gradient(45deg, transparent 0 12px, #19171408 12px 13px),
+            var(--paper-3);
+          overflow: hidden;
+          border-bottom: 1px solid var(--rule-2);
+        }
+        .scs-pv-frame {
+          background: var(--banana);
+          border: 1.5px solid var(--ink);
+          box-shadow: 4px 4px 0 var(--ink);
+          position: relative;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          transition: width 220ms cubic-bezier(.2,.85,.2,1), height 220ms cubic-bezier(.2,.85,.2,1);
+        }
+        .scs-pv-frame .corner {
+          position: absolute;
+          width: 14px; height: 14px;
+          border: 1.5px solid var(--ink);
+          background: var(--paper);
+        }
+        .scs-pv-frame .corner.tl { top: -7px; left: -7px; }
+        .scs-pv-frame .corner.tr { top: -7px; right: -7px; }
+        .scs-pv-frame .corner.bl { bottom: -7px; left: -7px; }
+        .scs-pv-frame .corner.br { bottom: -7px; right: -7px; }
+        .scs-pv-frame .ratio-num {
+          font-family: var(--font-display);
+          font-weight: 700;
+          font-size: 32px;
+          color: var(--ink);
+          letter-spacing: -0.02em;
+        }
+        .scs-pv-dim-w {
+          position: absolute;
+          bottom: 8px;
+          left: 50%;
+          transform: translateX(-50%);
+          font-family: var(--font-mono);
+          font-size: 10px;
+          color: var(--ink-2);
+          letter-spacing: 0.1em;
+          background: var(--paper);
+          padding: 2px 6px;
+          border: 1px solid var(--ink);
+          white-space: nowrap;
+        }
+        .scs-pv-dim-h {
+          position: absolute;
+          right: 8px;
+          top: 50%;
+          transform: translateY(-50%) rotate(90deg);
+          transform-origin: center;
+          font-family: var(--font-mono);
+          font-size: 10px;
+          color: var(--ink-2);
+          letter-spacing: 0.1em;
+          background: var(--paper);
+          padding: 2px 6px;
+          border: 1px solid var(--ink);
+          white-space: nowrap;
+        }
+
+        .scs-pv-stats {
+          padding: 12px 18px;
+          border-bottom: 1px solid var(--rule-2);
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 8px 14px;
+        }
+        .scs-pv-stats .row {
+          display: flex;
+          justify-content: space-between;
+          font-family: var(--font-mono);
+          font-size: 11px;
+        }
+        .scs-pv-stats .row .k { color: var(--ink-3); }
+        .scs-pv-stats .row .v { color: var(--ink); font-weight: 700; }
+
+        .scs-manual {
+          padding: 14px 18px;
+          background: var(--paper);
+          border-top: 1.5px solid var(--ink);
+        }
+        .scs-manual .ml {
+          display: flex; align-items: center; gap: 8px;
+          margin-bottom: 8px;
+        }
+        .scs-manual .ml .num {
+          width: 20px; height: 20px;
+          border: 1px solid var(--ink);
+          background: var(--banana);
+          display: inline-flex; align-items: center; justify-content: center;
+          font-family: var(--font-mono);
+          font-size: 10px;
+          font-weight: 700;
+          color: var(--ink);
+        }
+        .scs-manual .ml .t {
+          font-family: var(--font-display);
+          font-size: 15px;
+          font-weight: 600;
+          color: var(--ink);
+        }
+        .scs-wh-row {
+          display: grid;
+          grid-template-columns: 1fr 14px 1fr;
+          gap: 6px;
+          align-items: stretch;
+        }
+        .scs-wh {
+          border: 1px solid var(--ink);
+          background: var(--paper-soft, #fffdf7);
+          display: flex;
+          flex-direction: column;
+        }
+        .scs-wh:focus-within {
+          outline: 2px solid var(--banana);
+          outline-offset: -2px;
+        }
+        .scs-wh label {
+          font-family: var(--font-mono);
+          font-size: 9px;
+          color: var(--ink-3);
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          padding: 4px 8px 0;
+        }
+        .scs-wh input {
+          width: 100%;
+          border: none;
+          outline: none;
+          background: transparent;
+          font-family: var(--font-mono);
+          font-size: 18px;
+          font-weight: 700;
+          padding: 0 8px 6px;
+          color: var(--ink);
+        }
+        .scs-wh-x {
+          align-self: center;
+          text-align: center;
+          font-family: var(--font-display);
+          font-style: italic;
+          color: var(--ink-3);
+          font-size: 18px;
+        }
+        .scs-wh-tip {
+          margin-top: 8px;
+          font-family: var(--font-mono);
+          font-size: 10px;
+          color: var(--ink-3);
+          line-height: 1.5;
+          min-height: 14px;
+        }
+        .scs-wh-tip[data-state="ok"] { color: var(--ok); }
+        .scs-wh-tip[data-state="bad"] { color: var(--bad); }
+        .scs-wh-tip[data-state="exp"] { color: var(--warn); }
+
+        .scs-foot {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 14px 22px;
+          background: var(--paper);
+          border-top: 1.5px solid var(--ink);
+        }
+        .scs-foot .lhs {
+          font-family: var(--font-mono);
+          font-size: 11px;
+          color: var(--ink-3);
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .scs-foot .rhs { display: flex; gap: 8px; }
+        .scs-btn {
+          height: 38px;
+          padding: 0 18px;
+          border: 1px solid var(--ink);
+          background: var(--paper-soft, #fffdf7);
+          font-family: var(--font-sans);
+          font-size: 13px;
+          font-weight: 600;
+          cursor: pointer;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+          color: var(--ink);
+        }
+        .scs-btn:hover { background: var(--paper-2); }
+        .scs-btn.primary {
+          background: var(--ink);
+          color: var(--banana);
+        }
+        .scs-btn.primary:hover { background: #000; }
+        .scs-btn.primary[disabled] {
+          opacity: 0.4;
+          cursor: not-allowed;
+        }
+        .scs-btn.shadowed { box-shadow: 3px 3px 0 var(--ink); }
+        .scs-btn.shadowed:hover {
+          box-shadow: 2px 2px 0 var(--ink);
+          transform: translate(1px,1px);
+        }
+        .scs-kbd {
+          display: inline-flex;
+          align-items: center;
+          height: 18px;
+          padding: 0 5px;
+          border: 1px solid var(--ink);
+          background: var(--paper-soft, #fffdf7);
+          font-family: var(--font-mono);
+          font-size: 10px;
+          box-shadow: 0 2px 0 var(--ink);
+          color: var(--ink);
+        }
       `}</style>
-      <div
-        style={{
-          width: 720,
-          maxHeight: "88vh",
-          background: "var(--paper)",
-          border: "1px solid var(--ink)",
-          boxShadow: "8px 8px 0 var(--ink)",
-          animation: "scsPop 220ms cubic-bezier(.2,.85,.2,1)",
-          display: "flex",
-          flexDirection: "column",
-        }}
-      >
-        <div
-          style={{
-            padding: "14px 20px",
-            background: "var(--ink)",
-            color: "var(--paper)",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <span
-            className="mono caps"
-            style={{ fontSize: 11, letterSpacing: "0.18em" }}
-          >
-            CUSTOM SIZE · gpt-image-2
-          </span>
+
+      <div className="scs-modal" role="dialog" aria-label="Custom size picker" aria-modal="true">
+        {/* HEADER */}
+        <div className="scs-head">
+          <div className="scs-crumbs">
+            <span>Generate</span>
+            <span className="scs-dot">/</span>
+            <span>Image size</span>
+            <span className="scs-dot">/</span>
+            <span className="scs-now">Custom · gpt-image-2</span>
+          </div>
           <button
             data-testid="size-custom-close"
+            className="scs-x-btn"
             onClick={onClose}
-            style={{
-              background: "transparent",
-              border: "none",
-              color: "var(--paper)",
-              cursor: "pointer",
-              padding: 4,
-            }}
             aria-label="Close size picker"
+            type="button"
           >
-            <Icon name="close" size={14} />
+            ✕
           </button>
+          <h2>
+            Pick a size that matches your <em>canvas</em>.
+          </h2>
         </div>
 
-        <div
-          style={{
-            padding: "20px 24px 4px",
-          }}
-        >
-          <div
-            className="mono caps"
-            style={{ fontSize: 10, color: "var(--ink-3)", letterSpacing: "0.18em" }}
-          >
-            STEP 1 — pick from a curated, fully-compliant catalog
+        {/* CONSTRAINT STRIP */}
+        <div className="scs-strip" aria-label="Backend constraints">
+          <div className="cell">
+            <span className="k">Multiple</span>
+            <span className="v">16<small>px sides</small></span>
           </div>
-          <p
-            style={{
-              marginTop: 8,
-              fontSize: 12,
-              lineHeight: 1.55,
-              color: "var(--ink-2)",
-              maxWidth: 560,
-            }}
-          >
-            Every option below satisfies OpenAI's contract: 16-multiple
-            sides, longest edge ≤ 3840px, total pixels in [655 360 –
-            8 294 400], aspect ratio ≤ 3:1.
-          </p>
+          <div className="cell">
+            <span className="k">Longest edge</span>
+            <span className="v">≤ 3840<small>px</small></span>
+          </div>
+          <div className="cell">
+            <span className="k">Total pixels</span>
+            <span className="v">655 360 – 8.29M</span>
+          </div>
+          <div className="cell">
+            <span className="k">Aspect ratio</span>
+            <span className="v">≤ 3 : 1</span>
+          </div>
+          <div className="cell">
+            <span className="k">Experimental</span>
+            <span className="v" style={{ color: "var(--warn)" }}>
+              &gt;2560 long / &gt;1440 short
+            </span>
+          </div>
         </div>
 
-        <div
-          style={{
-            padding: "8px 24px 16px",
-            overflowY: "auto",
-            flex: 1,
-          }}
-        >
-          {CATALOG.map((group, gi) => (
-            <div key={group.title} style={{ marginTop: gi === 0 ? 0 : 14 }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "baseline",
-                  justifyContent: "space-between",
-                  marginBottom: 6,
-                }}
-              >
-                <div
-                  className="mono caps"
-                  style={{ fontSize: 10, color: "var(--ink-3)" }}
-                >
-                  {group.title}
+        {/* BODY */}
+        <div className="scs-body">
+          {/* LEFT — catalog */}
+          <div className="scs-catalog">
+            <div className="scs-step">
+              <span className="num">1</span>
+              <span className="t">Pick a curated preset</span>
+              <span className="h">All sizes pass every rule</span>
+            </div>
+
+            {CATALOG.map((group, gi) => (
+              <div key={group.title} className="scs-group">
+                <div className="scs-group-head">
+                  <div className="scs-group-tag">{group.title}</div>
+                  <div className="scs-group-note">{group.note}</div>
                 </div>
-                <div
-                  className="mono"
-                  style={{ fontSize: 9, color: "var(--ink-3)" }}
-                >
-                  {group.note}
-                </div>
-              </div>
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-                  gap: 6,
-                }}
-              >
-                {group.items.map((item, idx) => {
-                  const v = isValidSize(item.w, item.h);
-                  const sizeStr = `${item.w}x${item.h}`;
-                  const matches = initialValue === sizeStr;
-                  return (
-                    <button
-                      key={item.label}
-                      ref={
-                        gi === 0 && idx === 0 ? firstButtonRef : undefined
-                      }
-                      onClick={() => pickFromCatalog(item)}
-                      data-testid={`size-preset-${sizeStr}`}
-                      style={{
-                        textAlign: "left",
-                        padding: "8px 10px",
-                        background: matches ? "var(--ink)" : "var(--paper-soft)",
-                        color: matches ? "var(--paper)" : "var(--ink)",
-                        border: "1px solid var(--ink)",
-                        cursor: "pointer",
-                        fontFamily: "inherit",
-                      }}
-                    >
-                      <div
-                        className="mono"
-                        style={{
-                          fontSize: 12,
-                          fontWeight: 700,
-                        }}
+                <div className="scs-preset-grid">
+                  {group.items.map((item, idx) => {
+                    const v = isValidSize(item.w, item.h);
+                    const sizeStr = `${item.w}x${item.h}`;
+                    const matches =
+                      preview.w === item.w && preview.h === item.h;
+                    const px = ((item.w * item.h) / 1_000_000).toFixed(2);
+                    return (
+                      <button
+                        key={item.label}
+                        ref={gi === 0 && idx === 0 ? firstButtonRef : undefined}
+                        type="button"
+                        className="scs-preset"
+                        data-on={matches ? "true" : "false"}
+                        data-testid={`size-preset-${sizeStr}`}
+                        onClick={() => pickFromCatalog(item)}
+                        title={item.hint || `${item.w}×${item.h}`}
                       >
-                        {item.label}
-                        {v.experimental ? (
-                          <span
-                            className="mono caps"
-                            style={{
-                              marginLeft: 6,
-                              padding: "1px 6px",
-                              fontSize: 8,
-                              background: matches ? "var(--banana)" : "var(--banana-soft)",
-                              color: "var(--ink)",
-                              letterSpacing: "0.1em",
-                            }}
-                          >
-                            EXP
+                        <div className="scs-ratio-stage">
+                          <div
+                            className="scs-ratio-box"
+                            style={ratioBoxStyle(item.w, item.h)}
+                          />
+                        </div>
+                        <div className="scs-label-row">
+                          <span className="scs-label">{item.label}</span>
+                          {v.experimental ? (
+                            <span className="scs-exp-tag">exp</span>
+                          ) : null}
+                        </div>
+                        <div className="scs-px-info">
+                          <span>
+                            {item.w}×{item.h}
                           </span>
-                        ) : null}
-                      </div>
-                      <div
-                        className="mono"
-                        style={{
-                          marginTop: 2,
-                          fontSize: 10,
-                          color: matches ? "var(--paper)" : "var(--ink-3)",
-                        }}
-                      >
-                        {summariseSize(item.w, item.h)}
-                      </div>
-                    </button>
-                  );
-                })}
+                          <span>{px} MP</span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* RIGHT — live preview */}
+          <div className="scs-preview">
+            <div className="scs-pv-head">
+              <div
+                className="mono caps"
+                style={{ fontSize: 10, color: "var(--ink-3)" }}
+              >
+                Live preview
+              </div>
+              <div
+                className="display"
+                data-testid="size-custom-preview-title"
+                style={{
+                  fontSize: 20,
+                  fontWeight: 600,
+                  letterSpacing: "-0.01em",
+                  marginTop: 2,
+                  lineHeight: 1.15,
+                }}
+              >
+                {preview.label}
               </div>
             </div>
-          ))}
+
+            <div className="scs-pv-stage" ref={stageRef}>
+              <div
+                className="scs-pv-frame"
+                style={{ width: frame.width, height: frame.height }}
+              >
+                <span className="corner tl" />
+                <span className="corner tr" />
+                <span className="corner bl" />
+                <span className="corner br" />
+                <span className="ratio-num">{ratioStr}</span>
+                <span className="scs-pv-dim-w">{preview.w} px</span>
+                <span className="scs-pv-dim-h">{preview.h} px</span>
+              </div>
+            </div>
+
+            <div className="scs-pv-stats">
+              <div className="row">
+                <span className="k">Width</span>
+                <span className="v" data-testid="size-custom-stat-w">{preview.w}</span>
+              </div>
+              <div className="row">
+                <span className="k">Height</span>
+                <span className="v" data-testid="size-custom-stat-h">{preview.h}</span>
+              </div>
+              <div className="row">
+                <span className="k">Pixels</span>
+                <span className="v">{pixelsMP} MP</span>
+              </div>
+              <div className="row">
+                <span className="k">Ratio</span>
+                <span className="v">{ratioStr}</span>
+              </div>
+              <div className="row">
+                <span className="k">Zone</span>
+                <span
+                  className="v"
+                  data-testid="size-custom-zone"
+                  style={{
+                    color: previewValid.experimental
+                      ? "var(--warn)"
+                      : "var(--ok)",
+                  }}
+                >
+                  {previewValid.experimental ? "Experimental" : "Stable"}
+                </span>
+              </div>
+              <div className="row">
+                <span className="k">Status</span>
+                <span
+                  className="v"
+                  data-testid="size-custom-status"
+                  style={{
+                    color: previewStatusOk ? "var(--ok)" : "var(--bad)",
+                  }}
+                >
+                  {previewStatusOk ? "✓ Valid" : "✕ Invalid"}
+                </span>
+              </div>
+            </div>
+
+            {/* MANUAL */}
+            <div className="scs-manual">
+              <div className="ml">
+                <span className="num">2</span>
+                <span className="t">Or type your own</span>
+              </div>
+              <div className="scs-wh-row">
+                <div className="scs-wh">
+                  <label htmlFor="scs-w">Width</label>
+                  <input
+                    id="scs-w"
+                    data-testid="size-custom-width"
+                    ref={wInputRef}
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    value={w}
+                    onChange={onWChange}
+                    onKeyDown={onManualKey}
+                    placeholder="1920"
+                    aria-label="Custom width"
+                  />
+                </div>
+                <span className="scs-wh-x">×</span>
+                <div className="scs-wh">
+                  <label htmlFor="scs-h">Height</label>
+                  <input
+                    id="scs-h"
+                    data-testid="size-custom-height"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    value={h}
+                    onChange={onHChange}
+                    onKeyDown={onManualKey}
+                    placeholder="1088"
+                    aria-label="Custom height"
+                  />
+                </div>
+              </div>
+              <div
+                data-testid="size-custom-validation"
+                className="scs-wh-tip"
+                data-state={
+                  manualCheck.empty
+                    ? ""
+                    : manualCheck.ok
+                    ? manualCheck.experimental
+                      ? "exp"
+                      : "ok"
+                    : "bad"
+                }
+              >
+                {manualCheck.empty
+                  ? "Both sides must be multiples of 16."
+                  : manualCheck.ok
+                  ? `${manualCheck.experimental ? "△" : "✓"} ${Number(w)}×${Number(h)} · ${(
+                      (Number(w) * Number(h)) / 1_000_000
+                    ).toFixed(2)} MP · ${
+                      manualCheck.experimental ? "experimental zone" : "stable zone"
+                    } — looks good.`
+                  : touched
+                  ? `✕ ${manualCheck.reason}`
+                  : ""}
+              </div>
+            </div>
+          </div>
         </div>
 
-        <div
-          style={{
-            padding: "16px 24px",
-            borderTop: "1px solid var(--rule-2)",
-          }}
-        >
-          <div
-            className="mono caps"
-            style={{ fontSize: 10, color: "var(--ink-3)", letterSpacing: "0.18em" }}
-          >
-            STEP 2 — or type your own
+        {/* FOOTER */}
+        <div className="scs-foot">
+          <div className="lhs">
+            <span>
+              <span className="scs-kbd">Esc</span> close
+            </span>
+            <span style={{ color: "var(--ink-4)" }}>·</span>
+            <span>
+              <span className="scs-kbd">↵</span> apply manual
+            </span>
+            <span style={{ color: "var(--ink-4)" }}>·</span>
+            <span data-testid="size-custom-current-size">{currentSizeStr}</span>
           </div>
-          <div
-            style={{
-              marginTop: 10,
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              flexWrap: "wrap",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <input
-                data-testid="size-custom-width"
-                ref={wInputRef}
-                type="text"
-                inputMode="numeric"
-                pattern="[0-9]*"
-                value={w}
-                onChange={onWChange}
-                onKeyDown={onManualKey}
-                placeholder="width"
-                aria-label="Custom width"
-                style={{
-                  width: 90,
-                  padding: "8px 10px",
-                  border: "1px solid var(--ink)",
-                  background: "var(--paper)",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 13,
-                }}
-              />
-              <span
-                className="mono"
-                style={{ fontSize: 14, color: "var(--ink-2)" }}
-              >
-                ×
-              </span>
-              <input
-                data-testid="size-custom-height"
-                type="text"
-                inputMode="numeric"
-                pattern="[0-9]*"
-                value={h}
-                onChange={onHChange}
-                onKeyDown={onManualKey}
-                placeholder="height"
-                aria-label="Custom height"
-                style={{
-                  width: 90,
-                  padding: "8px 10px",
-                  border: "1px solid var(--ink)",
-                  background: "var(--paper)",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 13,
-                }}
-              />
-              <span
-                className="mono"
-                style={{ fontSize: 12, color: "var(--ink-3)", marginLeft: 6 }}
-              >
-                px
-              </span>
-            </div>
+          <div className="rhs">
             <button
+              type="button"
+              className="scs-btn"
+              data-testid="size-custom-cancel"
+              onClick={onClose}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="scs-btn primary shadowed"
               data-testid="size-custom-apply"
               onClick={submitManual}
-              disabled={!manualCheck.ok}
-              className="btn ink shadowed"
-              style={{
-                height: 40,
-                padding: "0 18px",
-                color: "var(--banana)",
-                opacity: manualCheck.ok ? 1 : 0.5,
-                cursor: manualCheck.ok ? "pointer" : "not-allowed",
-              }}
+              disabled={applyDisabled}
             >
-              Use this size →{" "}
+              Use this size →
               <span
-                className="kbd"
-                style={{
-                  marginLeft: 6,
-                  background: "var(--banana)",
-                  color: "var(--ink)",
-                }}
+                className="scs-kbd"
+                style={{ background: "var(--banana)", color: "var(--ink)" }}
               >
                 ↵
               </span>
             </button>
           </div>
-          <div
-            data-testid="size-custom-validation"
-            className="mono"
-            style={{
-              marginTop: 10,
-              fontSize: 11,
-              minHeight: 16,
-              color: manualCheck.empty
-                ? "var(--ink-3)"
-                : manualCheck.ok
-                ? "var(--banana-deep)"
-                : "#c0392b",
-            }}
-          >
-            {manualCheck.empty
-              ? "Enter both width and height. Both must be multiples of 16."
-              : manualCheck.ok
-              ? `${summariseSize(Number(w), Number(h))} · ${
-                  manualCheck.experimental ? "experimental zone" : "stable zone"
-                } — looks good.`
-              : touched
-              ? manualCheck.reason
-              : ""}
-          </div>
-        </div>
-
-        <div
-          style={{
-            padding: "12px 24px 18px",
-            display: "flex",
-            justifyContent: "flex-end",
-          }}
-        >
-          <button
-            onClick={onClose}
-            className="btn"
-            style={{ height: 40, padding: "0 22px" }}
-          >
-            Cancel
-          </button>
         </div>
       </div>
     </div>
