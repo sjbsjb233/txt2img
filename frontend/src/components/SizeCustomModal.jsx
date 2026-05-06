@@ -176,6 +176,27 @@ function pickPresetLabel(w, h) {
   return "Custom";
 }
 
+// Default preview shown when the modal opens without an ``initialValue``.
+// Computing the label via ``pickPresetLabel`` keeps the header in sync if
+// the matching preset is ever renamed in ``CATALOG``.
+const DEFAULT_PREVIEW = Object.freeze({
+  w: 2560,
+  h: 1440,
+  label: pickPresetLabel(2560, 1440),
+});
+
+// Pre-format constants for the constraint strip so the UI mirrors
+// ``SIZE_LIMITS`` exactly. Helpers, not literals — if a limit moves the
+// strip moves with it.
+function _fmtThousands(n) {
+  // 655360 → "655 360" (NBSP-style narrow gap, matches the original copy).
+  return n.toLocaleString("en-US").replace(/,/g, " ");
+}
+function _fmtMillionsCompact(n) {
+  // 8294400 → "8.29M".
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
 export default function SizeCustomModal({ open, initialValue, onSelect, onClose }) {
   const [w, setW] = useState("");
   const [h, setH] = useState("");
@@ -183,7 +204,7 @@ export default function SizeCustomModal({ open, initialValue, onSelect, onClose 
   // Visual preview state — separate from the manual inputs so a preset
   // click instantly refreshes the right pane even before the controlled
   // state pushes back to the parent on apply.
-  const [preview, setPreview] = useState({ w: 2560, h: 1440, label: "2K landscape" });
+  const [preview, setPreview] = useState(DEFAULT_PREVIEW);
   const firstButtonRef = useRef(null);
   const wInputRef = useRef(null);
   const stageRef = useRef(null);
@@ -204,7 +225,7 @@ export default function SizeCustomModal({ open, initialValue, onSelect, onClose 
     } else {
       setW("");
       setH("");
-      setPreview({ w: 2560, h: 1440, label: "2K landscape" });
+      setPreview(DEFAULT_PREVIEW);
     }
     setTimeout(() => firstButtonRef.current?.focus(), 50);
   }, [open, initialValue]);
@@ -893,28 +914,39 @@ export default function SizeCustomModal({ open, initialValue, onSelect, onClose 
           </h2>
         </div>
 
-        {/* CONSTRAINT STRIP */}
+        {/* CONSTRAINT STRIP — every value below is derived from
+            SIZE_LIMITS so the UI cannot drift from the validator. */}
         <div className="scs-strip" aria-label="Backend constraints">
           <div className="cell">
             <span className="k">Multiple</span>
-            <span className="v">16<small>px sides</small></span>
+            <span className="v">
+              {SIZE_LIMITS.multiple}
+              <small>px sides</small>
+            </span>
           </div>
           <div className="cell">
             <span className="k">Longest edge</span>
-            <span className="v">≤ 3840<small>px</small></span>
+            <span className="v">
+              ≤ {SIZE_LIMITS.maxEdge}
+              <small>px</small>
+            </span>
           </div>
           <div className="cell">
             <span className="k">Total pixels</span>
-            <span className="v">655 360 – 8.29M</span>
+            <span className="v">
+              {_fmtThousands(SIZE_LIMITS.minPixels)} –{" "}
+              {_fmtMillionsCompact(SIZE_LIMITS.maxPixels)}
+            </span>
           </div>
           <div className="cell">
             <span className="k">Aspect ratio</span>
-            <span className="v">≤ 3 : 1</span>
+            <span className="v">≤ {SIZE_LIMITS.maxRatio} : 1</span>
           </div>
           <div className="cell">
             <span className="k">Experimental</span>
             <span className="v" style={{ color: "var(--warn)" }}>
-              &gt;2560 long / &gt;1440 short
+              &gt;{SIZE_LIMITS.experimentalEdge} long / &gt;
+              {SIZE_LIMITS.experimentalShort} short
             </span>
           </div>
         </div>
@@ -1041,12 +1073,18 @@ export default function SizeCustomModal({ open, initialValue, onSelect, onClose 
                   className="v"
                   data-testid="size-custom-zone"
                   style={{
-                    color: previewValid.experimental
+                    color: !previewValid.ok
+                      ? "var(--ink-3)"
+                      : previewValid.experimental
                       ? "var(--warn)"
                       : "var(--ok)",
                   }}
                 >
-                  {previewValid.experimental ? "Experimental" : "Stable"}
+                  {!previewValid.ok
+                    ? "—"
+                    : previewValid.experimental
+                    ? "Experimental"
+                    : "Stable"}
                 </span>
               </div>
               <div className="row">
