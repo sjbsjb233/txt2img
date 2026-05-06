@@ -273,18 +273,26 @@ export default function SizeCustomModal({ open, initialValue, onSelect, onClose 
 
   if (!open) return null;
 
+  // Picking a preset only stages the choice in the preview pane and
+  // mirrors it into the manual W/H inputs — it does NOT commit. The
+  // user must press the footer ``Use this size →`` (or hit Enter on a
+  // manual input) to actually fire ``onSelect`` and close. This matches
+  // the "preview first, apply second" intent of the redesigned modal:
+  // the right pane is a real preview, not a side-effect of picking.
   const pickFromCatalog = (item) => {
     setW(String(item.w));
     setH(String(item.h));
     setPreview({ w: item.w, h: item.h, label: item.label });
     setTouched(false);
-    onSelect?.(`${item.w}x${item.h}`);
   };
 
-  const submitManual = () => {
+  // Single commit path used by both the Apply button and the Enter key
+  // on the manual inputs. Source of truth is ``preview``, which always
+  // tracks either the last-clicked preset or the current manual values.
+  const applyPreview = () => {
     setTouched(true);
-    if (!manualCheck.ok) return;
-    onSelect?.(`${Number(w)}x${Number(h)}`);
+    if (!previewValid.ok) return;
+    onSelect?.(`${preview.w}x${preview.h}`);
   };
 
   const onWChange = (e) => {
@@ -308,7 +316,7 @@ export default function SizeCustomModal({ open, initialValue, onSelect, onClose 
     }
   };
   const onManualKey = (e) => {
-    if (e.key === "Enter") submitManual();
+    if (e.key === "Enter") applyPreview();
   };
 
   // Frame size inside the live-preview stage. Honors the actual aspect
@@ -335,7 +343,10 @@ export default function SizeCustomModal({ open, initialValue, onSelect, onClose 
   const currentSizeStr = `${preview.w}x${preview.h}`;
 
   const previewStatusOk = previewValid.ok;
-  const applyDisabled = !manualCheck.ok;
+  // Apply tracks the *preview* — not just the manual inputs — so a
+  // preset click can be committed even though the user has not typed
+  // anything in the manual fields.
+  const applyDisabled = !previewValid.ok;
 
   return (
     <div
@@ -1194,7 +1205,7 @@ export default function SizeCustomModal({ open, initialValue, onSelect, onClose 
               type="button"
               className="scs-btn primary shadowed"
               data-testid="size-custom-apply"
-              onClick={submitManual}
+              onClick={applyPreview}
               disabled={applyDisabled}
             >
               Use this size →
