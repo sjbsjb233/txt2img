@@ -425,6 +425,10 @@ export default function CreatePage() {
           ? all.find((m) => m.model_id === preferredId && m.available)
           : null;
         const firstOk = all.find((m) => m.available) || all[0] || null;
+        // Reset advancedOpen synchronously so the next render doesn't
+        // briefly show the prior model's open state — the model-change
+        // effect picks up the right value on the same commit.
+        setAdvancedOpen(null);
         setSelectedModel(fromSticky || preferred || firstOk);
       } else {
         setSelectedModel(stillThere);
@@ -1137,6 +1141,11 @@ export default function CreatePage() {
                       // debounce gets clobbered by the new model's
                       // params reset (design doc §4.4 / §8.1).
                       flushSticky();
+                      // Reset advancedOpen alongside the model swap so
+                      // the next render doesn't briefly show the prior
+                      // model's open state before the model-change
+                      // effect resolves the new value from sticky.
+                      setAdvancedOpen(null);
                       setSelectedModel(m);
                     }}
                     disabled={disabled}

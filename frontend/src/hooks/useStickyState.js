@@ -79,8 +79,10 @@ export function useStickyState({
       const params = live.paramsForCurrentModel || {};
       params_by_model[live.selectedModelId] = { ...params };
       // Only track when the consumer actually has an opinion (boolean).
-      // ``undefined`` means "page hasn't decided yet" — preserve the
-      // existing entry so a render-before-hydration doesn't wipe it.
+      // Anything else (null sentinel from the page during a model
+      // switch, plain undefined before first hydration, etc.) means
+      // "page hasn't decided yet" — preserve the existing entry so a
+      // render-before-resolution doesn't wipe it.
       if (typeof live.advancedOpenForCurrentModel === "boolean") {
         advanced_open_by_model[live.selectedModelId] =
           live.advancedOpenForCurrentModel;
