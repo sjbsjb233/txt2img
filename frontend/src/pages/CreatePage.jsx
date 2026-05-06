@@ -313,14 +313,22 @@ export default function CreatePage() {
   const { prefs: userPrefs } = usePreferences();
   const { user } = useAuth();
   const userId = user?.id || null;
-  // Snapshot the user's preferred default model once on mount so a
-  // change in /settings while this page is open doesn't yank the
-  // active model from under the user. Aspect ratio / batch size are
-  // now sourced from sticky on a per-model basis instead.
+  // Snapshot the user's preferred defaults once on mount so a change
+  // in /settings while this page is open doesn't yank the active
+  // model — or the seeded aspect / batch size — from under the user.
+  //
+  // ``aspect_ratio`` and ``batch_size`` are still seeded into params
+  // for any *first-time* visit to a model (no sticky entry yet). Once
+  // the user has saved a sticky snapshot for that model, the snapshot
+  // wins. This mirrors the pre-sticky behaviour so a power user with
+  // ``ratio=3:2, batch=2`` doesn't have to re-pick on every brand-new
+  // model they try.
   const initialPrefsRef = useRef(null);
   if (initialPrefsRef.current === null) {
     initialPrefsRef.current = {
       model_id: userPrefs?.generation?.default_model_id || null,
+      aspect_ratio: userPrefs?.generation?.default_aspect_ratio || null,
+      batch_size: userPrefs?.generation?.default_batch_size || 1,
     };
   }
 
@@ -380,13 +388,20 @@ export default function CreatePage() {
       //   2. user preferences default_model_id
       //   3. first available model
       //   4. catalog[0] as a final tiebreaker
-      // We always re-evaluate this so a sticky change made elsewhere
-      // (or a refresh after a model going down) lands on the right pick.
+      // Re-evaluated on every refresh so a model going offline mid-
+      // session lands the user on a working pick. (Cross-tab sync is
+      // out of scope per design doc §8.4 — sticky is hydrated once.)
       const all = data?.models || [];
       const stillThere = all.find(
         (m) => m.model_id === (selectedModel?.model_id || "")
       );
       if (!stillThere) {
+        // Fallback path swaps the active model out from under the
+        // user. If they had unsaved param edits inside the sticky
+        // debounce window for the prior model, flush them now —
+        // otherwise the new model's defaults effect clobbers them
+        // (mirrors the explicit-click flow in the model picker).
+        flushSticky();
         const stickyId = hydratedSticky?.last_model_id || null;
         const fromSticky = stickyId
           ? all.find((m) => m.model_id === stickyId && m.available)
@@ -403,7 +418,7 @@ export default function CreatePage() {
     } catch (err) {
       setLoadError(err?.message || "Failed to load models.");
     }
-  }, [selectedModel?.model_id, hydratedSticky]);
+  }, [selectedModel?.model_id, hydratedSticky, flushSticky]);
 
   // Load on mount.
   useEffect(() => {
@@ -417,18 +432,33 @@ export default function CreatePage() {
     return off;
   }, [refresh]);
 
-  // Whenever the active model changes, replace right-rail params with
-  // the user's last-saved snapshot for that model (sticky), or fall
-  // back to the model's own defaults. Schema-validate either way:
-  // ``applyDefaults`` drops keys that aren't in the new ui_schema and
-  // clamps values to current capabilities.
+  // Whenever the active model changes, replace right-rail params.
+  // Resolution order (design doc §4.4 + first-time-seed compat):
+  //   1. sticky.params_by_model[model] — the user's saved snapshot
+  //   2. user-preference defaults (aspect_ratio + batch_size) when
+  //      no sticky snapshot exists for this model. Preserves the
+  //      pre-sticky behaviour so a power user with prefs set still
+  //      sees them on a brand-new model.
+  //   3. model.defaults — fills any field neither layer above set.
+  // ``applyDefaults`` reconciles against the new schema either way:
+  // drops keys that aren't in ``ui_schema`` and clamps numerics.
   useEffect(() => {
     if (!selectedModel) return;
     const stickyParams = getParamsFor(selectedModel.model_id);
+    let baseParams;
+    if (stickyParams) {
+      baseParams = stickyParams;
+    } else {
+      const seed = {};
+      const initial = initialPrefsRef.current;
+      if (initial?.aspect_ratio) seed.aspect_ratio = initial.aspect_ratio;
+      if (initial?.batch_size && initial.batch_size > 1) seed.n = initial.batch_size;
+      baseParams = seed;
+    }
     setParams(
       applyDefaults(
         selectedModel.defaults,
-        stickyParams || {},
+        baseParams,
         selectedModel.capabilities,
         selectedModel.ui_schema
       )

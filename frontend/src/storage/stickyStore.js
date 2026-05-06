@@ -101,13 +101,13 @@ export function migrateFromLegacyDraft(userId) {
         params_by_model[legacy.model_id] = legacy.params;
       }
     }
-    writeSticky({
+    const stickyOk = writeSticky({
       user_id: userId,
       last_model_id: legacy.model_id || existing?.last_model_id || null,
       params_by_model,
     });
 
-    // Promote the trimmed payload to draft v2 and drop the v1 key.
+    // Promote the trimmed payload to draft v2.
     const draftV2 = {
       v: 2,
       saved_at: legacy.saved_at || new Date().toISOString(),
@@ -116,20 +116,30 @@ export function migrateFromLegacyDraft(userId) {
       prompt: legacy.prompt || "",
       refs_count: typeof legacy.refs_count === "number" ? legacy.refs_count : 0,
     };
+    let draftOk = false;
     try {
       localStorage.setItem(
         "txt2img:create:draft:v2",
         JSON.stringify(draftV2)
       );
+      draftOk = true;
     } catch {
-      // ignored
+      draftOk = false;
     }
-    try {
-      localStorage.removeItem(LEGACY_DRAFT_KEY);
-    } catch {
-      // ignored
+
+    // Only drop the legacy key if BOTH replacement writes succeeded
+    // — otherwise leave it so the next page load can retry. Without
+    // this gate, a quota-exhausted localStorage silently throws away
+    // the user's preferences and prompt.
+    if (stickyOk && draftOk) {
+      try {
+        localStorage.removeItem(LEGACY_DRAFT_KEY);
+      } catch {
+        // ignored
+      }
+      return { migrated: true };
     }
-    return { migrated: true };
+    return { migrated: false };
   } catch (err) {
     if (typeof console !== "undefined") {
       console.warn("sticky: migration failed", err);

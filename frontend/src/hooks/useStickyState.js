@@ -116,11 +116,20 @@ export function useStickyState({
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [userId, persistNow]);
 
+  // Unmount flush: route changes (React Router navigations) don't
+  // fire ``beforeunload``, so a debounced sticky write that hasn't
+  // landed yet would otherwise be lost when the page unmounts.
+  // ``persistNow`` reads from liveRef, so the latest model + params
+  // snapshot still flush correctly.
   useEffect(
     () => () => {
-      if (writeTimerRef.current) clearTimeout(writeTimerRef.current);
+      if (writeTimerRef.current) {
+        clearTimeout(writeTimerRef.current);
+        writeTimerRef.current = null;
+        persistNow();
+      }
     },
-    []
+    [persistNow]
   );
 
   const getParamsFor = useCallback((modelId) => {
