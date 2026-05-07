@@ -3,6 +3,8 @@ import Icon from "../../components/Icon.jsx";
 import * as adminProviders from "../../api/admin/providers.js";
 import { Hair, StatusDot } from "./atoms.jsx";
 import ProviderEditorDialog from "./ProviderEditorDialog.jsx";
+import TestSuiteMenu from "./TestSuiteMenu.jsx";
+import ProviderTestSuiteDrawer from "./ProviderTestSuiteDrawer.jsx";
 
 const ALL_TIERS = ["vip", "premium", "standard", "free"];
 
@@ -18,6 +20,7 @@ function ProviderCard({
   p,
   onEdit,
   onTest,
+  onRunSuite,
   onTopup,
   onResetCircuit,
   onDelete,
@@ -267,9 +270,14 @@ function ProviderCard({
           <button type="button" className="btn sm" onClick={() => onEdit(p)}>
             Edit
           </button>
-          <button type="button" className="btn sm" onClick={() => onTest(p)}>
-            Test ping
-          </button>
+          <TestSuiteMenu
+            onPing={() => onTest(p)}
+            onRunSuite={(scope, modelId) => onRunSuite(p, scope, modelId)}
+            models={(p.supported_models || [])
+              .filter((m) => m.enabled)
+              .map((m) => m.model_id)}
+            defaultModel={(p.supported_models || []).find((m) => m.enabled)?.model_id}
+          />
           <button type="button" className="btn sm" onClick={() => onTopup(p)}>
             Top-up ¥
           </button>
@@ -555,6 +563,9 @@ export default function ProvidersTab() {
   const [testBusy, setTestBusy] = useState(false);
   const [testError, setTestError] = useState(null);
 
+  // test-suite drawer state — only one suite can run at a time
+  const [suiteRun, setSuiteRun] = useState(null); // { provider, scope, modelId }
+
   const refresh = useCallback(async () => {
     try {
       const [list, adapterList] = await Promise.all([
@@ -631,6 +642,28 @@ export default function ProvidersTab() {
     } finally {
       setTestBusy(false);
     }
+  };
+
+  const runSuite = (p, scope, modelId) => {
+    if (suiteRun) {
+      setError("已有测试在运行,请先关闭当前测试再启动新的。");
+      return;
+    }
+    const fallbackModel =
+      modelId ||
+      (p.supported_models || []).find((m) => m.enabled)?.model_id ||
+      null;
+    if (!fallbackModel) {
+      setError(`Provider ${p.id} 没有启用的模型,无法测试。`);
+      return;
+    }
+    setError(null);
+    setSuiteRun({ provider: p, scope, modelId: fallbackModel });
+  };
+
+  const closeSuite = () => {
+    setSuiteRun(null);
+    void refresh();
   };
 
   return (
@@ -719,6 +752,7 @@ export default function ProvidersTab() {
             p={p}
             onEdit={openEdit}
             onTest={runTest}
+            onRunSuite={runSuite}
             onTopup={setTopupTarget}
             onResetCircuit={onResetCircuit}
             onDelete={onDelete}
@@ -843,6 +877,15 @@ export default function ProvidersTab() {
             setTestError(null);
           }}
           onRerun={() => runTest(testTarget)}
+        />
+      )}
+
+      {suiteRun && (
+        <ProviderTestSuiteDrawer
+          provider={suiteRun.provider}
+          scope={suiteRun.scope}
+          modelId={suiteRun.modelId}
+          onClose={closeSuite}
         />
       )}
     </div>

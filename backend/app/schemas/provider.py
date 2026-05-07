@@ -411,3 +411,61 @@ class ProviderTestResponse(BaseModel):
     image_count: int = 0
     error_kind: str | None = None
     error_message: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Provider test-suite (PR-test-suite)
+# ---------------------------------------------------------------------------
+
+
+_VALID_SUITES = ("A", "B", "C", "D")
+
+
+class ProviderTestSuiteRequest(BaseModel):
+    """Body for ``POST /api/admin/providers/<id>/test-suite``.
+
+    Streams its result back as SSE; ``model_id`` is mandatory because the
+    case matrix is keyed on it. ``suites`` defaults to ["A"] for parity
+    with the legacy ``/test`` endpoint. ``case_ids`` (optional) restricts
+    to a manual subset, e.g. for re-running a failure. ``dry_run`` forces
+    suites to ["D"] only — zero upstream cost.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_id: str = Field(..., min_length=1, max_length=128)
+    suites: list[str] = Field(default_factory=lambda: ["A"])
+    case_ids: list[str] | None = None
+    dry_run: bool = False
+
+    @field_validator("suites")
+    @classmethod
+    def _validate_suites(cls, v: list[str]) -> list[str]:
+        for s in v:
+            if s not in _VALID_SUITES:
+                raise ValueError(
+                    f"invalid suite {s!r}; must be one of {_VALID_SUITES}"
+                )
+        # de-dup while preserving caller order
+        seen: set[str] = set()
+        out: list[str] = []
+        for s in v:
+            if s not in seen:
+                seen.add(s)
+                out.append(s)
+        return out
+
+
+class ProviderTestSuiteVerdictRequest(BaseModel):
+    """Body for the manual-verdict callback for SEMI / MANUAL cases."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: str = Field(..., pattern="^(pass|fail|skip)$")
+
+
+class ProviderTestSuiteVerdictResponse(BaseModel):
+    run_id: str
+    case_id: str
+    verdict: str
+    ok: bool

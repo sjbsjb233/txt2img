@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,10 +65,21 @@ from app.schemas.provider import (
     ProviderResponse,
     ProviderTestRequest,
     ProviderTestResponse,
+    ProviderTestSuiteRequest,
+    ProviderTestSuiteVerdictRequest,
+    ProviderTestSuiteVerdictResponse,
     ProviderTierAccessUpdate,
     ProviderTopup,
     ProviderTopupResponse,
     TierAccessResponse,
+)
+from app.domain.provider_test_runner import (
+    RunRequest,
+    apply_manual_verdict,
+    get_run,
+    resolve_image_path,
+    stream_run,
+    verify_image_signature,
 )
 from app.utils.audit import write_audit
 from app.utils.crypto import CryptoError, decrypt, encrypt, mask_api_key
@@ -1050,3 +1062,198 @@ async def test_provider(
             ip=_client_ip(request),
         )
     return response
+
+
+# ---------------------------------------------------------------------------
+# Test suite (full matrix, streamed via SSE)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{provider_id}/test-suite")
+async def run_test_suite(
+    provider_id: str,
+    body: ProviderTestSuiteRequest,
+    admin: CurrentAdmin,
+    request: Request,
+) -> StreamingResponse:
+    """Stream a full provider test-suite run as Server-Sent Events.
+
+    Behaviour mirrors the legacy ``/test`` probe in that ledger / metrics /
+    breaker are not touched. Per design doc §13.4, every run is logged
+    once via ``provider.test_suite``.
+    """
+    async with get_session() as session:
+        provider = await _load_provider(session, provider_id)
+        models = await _load_models(session, provider_id)
+
+    enabled_models = {m.model_id: m for m in models if m.enabled}
+    if body.model_id not in enabled_models:
+        raise api_error(
+            422,
+            "INVALID_PARAMETER",
+            f"Model {body.model_id!r} is not enabled on this provider.",
+            field="model_id",
+        )
+    chosen = enabled_models[body.model_id]
+    capabilities = _safe_load_json(chosen.capabilities_json)
+
+    registry = get_registry()
+    if not registry.has(provider.adapter_type):
+        raise api_error(
+            500,
+            "INVALID_PARAMETER",
+            f"Provider has unknown adapter_type {provider.adapter_type!r}.",
+            field="adapter_type",
+        )
+    adapter = registry.get(provider.adapter_type)
+
+    try:
+        cleartext_key = decrypt(provider.api_key_enc)
+    except CryptoError:
+        logger.exception(
+            "test-suite: provider %s has unreadable api_key_enc", provider_id
+        )
+        raise
+
+    # Per-case HTTP timeout. Generous (10 min) because this is a test
+    # surface: a real generation call from gpt-image-2 high quality or
+    # 4K gemini can legitimately take several minutes, and we'd rather
+    # wait than mark a slow but working relay as broken. The legacy
+    # ``/test`` endpoint stays on a tighter 30 s — that one is a "is
+    # the provider alive RIGHT NOW" probe, not a thoroughness check.
+    adapter_timeout = 600.0
+    config = ProviderConfig(
+        id=provider.id,
+        base_url=provider.base_url,
+        api_key=cleartext_key,
+        adapter_type=provider.adapter_type,
+        timeout_seconds=adapter_timeout,
+    )
+
+    actor_id = admin.id
+
+    run_request = RunRequest(
+        provider_id=provider_id,
+        provider=config,
+        adapter=adapter,
+        model_id=body.model_id,
+        suites=body.suites,
+        case_ids=body.case_ids,
+        capabilities=capabilities,
+        actor_id=actor_id,
+        dry_run=body.dry_run,
+    )
+
+    async def _generator() -> Any:
+        async for chunk in stream_run(run_request):
+            yield chunk
+
+    # Audit row written eagerly (so cancellations are still logged).
+    async with get_session() as session:
+        await write_audit(
+            session,
+            actor_user_id=admin.id,
+            action="provider.test_suite",
+            target_kind="provider",
+            target_id=provider_id,
+            payload={
+                "model_id": body.model_id,
+                "suites": body.suites,
+                "case_ids": body.case_ids,
+                "dry_run": body.dry_run,
+            },
+            ip=_client_ip(request),
+        )
+
+    headers = {
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+        "Connection": "keep-alive",
+    }
+    return StreamingResponse(
+        _generator(),
+        media_type="text/event-stream",
+        headers=headers,
+    )
+
+
+@router.get(
+    "/{provider_id}/test-suite/{run_id}/images/{name}",
+    response_class=FileResponse,
+)
+async def get_test_suite_image(
+    provider_id: str,
+    run_id: str,
+    name: str,
+    sig: str = "",
+    exp: int = 0,
+) -> FileResponse:
+    """Stream one persisted test-suite image back to the admin.
+
+    Auth is by a short-lived HMAC signature (``sig`` + ``exp`` query
+    parameters), not by bearer token: the admin browser loads these
+    URLs through ``<img src>`` which can't carry an Authorization
+    header. The signature is minted by the runner alongside the
+    ``case_image`` SSE frame and lapses with the run's TTL (1h).
+    """
+    if not verify_image_signature(provider_id, run_id, name, sig, exp):
+        raise api_error(403, "FORBIDDEN", "Invalid or expired signature.")
+    run = get_run(run_id)
+    if run is None or run.provider_id != provider_id:
+        raise api_error(404, "NOT_FOUND", "Run not found or expired.")
+    path = resolve_image_path(provider_id, run_id, name)
+    if path is None:
+        raise api_error(404, "NOT_FOUND", "Image not found.")
+    # Trust mime by file extension — runner controls the names.
+    ext = path.suffix.lower().lstrip(".")
+    mime = {
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "webp": "image/webp",
+        "gif": "image/gif",
+    }.get(ext, "application/octet-stream")
+    return FileResponse(path, media_type=mime)
+
+
+@router.post(
+    "/{provider_id}/test-suite/{run_id}/cases/{case_id}/verdict",
+    response_model=ProviderTestSuiteVerdictResponse,
+)
+async def post_test_suite_manual_verdict(
+    provider_id: str,
+    run_id: str,
+    case_id: str,
+    body: ProviderTestSuiteVerdictRequest,
+    admin: CurrentAdmin,
+    request: Request,
+) -> ProviderTestSuiteVerdictResponse:
+    """Record a manual pass / fail / skip decision for a SEMI / MANUAL case."""
+    run = get_run(run_id)
+    if run is None or run.provider_id != provider_id:
+        raise api_error(404, "NOT_FOUND", "Run not found or expired.")
+    case = apply_manual_verdict(run_id, case_id, body.verdict)
+    if case is None:
+        raise api_error(404, "NOT_FOUND", "Case not found in run.")
+
+    async with get_session() as session:
+        await write_audit(
+            session,
+            actor_user_id=admin.id,
+            action="provider.test_case_verdict",
+            target_kind="provider",
+            target_id=provider_id,
+            payload={
+                "run_id": run_id,
+                "case_id": case_id,
+                "verdict": body.verdict,
+            },
+            ip=_client_ip(request),
+        )
+
+    return ProviderTestSuiteVerdictResponse(
+        run_id=run_id,
+        case_id=case_id,
+        verdict=body.verdict,
+        ok=case.ok,
+    )
