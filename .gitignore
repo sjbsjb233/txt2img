@@ -14,3 +14,6 @@ __pycache__/
 .playwright-browsers/
 playwright-report/
 test-results/
+backend.env
+data/
+node_modules/

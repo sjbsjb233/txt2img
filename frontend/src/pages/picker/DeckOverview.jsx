@@ -61,6 +61,7 @@ export default function DeckOverview({ snapshot, onFinalizeAllReady }) {
 
   return (
     <div
+      data-testid="picker-deck-overview"
       style={{
         flex: 1,
         background: "var(--paper)",
@@ -334,6 +335,7 @@ function SessionCard({ session, index, onClick }) {
     <button
       onClick={onClick}
       type="button"
+      data-testid={`picker-session-card-${session.id}`}
       style={{
         all: "unset",
         cursor: "pointer",

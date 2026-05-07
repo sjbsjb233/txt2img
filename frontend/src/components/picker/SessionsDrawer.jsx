@@ -40,6 +40,8 @@ export default function SessionsDrawer({
         />
       )}
       <div
+        data-testid="picker-sessions-drawer"
+        data-open={open ? "true" : "false"}
         style={{
           position: "absolute",
           top: 0,
@@ -54,6 +56,7 @@ export default function SessionsDrawer({
           display: "grid",
           gridTemplateRows: "auto 1fr auto",
           zIndex: 21,
+          pointerEvents: open ? "auto" : "none",
         }}
       >
         <div

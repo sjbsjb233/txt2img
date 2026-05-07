@@ -38,6 +38,7 @@ export default function FinalizeConfirmModal({
         }}
       />
       <div
+        data-testid="picker-finalize-confirm-modal"
         style={{
           position: "absolute",
           top: "50%",

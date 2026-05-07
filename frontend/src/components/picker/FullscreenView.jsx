@@ -28,6 +28,7 @@ export default function FullscreenView({
 
   return (
     <div
+      data-testid="picker-fullscreen"
       style={{
         position: "fixed",
         inset: 0,

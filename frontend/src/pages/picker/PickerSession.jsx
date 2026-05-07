@@ -348,6 +348,7 @@ export default function PickerSession({ snapshot, userId }) {
   return (
     <>
       <div
+        data-testid="picker-judging-page"
         style={{
           flex: 1,
           background: "var(--paper)",
@@ -530,6 +531,7 @@ function PickerHeader({
         type="button"
         title="Sessions (S)"
         disabled={locked}
+        data-testid="picker-sessions-button"
         style={locked ? { opacity: 0.5 } : {}}
       >
         ☰ Sessions <span className="kbd" style={{ marginLeft: 4 }}>S</span>
@@ -612,6 +614,7 @@ function PickerHeader({
         onClick={onFullscreen}
         type="button"
         disabled={locked}
+        data-testid="picker-fullscreen-button"
         style={locked ? { opacity: 0.5 } : {}}
       >
         ⛶ Fullscreen
