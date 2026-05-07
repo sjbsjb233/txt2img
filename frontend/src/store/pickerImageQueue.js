@@ -31,12 +31,27 @@ const LRU_CAPACITY = 50;
 
 let inflightCount = 0;
 const cache = new Map(); // key -> { blob, url, refCount, addedAt }
-const promises = new Map(); // key -> Promise<string|null>
-let waiting = []; // Array<{key, path, priority, resolve, reject}>
+// In-flight tracker — refCount accumulates `request` calls that arrive
+// before the fetch has resolved. `release` decrements this counter
+// while the promise is pending; on resolve we use it as the seed for
+// the cache entry's refCount so unmounts during fetch don't strand
+// permanent references.
+const inflight = new Map(); // key -> { promise, refCount, epoch }
+let waiting = []; // Array<{key, path, priority, resolve, epoch}>
+// Bumped by clearAll() — anything that started under a prior epoch
+// silently discards its result instead of repopulating the cache.
+let currentEpoch = 0;
+
+class CancelledError extends Error {
+  constructor() {
+    super("picker image request cancelled");
+    this.name = "CancelledError";
+    this.cancelled = true;
+  }
+}
 
 function pruneLRU() {
   if (cache.size <= LRU_CAPACITY) return;
-  // Evict the oldest unreferenced entries until under cap.
   const ordered = Array.from(cache.entries()).sort(
     (a, b) => a[1].addedAt - b[1].addedAt
   );
@@ -57,97 +72,137 @@ function pruneLRU() {
 function pump() {
   if (inflightCount >= MAX_CONCURRENT) return;
   if (waiting.length === 0) return;
-  // Highest priority first; FIFO tiebreaker (Array.sort is stable in V8/JSC).
   waiting.sort((a, b) => b.priority - a.priority);
   const job = waiting.shift();
   if (!job) return;
+  // Drop jobs from a previous epoch — clearAll() invalidated them.
+  if (job.epoch !== currentEpoch) {
+    job.resolve(null);
+    inflight.delete(job.key);
+    pump();
+    return;
+  }
   inflightCount += 1;
   fetchImageBlob(job.path)
     .then((blob) => {
+      const tracker = inflight.get(job.key);
+      // Discard if epoch changed mid-flight: clearAll() ran while we
+      // were waiting on bytes. Don't repopulate the cache.
+      if (job.epoch !== currentEpoch) {
+        job.resolve(null);
+        return;
+      }
       if (blob === null) {
         job.resolve(null);
         return;
       }
       const url = URL.createObjectURL(blob);
+      // Seed refCount from in-flight tracker so callers that requested
+      // *and* released while the fetch was pending still net out
+      // correctly.
+      const seedRefs = tracker ? Math.max(0, tracker.refCount) : 1;
       cache.set(job.key, {
         blob,
         url,
-        refCount: 1,
+        refCount: seedRefs,
         addedAt: Date.now(),
       });
       pruneLRU();
       job.resolve(url);
     })
     .catch((err) => {
-      job.reject(err);
+      // Resolve to null so consumers downgrade to placeholder rather
+      // than throw an unhandled rejection. fetchImageBlob already
+      // distinguishes 404 from transient errors; both surface as a
+      // missing-image fallback in the UI.
+      job.resolve(null);
+      // eslint-disable-next-line no-console
+      if (typeof console !== "undefined") {
+        console.warn("pickerImageQueue: fetch failed", job.path, err);
+      }
     })
     .finally(() => {
       inflightCount = Math.max(0, inflightCount - 1);
-      promises.delete(job.key);
+      inflight.delete(job.key);
       pump();
     });
 }
 
 /**
- * Request a blob URL for the given image. Returns a Promise that resolves
- * to the cached object URL (string) or null when the file is missing
- * (404).
- *
- * Multiple concurrent calls for the same key share a single in-flight
- * fetch — the cache is reference-counted so callers must invoke
- * `release(key)` when they're done with it.
+ * Request a blob URL for the given image. Returns a Promise that
+ * resolves to the cached object URL (string) or null when the file is
+ * missing or cancelled.
  */
 export function request(key, path, priority = 50) {
+  // Cache hit — bump refcount and resolve.
   if (cache.has(key)) {
     const entry = cache.get(key);
     entry.refCount += 1;
     return Promise.resolve(entry.url);
   }
-  const existing = promises.get(key);
+  // In-flight hit — share the promise and bump the in-flight refcount
+  // so callers that release before the fetch resolves are accounted
+  // for.
+  const existing = inflight.get(key);
   if (existing) {
-    existing.then((url) => {
-      // Race: cache might have just been populated; bump refcount.
-      const entry = cache.get(key);
-      if (entry) entry.refCount += 1;
-      return url;
-    });
-    return existing;
+    existing.refCount += 1;
+    return existing.promise;
   }
-  const p = new Promise((resolve, reject) => {
-    waiting.push({ key, path, priority, resolve, reject });
-    // Schedule a microtask flush so multiple synchronous request()
-    // calls coalesce before we sort/dispatch.
+  // Fresh request.
+  const epoch = currentEpoch;
+  const promise = new Promise((resolve) => {
+    waiting.push({ key, path, priority, resolve, epoch });
     queueMicrotask(pump);
   });
-  promises.set(key, p);
-  return p;
+  inflight.set(key, { promise, refCount: 1, epoch });
+  return promise;
 }
 
 /**
  * Drop a key from the waiting queue if it hasn't been dispatched yet.
- * In-flight requests are not aborted (HTTP/2 abort is a noop on the
- * server side and just wastes the bytes already inflight).
+ * Settles the pending promise with `null` so awaiters don't hang
+ * forever. In-flight requests are not aborted (HTTP/2 abort is a
+ * noop on the server side).
  */
 export function cancel(key) {
-  waiting = waiting.filter((j) => j.key !== key);
-  promises.delete(key);
+  const idx = waiting.findIndex((j) => j.key === key);
+  if (idx >= 0) {
+    const [job] = waiting.splice(idx, 1);
+    try {
+      job.resolve(null);
+    } catch {
+      /* ignore */
+    }
+    inflight.delete(key);
+  }
 }
 
 /**
- * Drop one reference. When refCount hits zero the entry becomes a
- * candidate for LRU eviction; we don't revoke immediately because the
- * caller might re-mount and re-request the same key (e.g., React
- * StrictMode double-mount, or moving cursor back).
+ * Drop one reference. While the entry is in-flight we decrement the
+ * pending refcount; once cached, we decrement the cache entry and let
+ * LRU sweep it.
  */
 export function release(key) {
   const entry = cache.get(key);
-  if (!entry) return;
-  entry.refCount = Math.max(0, entry.refCount - 1);
-  pruneLRU();
+  if (entry) {
+    entry.refCount = Math.max(0, entry.refCount - 1);
+    pruneLRU();
+    return;
+  }
+  const tracker = inflight.get(key);
+  if (tracker) {
+    tracker.refCount = Math.max(0, tracker.refCount - 1);
+  }
 }
 
-/** Drop everything. Used on session switch / logout. */
+/**
+ * Drop every cached entry and invalidate every in-flight request.
+ * Used on session switch / logout. In-flight fetches still complete
+ * but discard their result (epoch check) so we don't leak blob URLs
+ * after the user navigated away.
+ */
 export function clearAll() {
+  currentEpoch += 1;
   for (const [, entry] of cache) {
     if (entry.url) {
       try {
@@ -158,6 +213,15 @@ export function clearAll() {
     }
   }
   cache.clear();
-  promises.clear();
+  // Settle any pending promises that haven't been dispatched yet so
+  // their consumers unblock immediately.
+  for (const job of waiting) {
+    try {
+      job.resolve(null);
+    } catch {
+      /* ignore */
+    }
+  }
   waiting = [];
+  inflight.clear();
 }

@@ -466,14 +466,16 @@ async def post_image_star(
     :mod:`app.api.picker`.
     """
     import asyncio
-    import json
     from datetime import datetime, timezone
 
     from app.db.models import Session as SessionRow
 
     job = await _load_owned_job(hash_id, user.id)
 
-    pick_change: tuple[str, str, str | None, str | None, str | None] | None = None
+    # (image_id, from_state, to_state, sess_id, sess_picker_state, sess_final_image_id)
+    pick_change: (
+        tuple[str, str, str, str | None, str | None, str | None] | None
+    ) = None
 
     async with get_session() as session:
         img = (
@@ -550,13 +552,25 @@ async def post_image_star(
                 new_pick_state,
                 sess_row.id if sess_row else None,
                 sess_row.picker_state if sess_row else None,
+                # Carry the *current* final pointer so the SSE consumer
+                # doesn't reset it; the only time we touch this column
+                # in this handler is when we explicitly cleared it
+                # above (un-starring the previous final).
+                sess_row.final_image_id if sess_row else None,
             )
 
     # Best-effort: broadcast pick_state change so picker tabs update.
     if pick_change is not None:
         from app.domain.sse_hub import get_sse_hub
 
-        image_id, from_state, to_state, sess_id, sess_picker_state = pick_change
+        (
+            image_id,
+            from_state,
+            to_state,
+            sess_id,
+            sess_picker_state,
+            sess_final_image_id,
+        ) = pick_change
         payload = {
             "image_id": image_id,
             "hash_id": hash_id,
@@ -566,7 +580,7 @@ async def post_image_star(
             "to": to_state,
             "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "session_picker_state": sess_picker_state,
-            "session_final_image_id": None,
+            "session_final_image_id": sess_final_image_id,
             "starred": new_value,
         }
         try:

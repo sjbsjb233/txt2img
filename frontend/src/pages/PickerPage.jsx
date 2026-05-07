@@ -971,7 +971,7 @@ function SessionMain({
           </span>
         ) : ready ? (
           <span className="pkchip ok" data-testid="picker-state-chip">
-            READY · F to finalize
+            READY · ↵ to finalize
           </span>
         ) : (
           <span className="pkchip" data-testid="picker-state-chip">

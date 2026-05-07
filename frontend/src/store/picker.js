@@ -610,14 +610,30 @@ function schedulePickWrite(hashId, order, targetState, imageId) {
         notify();
       }
     } catch (err) {
-      // Roll back: pop our undo entry and apply prev state.
-      const lastIdx = undoStack.findIndex((e) => e.image_id === imageId);
+      // Roll back the *most recent* undo entry for this image. If the
+      // user judged the same image multiple times before the debounce
+      // settled, `findIndex` would have grabbed the oldest entry —
+      // wrong target. Walk the stack backwards instead.
+      let lastIdx = -1;
+      for (let i = undoStack.length - 1; i >= 0; i--) {
+        if (undoStack[i].image_id === imageId) {
+          lastIdx = i;
+          break;
+        }
+      }
       if (lastIdx >= 0) {
         const entry = undoStack[lastIdx];
         undoStack.splice(lastIdx, 1);
         applyLocalState(imageId, entry.prev_state, { recompute: true });
       }
-      throw err;
+      // Don't rethrow — this callback is a fire-and-forget timer, so
+      // throwing turns into an unhandled rejection. Log instead and
+      // surface failure through the rolled-back UI state + a future
+      // toast hook (the SessionView already has a toast slot).
+      // eslint-disable-next-line no-console
+      if (typeof console !== "undefined") {
+        console.warn("picker: judgment write failed, rolled back", err);
+      }
     }
   }, WRITE_DEBOUNCE_MS);
   pendingWrites.set(imageId, { hashId, order, state: targetState, timer });

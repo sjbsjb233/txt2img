@@ -257,6 +257,10 @@ async def _set_pick_state(
     target: PickState,
 ) -> JudgmentResponse:
     previous_final_image_id: str | None = None
+    # Demotion broadcast info captured inside the transaction and
+    # emitted *after* commit so other tabs never observe a state that
+    # hasn't been persisted yet.
+    demotion_broadcast: dict[str, Any] | None = None
 
     async with get_session() as session:
         img, job_row, sess_row = await _load_owned_image(
@@ -301,24 +305,37 @@ async def _set_pick_state(
                     old_final.pick_state = "picked"
                     old_final.pick_state_updated_at = datetime.now(timezone.utc)
                     old_final.starred = 1
-                    # Schedule a separate broadcast so other tabs reflect
-                    # the demotion. We capture pre-commit values; the
-                    # outer transaction commits before the SSE goes out
-                    # because the context manager flushes on exit.
-                    asyncio.create_task(
-                        _broadcast_pick_state(
-                            user_id=user_id,
-                            image_id=old_final.id,
-                            hash_id=hash_id if old_final.job_id == job_row.id else "",
-                            order=int(old_final.img_order),
-                            session_id=sess_row.id,
-                            from_state=old_from_state,
-                            to_state="picked",
-                            session_picker_state=None,
-                            session_final_image_id=None,
-                            starred=True,
+                    # Resolve the demoted image's owning hash_id rather
+                    # than sending an empty string (Copilot review on
+                    # PR #88) — downstream consumers use hash_id+order
+                    # to build URLs and route audit logs.
+                    if old_final.job_id == job_row.id:
+                        demoted_hash_id = hash_id
+                    else:
+                        owner_job = (
+                            await session.execute(
+                                select(Job).where(Job.id == old_final.job_id)
+                            )
+                        ).scalar_one_or_none()
+                        demoted_hash_id = (
+                            owner_job.hash_id if owner_job is not None else ""
                         )
-                    )
+                    # Capture for post-commit dispatch. We deliberately
+                    # do NOT schedule the SSE here — the context
+                    # manager hasn't committed yet, and another tab
+                    # could observe a state that's about to roll back.
+                    demotion_broadcast = {
+                        "user_id": user_id,
+                        "image_id": old_final.id,
+                        "hash_id": demoted_hash_id,
+                        "order": int(old_final.img_order),
+                        "session_id": sess_row.id,
+                        "from_state": old_from_state,
+                        "to_state": "picked",
+                        "session_picker_state": None,
+                        "session_final_image_id": None,
+                        "starred": True,
+                    }
             sess_row.final_image_id = img.id
 
         # If the transition is *away from* 'final' on the row that owned
@@ -352,6 +369,10 @@ async def _set_pick_state(
         sess_final_image_id = sess_row.final_image_id if sess_row else None
 
     # Broadcast after commit so consumers don't see uncommitted state.
+    # Demotion fires first so subscribers always see the prior final
+    # transition before the new final claim.
+    if demotion_broadcast is not None:
+        asyncio.create_task(_broadcast_pick_state(**demotion_broadcast))
     asyncio.create_task(
         _broadcast_pick_state(
             user_id=user_id,
