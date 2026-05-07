@@ -534,6 +534,35 @@ class JobExecutor:
                     updated_at=datetime.now(timezone.utc),
                 )
             )
+            # PRD §6.7 / §3.2: if this job is bound to a finalized session,
+            # the arrival of new images automatically reverts it to
+            # ``judging`` — the user must re-finalize once the new images
+            # are judged. Fetch the job row to get session_id, then
+            # cascade.
+            from app.db.models import Session as SessionRow
+
+            job_row = (
+                await session.execute(
+                    select(Job).where(Job.hash_id == ctx.hash_id)
+                )
+            ).scalar_one_or_none()
+            if job_row is not None and job_row.session_id:
+                sess_row = (
+                    await session.execute(
+                        select(SessionRow).where(
+                            SessionRow.id == job_row.session_id
+                        )
+                    )
+                ).scalar_one_or_none()
+                if sess_row is not None:
+                    if sess_row.picker_state == "finalized":
+                        sess_row.picker_state = "judging"
+                        sess_row.finalized_at = None
+                    elif sess_row.picker_state == "not_started":
+                        # New images don't change "not_started" if all
+                        # are unjudged (which they are at insert time).
+                        pass
+                    sess_row.updated_at = datetime.now(timezone.utc)
         return payloads
 
     async def _mark_success(

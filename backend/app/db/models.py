@@ -326,11 +326,23 @@ class Image(Base):
     starred: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )
+    pick_state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'unjudged'")
+    )
+    pick_state_updated_at: Mapped[datetime | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )
 
-    __table_args__ = (Index("idx_images_job", "job_id", "img_order"),)
+    __table_args__ = (
+        Index("idx_images_job", "job_id", "img_order"),
+        Index("idx_images_pick_state", "pick_state"),
+        Index("idx_images_job_pick", "job_id", "pick_state"),
+        CheckConstraint(
+            "pick_state IN ('unjudged','picked','discarded','final','deferred')",
+            name="ck_images_pick_state",
+        ),
+    )
 
 
 class Session(Base):
@@ -341,6 +353,16 @@ class Session(Base):
         Text, ForeignKey("users.id"), nullable=False
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    picker_state: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'not_started'")
+    )
+    final_image_id: Mapped[str | None] = mapped_column(
+        Text,
+        ForeignKey("images.id", ondelete="SET NULL", name="fk_sessions_final_image"),
+        nullable=True,
+    )
+    cursor_image_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    finalized_at: Mapped[datetime | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )
@@ -348,7 +370,14 @@ class Session(Base):
         nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )
 
-    __table_args__ = (Index("idx_sessions_user", "user_id", "updated_at"),)
+    __table_args__ = (
+        Index("idx_sessions_user", "user_id", "updated_at"),
+        Index("idx_sessions_picker_state", "user_id", "picker_state"),
+        CheckConstraint(
+            "picker_state IN ('not_started','judging','finalized')",
+            name="ck_sessions_picker_state",
+        ),
+    )
 
 
 class SessionJob(Base):

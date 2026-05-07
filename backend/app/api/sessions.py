@@ -21,6 +21,7 @@ checks the session belongs to the caller. Cross-tenant access returns
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -31,6 +32,7 @@ from app.db.engine import get_session
 from app.db.models import Session as SessionRow
 from app.db.models import SessionJob
 from app.deps import CurrentUser
+from app.domain.sse_hub import get_sse_hub
 from app.schemas.sessions import (
     SessionCreateRequest,
     SessionListResponse,
@@ -278,4 +280,19 @@ async def delete_session(
             delete(SessionJob).where(SessionJob.session_id == session_id)
         )
 
+    # Notify any open Picker tabs so they can show the
+    # "session was deleted" overlay (PRD §12.3 B14).
+    asyncio.create_task(_broadcast_session_deleted(user.id, session_id))
+
     return {"ok": True}
+
+
+async def _broadcast_session_deleted(user_id: str, session_id: str) -> None:
+    payload = {
+        "session_id": session_id,
+        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        await get_sse_hub().broadcast_to_user(user_id, "session_deleted", payload)
+    except Exception:  # pragma: no cover — best effort
+        logger.exception("session_deleted broadcast failed for %s", session_id)

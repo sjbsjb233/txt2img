@@ -4,6 +4,7 @@ import LoginPage from "./pages/LoginPage.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
 import CreatePage from "./pages/CreatePage.jsx";
 import ArchivePage from "./pages/ArchivePage.jsx";
+import PickerPage from "./pages/PickerPage.jsx";
 import AdminPage from "./pages/AdminPage.jsx";
 import SettingsPage from "./pages/SettingsPage.jsx";
 import Layout from "./components/Layout.jsx";
@@ -129,6 +130,7 @@ export default function App() {
         >
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/create" element={<CreatePage />} />
+          <Route path="/picker" element={<PickerPage />} />
           <Route path="/archive" element={<ArchivePage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route

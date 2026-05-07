@@ -1,0 +1,335 @@
+/* Picker page atoms — pulled from the Claude Design picker/tokens.css.
+   The base palette already lives in styles/tokens.css; this file only
+   adds the picker-specific atoms (state-dot, fs-cell, judge-btn, etc.)
+   so we don't duplicate the base tokens.
+
+   Force light theme inside .picker-root since v1 explicitly does NOT
+   support dark mode (PRD §14.5).
+*/
+
+.picker-root {
+  --paper: #f4efe6;
+  --paper-2: #ede6d6;
+  --paper-3: #e3dac5;
+  --paper-soft: #fffdf7;
+  --card: #fffdf7;
+  --ink: #191714;
+  --ink-2: #3a3631;
+  --ink-3: #6b6459;
+  --ink-4: #9c9488;
+  --rule: #1917141a;
+  --rule-2: #19171433;
+  --banana: #f4c430;
+  --banana-deep: #d9a400;
+  --banana-soft: #fbe9a1;
+  --bad: #9b2d20;
+  --ok: #2f6b3b;
+  --shadow-lift: 0 2px 0 var(--ink), 0 10px 30px -10px #19171433;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+}
+
+/* state-dot — used in headers, lists */
+.picker-root .state-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border: 1px solid var(--ink);
+  flex-shrink: 0;
+}
+.picker-root .state-dot.picked { background: var(--banana-soft); }
+.picker-root .state-dot.discarded { background: #e8bdb5; }
+.picker-root .state-dot.final { background: var(--banana); }
+.picker-root .state-dot.unjudged { background: var(--paper-3); }
+.picker-root .state-dot.deferred { background: var(--paper-3); background-image: repeating-linear-gradient(45deg, transparent 0 2px, var(--ink-3) 2px 3px); }
+
+/* Filmstrip cells */
+.picker-root .fs-cell {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 28px;
+  border-left: 1px solid #19171420;
+  position: relative;
+  cursor: pointer;
+  transition: transform 80ms ease;
+}
+.picker-root .fs-cell:first-child { border-left: none; }
+.picker-root .fs-cell:hover { transform: translateY(-2px); }
+
+.picker-root .fs-cell.unjudged { background: #c4bba8; }
+.picker-root .fs-cell.picked { background: var(--banana-soft); }
+.picker-root .fs-cell.discarded { background: #d9a395; opacity: 0.85; }
+.picker-root .fs-cell.final { background: var(--banana); }
+.picker-root .fs-cell.deferred {
+  background: #c4bba8;
+  background-image: repeating-linear-gradient(45deg, transparent 0 4px, var(--ink-3) 4px 5px);
+}
+.picker-root .fs-cell.queued { background: transparent; background-image: repeating-linear-gradient(45deg, transparent 0 4px, var(--ink-3) 4px 5px); cursor: not-allowed; }
+.picker-root .fs-cell.running {
+  background: var(--banana-soft);
+  background-image: repeating-linear-gradient(45deg, transparent 0 4px, var(--banana-deep) 4px 5px);
+  cursor: not-allowed;
+  animation: fsPulse 1.6s ease-in-out infinite;
+}
+.picker-root .fs-cell.failed { background: #d9a395; cursor: not-allowed; }
+.picker-root .fs-cell.failed::after {
+  content: "✕";
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono); font-size: 10px; color: var(--bad); font-weight: 700;
+}
+
+.picker-root .fs-cell.current {
+  outline: 2px solid var(--ink);
+  outline-offset: -1px;
+  transform: scaleY(1.3) translateY(-2px);
+  z-index: 2;
+  box-shadow: 0 4px 0 var(--ink);
+}
+.picker-root .fs-cell.final::before {
+  content: "★";
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; color: var(--ink);
+  font-weight: 700;
+}
+
+@keyframes fsPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* image pane corners */
+.picker-root .img-pane {
+  position: relative;
+  background: var(--paper-3);
+  border: 1px solid var(--ink);
+  overflow: hidden;
+}
+.picker-root .img-pane.current { border: 2px solid var(--banana); box-shadow: var(--shadow-lift); }
+
+.picker-root .img-tag {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 3px 7px;
+  background: var(--ink);
+  color: var(--paper);
+  border: 1px solid var(--ink);
+}
+.picker-root .img-tag.banana { background: var(--banana); color: var(--ink); }
+.picker-root .img-tag.muted { background: var(--paper-soft); color: var(--ink); }
+
+/* judgment buttons */
+.picker-root .judge-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--ink);
+  background: var(--paper-soft);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  min-width: 86px;
+  position: relative;
+  transition: transform 80ms ease, background 80ms ease;
+  color: var(--ink);
+}
+.picker-root .judge-btn:hover { background: var(--paper-2); }
+.picker-root .judge-btn:active { transform: translate(1px, 1px); }
+.picker-root .judge-btn .glyph {
+  width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+}
+.picker-root .judge-btn .lbl { font-size: 12px; font-weight: 700; }
+.picker-root .judge-btn .key {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-3);
+  letter-spacing: 0.1em;
+}
+.picker-root .judge-btn[data-kind="picked"]:hover { background: var(--banana-soft); border-color: var(--banana-deep); }
+.picker-root .judge-btn[data-kind="discarded"]:hover { background: #efd2cb; border-color: var(--bad); color: var(--bad); }
+.picker-root .judge-btn[data-kind="final"] {
+  background: var(--banana);
+  box-shadow: 3px 3px 0 var(--ink);
+}
+.picker-root .judge-btn[data-kind="final"]:hover { background: var(--banana-deep); box-shadow: 2px 2px 0 var(--ink); transform: translate(1px,1px); }
+.picker-root .judge-btn[disabled] { opacity: 0.4; cursor: not-allowed; }
+
+/* Buttons / chips */
+.picker-root .pkbtn {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: 8px; height: 38px; padding: 0 16px;
+  font-family: var(--font-sans); font-size: 13px; font-weight: 600;
+  border: 1px solid var(--ink); background: var(--card); color: var(--ink);
+  cursor: pointer; position: relative;
+  transition: transform 80ms ease, background 80ms ease;
+  white-space: nowrap;
+}
+.picker-root .pkbtn:hover { background: var(--paper-2); }
+.picker-root .pkbtn:active { transform: translate(1px, 1px); }
+.picker-root .pkbtn.primary { background: var(--banana); }
+.picker-root .pkbtn.primary:hover { background: var(--banana-deep); }
+.picker-root .pkbtn.ghost { background: transparent; }
+.picker-root .pkbtn.sm { height: 28px; padding: 0 10px; font-size: 12px; }
+.picker-root .pkbtn.shadowed { box-shadow: 3px 3px 0 var(--ink); }
+.picker-root .pkbtn.shadowed:hover { box-shadow: 2px 2px 0 var(--ink); transform: translate(1px, 1px); }
+.picker-root .pkbtn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.picker-root .pkkbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 20px; padding: 0 6px;
+  border: 1px solid var(--ink); background: var(--card);
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  box-shadow: 0 2px 0 var(--ink);
+  color: var(--ink);
+}
+
+.picker-root .pkchip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 8px; border: 1px solid var(--ink);
+  font-family: var(--font-mono); font-size: 11px;
+  background: var(--card); text-transform: uppercase; letter-spacing: 0.08em;
+  white-space: nowrap;
+  color: var(--ink);
+}
+.picker-root .pkchip.solid { background: var(--ink); color: var(--paper); }
+.picker-root .pkchip.banana { background: var(--banana); }
+.picker-root .pkchip.ok { background: #d5e6cf; }
+
+/* Hatched empty-state pattern */
+.picker-root .hatch {
+  background-image: repeating-linear-gradient(45deg, transparent 0 8px, #19171414 8px 9px);
+}
+
+/* Dot rule */
+.picker-root .rule-v { width: 1px; height: 24px; background: var(--ink); opacity: 0.18; }
+
+/* In-flight cards */
+.picker-root .if-card {
+  flex-shrink: 0;
+  border: 1px solid var(--ink);
+  background: var(--paper-soft);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.picker-root .if-card.queued { background: var(--paper-2); }
+.picker-root .if-card.running { background: var(--banana-soft); }
+.picker-root .if-card.failed { background: #efd2cb; }
+.picker-root .if-card .head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* progress bar (segmented) */
+.picker-root .prog-seg {
+  display: flex;
+  height: 6px;
+  border: 1px solid var(--ink);
+  background: var(--paper-soft);
+  overflow: hidden;
+}
+.picker-root .prog-seg > span { display: block; height: 100%; }
+.picker-root .prog-seg .seg-final { background: var(--banana); }
+.picker-root .prog-seg .seg-picked { background: var(--banana-soft); }
+.picker-root .prog-seg .seg-discarded { background: #d9a395; }
+.picker-root .prog-seg .seg-deferred { background-image: repeating-linear-gradient(45deg, var(--paper-3) 0 3px, var(--ink-3) 3px 4px); }
+.picker-root .prog-seg .seg-unjudged { background: var(--paper-3); }
+
+/* Session row in drawer */
+.picker-root .s-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 4px;
+  padding: 9px 12px 9px 14px;
+  border-bottom: 1px solid var(--rule);
+  cursor: pointer;
+  position: relative;
+  transition: background 80ms ease;
+  background: transparent;
+  border-left: none;
+  text-align: left;
+  width: 100%;
+  font-family: inherit;
+  color: inherit;
+  font-size: inherit;
+}
+.picker-root .s-row:hover { background: var(--paper-3); }
+.picker-root .s-row[data-active="true"] {
+  background: var(--paper-3);
+  border-left: 2px solid var(--banana);
+  padding-left: 12px;
+}
+.picker-root .s-row .name {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.picker-root .s-row .sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  letter-spacing: 0.05em;
+}
+.picker-root .s-row .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border: 1px solid var(--ink);
+  background: var(--paper-soft);
+}
+.picker-root .s-row .badge.banana { background: var(--banana); }
+.picker-root .s-row .badge.ok { background: #cfe5cf; }
+.picker-root .s-row .badge.queued { background: var(--paper-2); }
+.picker-root .s-row .badge.running { background: var(--banana-soft); animation: fsPulse 1.6s ease-in-out infinite; }
+.picker-root .s-row .badge.failed { background: #efd2cb; }
+
+@keyframes pkFadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Tabular numbers everywhere we show stats */
+.picker-root .tnum { font-variant-numeric: tabular-nums; }
+
+/* Deck overview card */
+.picker-root .deck-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border: 1px solid var(--ink);
+  background: var(--paper-soft);
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  padding: 0;
+  transition: transform 100ms ease, box-shadow 100ms ease;
+}
+.picker-root .deck-card:hover { transform: translate(-1px, -1px); box-shadow: 4px 4px 0 var(--ink); }
+.picker-root .deck-card.finalized { background: var(--banana-soft); box-shadow: 5px 5px 0 var(--ink); }
+.picker-root .deck-card.ready { box-shadow: 3px 3px 0 var(--ink); }
