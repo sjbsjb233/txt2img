@@ -457,8 +457,23 @@ async def post_image_star(
     Body is optional; when ``starred`` is set explicitly that value
     wins, otherwise we flip the current bit. We stream the new value
     back so the client doesn't need to re-pull details to confirm.
+
+    **Picker sync** (PRD §8.5.3): the legacy star bit also drives the
+    picker's ``pick_state`` field. When the user stars an unjudged
+    image, that's effectively a "pick" — promote it. When they unstar
+    a picked/final, demote to unjudged (and clear final). The reverse
+    propagation (picker pick → starred=true) is wired in
+    :mod:`app.api.picker`.
     """
+    import asyncio
+    import json
+    from datetime import datetime, timezone
+
+    from app.db.models import Session as SessionRow
+
     job = await _load_owned_job(hash_id, user.id)
+
+    pick_change: tuple[str, str, str | None, str | None, str | None] | None = None
 
     async with get_session() as session:
         img = (
@@ -477,6 +492,91 @@ async def post_image_star(
         else:
             new_value = not current
         img.starred = 1 if new_value else 0
+
+        # Mirror into pick_state so the picker page reflects the change.
+        old_pick_state = img.pick_state or "unjudged"
+        new_pick_state = old_pick_state
+        sess_row = None
+        if job.session_id:
+            sess_row = (
+                await session.execute(
+                    select(SessionRow).where(
+                        SessionRow.id == job.session_id,
+                        SessionRow.user_id == user.id,
+                    )
+                )
+            ).scalar_one_or_none()
+
+        if new_value and old_pick_state == "unjudged":
+            new_pick_state = "picked"
+        elif not new_value and old_pick_state in ("picked", "final"):
+            new_pick_state = "unjudged"
+            if (
+                sess_row is not None
+                and sess_row.final_image_id == img.id
+            ):
+                sess_row.final_image_id = None
+
+        if new_pick_state != old_pick_state:
+            img.pick_state = new_pick_state
+            img.pick_state_updated_at = datetime.now(timezone.utc)
+
+            # Recompute session.picker_state if it's not finalized.
+            if sess_row is not None and sess_row.picker_state != "finalized":
+                # Simple per-session count: any judged → judging,
+                # else not_started.
+                from app.db.models import SessionJob
+
+                rows = (
+                    await session.execute(
+                        select(Image.pick_state)
+                        .join(Job, Image.job_id == Job.id)
+                        .join(SessionJob, SessionJob.job_id == Job.id)
+                        .where(
+                            SessionJob.session_id == sess_row.id,
+                            Job.status == "SUCCEEDED",
+                        )
+                    )
+                ).all()
+                has_judged = any(
+                    s and s != "unjudged" for (s,) in rows
+                )
+                sess_row.picker_state = "judging" if has_judged else "not_started"
+                sess_row.updated_at = datetime.now(timezone.utc)
+
+            pick_change = (
+                img.id,
+                old_pick_state,
+                new_pick_state,
+                sess_row.id if sess_row else None,
+                sess_row.picker_state if sess_row else None,
+            )
+
+    # Best-effort: broadcast pick_state change so picker tabs update.
+    if pick_change is not None:
+        from app.domain.sse_hub import get_sse_hub
+
+        image_id, from_state, to_state, sess_id, sess_picker_state = pick_change
+        payload = {
+            "image_id": image_id,
+            "hash_id": hash_id,
+            "order": order,
+            "session_id": sess_id,
+            "from": from_state,
+            "to": to_state,
+            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "session_picker_state": sess_picker_state,
+            "session_final_image_id": None,
+            "starred": new_value,
+        }
+        try:
+            asyncio.create_task(
+                get_sse_hub().broadcast_to_user(
+                    user.id, "image_pick_state", payload
+                )
+            )
+        except Exception:  # pragma: no cover
+            logger.exception("starred->pick_state broadcast failed")
 
     return StarResponse(hash_id=hash_id, order=order, starred=new_value)
 

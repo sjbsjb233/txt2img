@@ -38,6 +38,12 @@ from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
 from app.api.me import router as me_router
 from app.api.models import router as models_router
+from app.api.picker import (
+    images_router as picker_images_router,
+    overview_router as picker_overview_router,
+    sessions_router as picker_sessions_router,
+    vary_router as picker_vary_router,
+)
 from app.api.sessions import router as sessions_router
 from app.api.sse import router as sse_router
 from app.config import get_settings
@@ -276,8 +282,20 @@ def create_app() -> FastAPI:
     app.include_router(me_router)
     app.include_router(sse_router)
     app.include_router(sessions_router)
+    # Picker session routes (finalize/unfinalize/cursor + GET ../picker)
+    # share ``/api/sessions`` with the legacy session CRUD; register
+    # after sessions so the static patterns ("/<id>/finalize") still win.
+    app.include_router(picker_sessions_router)
+    app.include_router(picker_overview_router)
     app.include_router(models_router)
+    # Picker vary-seed lives at /api/jobs/vary — must come before
+    # jobs_router so the static path wins over /api/jobs/{hash_id}.
+    app.include_router(picker_vary_router)
     app.include_router(jobs_router)
+    # Picker image-write routes also live under ``/api/jobs``; register
+    # before archive_router so they match before the catch-all detail
+    # routes.
+    app.include_router(picker_images_router)
     # Archive routes share the ``/api/jobs`` URL prefix with jobs_router.
     # Both routers register distinct paths (jobs.py owns the action
     # routes — POST/cancel/delete; archive.py owns the read paths —
