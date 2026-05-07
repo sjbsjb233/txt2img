@@ -10,6 +10,154 @@ function absoluteImageUrl(url) {
   return getApiBase().replace(/\/+$/, "") + url;
 }
 
+// Map the emoji prefix on each line to a styled callout block. Per
+// design v2 §5.4 the manual_prompt is structured by section markers:
+//   📋 inputs · ✅ pass conditions · ❌ fail conditions
+//   💡 tolerated artifacts · ℹ informational notes
+// Anything else falls back to neutral.
+const EMOJI_STYLE = {
+  "📋": { fg: "var(--ink-2)", bg: "var(--paper-2)", border: "var(--ink-4)" },
+  "✅": { fg: "var(--ok)", bg: "#e8f0e2", border: "var(--ok)" },
+  "❌": { fg: "var(--bad)", bg: "#f3d6d0", border: "var(--bad)" },
+  "💡": { fg: "var(--ink-2)", bg: "#fbe9a1", border: "var(--banana-deep)" },
+  "ℹ": { fg: "var(--ink-2)", bg: "#dfe6f0", border: "#3a5a78" },
+};
+
+function parsePromptBlocks(prompt) {
+  if (!prompt) return [];
+  const lines = prompt.split("\n");
+  const blocks = [];
+  let current = null;
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/, "");
+    const head = Object.keys(EMOJI_STYLE).find((e) => line.trimStart().startsWith(e));
+    if (head) {
+      if (current) blocks.push(current);
+      current = { emoji: head, lines: [line.trimStart().slice(head.length).trim()] };
+    } else if (current) {
+      // Keep blank lines as soft separators inside a block but trim
+      // leading whitespace so indentation collapses cleanly.
+      current.lines.push(line === "" ? "" : line.replace(/^\s+/, "  "));
+    }
+  }
+  if (current) blocks.push(current);
+  return blocks;
+}
+
+function PromptBlocks({ prompt }) {
+  const blocks = parsePromptBlocks(prompt);
+  if (!blocks.length) {
+    return (
+      <p style={{ margin: "6px 0 0", fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
+        {prompt}
+      </p>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+      {blocks.map((b, i) => {
+        const style = EMOJI_STYLE[b.emoji];
+        return (
+          <div
+            key={i}
+            style={{
+              background: style.bg,
+              borderLeft: `3px solid ${style.border}`,
+              color: style.fg,
+              padding: "6px 10px",
+              fontSize: 12,
+              lineHeight: 1.55,
+            }}
+          >
+            <div style={{ fontWeight: 700, marginBottom: 2 }}>
+              <span style={{ marginRight: 6 }}>{b.emoji}</span>
+              {b.lines[0]}
+            </div>
+            {b.lines.slice(1).map((l, j) => (
+              <div key={j} style={{ whiteSpace: "pre-wrap" }}>
+                {l || " "}
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function InputThumbnails({ inputs, onLightbox }) {
+  if (!inputs || !inputs.length) return null;
+  return (
+    <div
+      data-test="case-inputs"
+      style={{
+        display: "flex",
+        gap: 8,
+        marginTop: 6,
+        marginBottom: 8,
+        flexWrap: "wrap",
+        padding: "6px 8px",
+        background: "var(--paper-2)",
+        border: "1px dashed var(--ink-4)",
+      }}
+    >
+      <div
+        className="mono caps"
+        style={{
+          fontSize: 9,
+          color: "var(--ink-3)",
+          letterSpacing: "0.12em",
+          alignSelf: "center",
+          marginRight: 4,
+        }}
+      >
+        入参
+      </div>
+      {inputs.map((inp, i) => (
+        <button
+          key={i}
+          type="button"
+          className="thumb"
+          data-test={`input-thumb-${i}`}
+          onClick={() => onLightbox({ ...inp, width: 0, height: 0 })}
+          style={{
+            width: 64,
+            height: 64,
+            border: "1px solid var(--ink)",
+            cursor: "pointer",
+            background: "var(--paper)",
+            position: "relative",
+            padding: 0,
+          }}
+          title={inp.label}
+        >
+          <img
+            src={absoluteImageUrl(inp.bytes_url)}
+            alt={inp.label}
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+          />
+          <span
+            className="mono"
+            style={{
+              position: "absolute",
+              bottom: 0,
+              left: 0,
+              right: 0,
+              background: "rgba(0,0,0,0.7)",
+              color: "var(--paper)",
+              fontSize: 8,
+              padding: "1px 3px",
+              textAlign: "center",
+            }}
+          >
+            {inp.label}
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function Chip({ status, judgeLevel }) {
   const labels = {
     running: "RUNNING",
@@ -54,6 +202,7 @@ export default function CaseCard({ caseState, onLightbox, onManual }) {
     judge_level,
     status,
     images = [],
+    inputs = [],
     auto_verdict = [],
     error_kind,
     error_message,
@@ -226,19 +375,28 @@ export default function CaseCard({ caseState, onLightbox, onManual }) {
           data-test={`manual-${case_id}`}
           style={{
             marginTop: 10,
-            padding: "8px 12px",
-            background: "var(--paper-2)",
-            borderLeft: "3px solid var(--banana)",
+            padding: "10px 12px",
+            background: "var(--paper)",
+            border: "1px solid var(--banana-deep)",
+            borderLeft: "4px solid var(--banana)",
           }}
         >
           <div
             className="mono caps"
-            style={{ fontSize: 9, color: "var(--ink-3)", letterSpacing: "0.12em" }}
+            style={{
+              fontSize: 9,
+              color: "var(--ink-3)",
+              letterSpacing: "0.12em",
+              marginBottom: 4,
+            }}
           >
             人工判定
           </div>
-          <p style={{ margin: "6px 0 8px", fontSize: 12, lineHeight: 1.45 }}>{manual_prompt}</p>
-          <div style={{ display: "flex", gap: 6 }}>
+
+          <InputThumbnails inputs={inputs} onLightbox={onLightbox} />
+          <PromptBlocks prompt={manual_prompt} />
+
+          <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
             <button
               type="button"
               className="btn sm"
