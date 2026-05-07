@@ -38,6 +38,7 @@ from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
 from app.api.me import router as me_router
 from app.api.models import router as models_router
+from app.api.picker import router as picker_router
 from app.api.sessions import router as sessions_router
 from app.api.sse import router as sse_router
 from app.config import get_settings
@@ -285,6 +286,12 @@ def create_app() -> FastAPI:
     # archive *after* jobs so the more specific patterns from jobs
     # (e.g. POST /api/jobs/precheck) win first-match.
     app.include_router(archive_router)
+    # Picker routes share the ``/api/jobs`` and ``/api/sessions`` prefixes
+    # with the archive + sessions routers. The picker write endpoints
+    # use a deeper, more specific path (.../images/<order>/{pick,...})
+    # so first-match against the existing routes still wins where it
+    # matters; we just stack the new router on top.
+    app.include_router(picker_router)
     app.include_router(announcements_router)
     app.include_router(admin_adapters_router)
     app.include_router(admin_announcements_router)

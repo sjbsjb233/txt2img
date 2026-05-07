@@ -57,6 +57,9 @@ class JobImageSummary(BaseModel):
     format: str
     file_size_bytes: int
     starred: bool = False
+    # Picker page state (PRD v1 §8.5.2). Mirrored from images.pick_state
+    # so the Archive grid can show the same colour band as the picker.
+    pick_state: str = "unjudged"
 
 
 class JobReferenceSummary(BaseModel):

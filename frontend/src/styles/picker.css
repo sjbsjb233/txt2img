@@ -1,0 +1,331 @@
+/* Picker page — atoms inherited from the design prototype's
+ * picker/tokens.css. Project-wide tokens (paper, ink, banana) live
+ * in tokens.css; this file only adds picker-specific atoms.
+ */
+
+/* state-dot — used in headers, lists, and contact-sheet cells */
+.pk-state-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--ink);
+  flex-shrink: 0;
+}
+.pk-state-dot.picked { background: var(--banana-soft); }
+.pk-state-dot.discarded { background: #e8bdb5; }
+.pk-state-dot.final { background: var(--banana); }
+.pk-state-dot.unjudged { background: var(--paper-3); }
+.pk-state-dot.deferred {
+  background: var(--paper-3);
+  background-image: repeating-linear-gradient(
+    45deg, transparent 0 2px, var(--ink-3) 2px 3px
+  );
+}
+
+/* Filmstrip cells */
+.pk-fs-row {
+  display: flex;
+  border: 1px solid var(--ink);
+  background: var(--paper-3);
+}
+.pk-fs-cell {
+  flex: 1 1 0;
+  min-width: 0;
+  border-left: 1px solid #19171420;
+  position: relative;
+  cursor: pointer;
+  transition: transform 80ms ease;
+}
+.pk-fs-cell:first-child { border-left: none; }
+.pk-fs-cell:hover { transform: translateY(-2px); }
+
+.pk-fs-cell.unjudged { background: #c4bba8; }
+.pk-fs-cell.picked { background: var(--banana-soft); }
+.pk-fs-cell.discarded { background: #d9a395; opacity: 0.85; }
+.pk-fs-cell.final { background: var(--banana); }
+.pk-fs-cell.deferred {
+  background: #c4bba8;
+  background-image: repeating-linear-gradient(
+    45deg, transparent 0 4px, var(--ink-3) 4px 5px
+  );
+}
+.pk-fs-cell.queued {
+  background: transparent;
+  background-image: repeating-linear-gradient(
+    45deg, transparent 0 4px, var(--ink-3) 4px 5px
+  );
+  cursor: not-allowed;
+}
+.pk-fs-cell.running {
+  background: var(--banana-soft);
+  background-image: repeating-linear-gradient(
+    45deg, transparent 0 4px, var(--banana-deep) 4px 5px
+  );
+  cursor: not-allowed;
+  animation: pkFsPulse 1.6s ease-in-out infinite;
+}
+.pk-fs-cell.failed {
+  background: #d9a395;
+  cursor: not-allowed;
+}
+.pk-fs-cell.failed::after {
+  content: "✕";
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-mono); font-size: 10px;
+  color: var(--bad); font-weight: 700;
+}
+
+.pk-fs-cell.current {
+  outline: 2px solid var(--ink);
+  outline-offset: -1px;
+  transform: scaleY(1.3) translateY(-2px);
+  z-index: 2;
+  box-shadow: 0 4px 0 var(--ink);
+}
+.pk-fs-cell.final::before {
+  content: "★";
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; color: var(--ink); font-weight: 700;
+}
+
+@keyframes pkFsPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* Image pane corners */
+.pk-img-pane {
+  position: relative;
+  background: var(--paper-3);
+  border: 1px solid var(--ink);
+  overflow: hidden;
+}
+.pk-img-pane.current {
+  border: 2px solid var(--banana);
+  box-shadow: var(--shadow-lift);
+}
+
+/* Image meta strip + corner tag */
+.pk-img-tag {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 3px 7px;
+  background: var(--ink);
+  color: var(--paper);
+  border: 1px solid var(--ink);
+  z-index: 3;
+}
+.pk-img-tag.banana { background: var(--banana); color: var(--ink); }
+.pk-img-tag.muted { background: var(--paper-soft); color: var(--ink); }
+
+/* Judgment buttons */
+.pk-judge-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--ink);
+  background: var(--paper-soft);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  min-width: 86px;
+  position: relative;
+  transition: transform 80ms ease, background 80ms ease;
+}
+.pk-judge-btn:hover { background: var(--paper-2); }
+.pk-judge-btn:active { transform: translate(1px, 1px); }
+.pk-judge-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.pk-judge-btn .glyph {
+  width: 20px; height: 20px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px;
+}
+.pk-judge-btn .lbl { font-size: 12px; font-weight: 700; }
+.pk-judge-btn .key {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--ink-3);
+  letter-spacing: 0.1em;
+}
+.pk-judge-btn[data-kind="picked"]:hover {
+  background: var(--banana-soft);
+  border-color: var(--banana-deep);
+}
+.pk-judge-btn[data-kind="discarded"]:hover {
+  background: #efd2cb;
+  border-color: var(--bad);
+  color: var(--bad);
+}
+.pk-judge-btn[data-kind="final"] {
+  background: var(--banana);
+  box-shadow: 3px 3px 0 var(--ink);
+}
+.pk-judge-btn[data-kind="final"]:hover {
+  background: var(--banana-deep);
+  box-shadow: 2px 2px 0 var(--ink);
+  transform: translate(1px, 1px);
+}
+
+.pk-rule-v {
+  width: 1px;
+  height: 24px;
+  background: var(--ink);
+  opacity: 0.18;
+}
+
+/* In-flight cards */
+.pk-if-card {
+  flex-shrink: 0;
+  width: 100%;
+  border: 1px solid var(--ink);
+  background: var(--paper-soft);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pk-if-card.queued { background: var(--paper-2); }
+.pk-if-card.running {
+  background: var(--banana-soft);
+  animation: pkFsPulse 1.6s ease-in-out infinite;
+}
+.pk-if-card.failed { background: #efd2cb; }
+.pk-if-card .head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* Progress bar (segmented) */
+.pk-prog-seg {
+  display: flex;
+  height: 6px;
+  border: 1px solid var(--ink);
+  background: var(--paper-soft);
+  overflow: hidden;
+}
+.pk-prog-seg > span { display: block; height: 100%; }
+.pk-prog-seg .seg-final { background: var(--banana); }
+.pk-prog-seg .seg-picked { background: var(--banana-soft); }
+.pk-prog-seg .seg-discarded { background: #d9a395; }
+.pk-prog-seg .seg-deferred {
+  background-image: repeating-linear-gradient(
+    45deg, var(--paper-3) 0 3px, var(--ink-3) 3px 4px
+  );
+}
+.pk-prog-seg .seg-unjudged { background: var(--paper-3); }
+
+/* Session row in sessions drawer */
+.pk-s-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 4px;
+  padding: 9px 12px 9px 14px;
+  border-bottom: 1px solid var(--rule);
+  cursor: pointer;
+  position: relative;
+  transition: background 80ms ease;
+  background: transparent;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+  color: inherit;
+}
+.pk-s-row:hover { background: var(--paper-3); }
+.pk-s-row[data-active="true"] {
+  background: var(--paper-3);
+  border-left: 2px solid var(--banana);
+  padding-left: 12px;
+}
+.pk-s-row .name {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pk-s-row .sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  letter-spacing: 0.05em;
+}
+.pk-s-row .badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border: 1px solid var(--ink);
+  background: var(--paper-soft);
+}
+.pk-s-row .badge.banana { background: var(--banana); }
+.pk-s-row .badge.ok { background: #cfe5cf; }
+.pk-s-row .badge.queued { background: var(--paper-2); }
+.pk-s-row .badge.running {
+  background: var(--banana-soft);
+  animation: pkFsPulse 1.6s ease-in-out infinite;
+}
+.pk-s-row .badge.failed { background: #efd2cb; }
+
+/* Cross-hatched empty-state pattern */
+.pk-hatch {
+  background-image:
+    repeating-linear-gradient(45deg, transparent 0 8px, #19171414 8px 9px);
+}
+
+/* Card "brutal" layouts for deck overview */
+.pk-card-shadow-lg {
+  box-shadow: 5px 5px 0 var(--ink);
+}
+.pk-card-shadow-sm {
+  box-shadow: 3px 3px 0 var(--ink);
+}
+
+/* Sessions drawer animation */
+@keyframes pkFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Picker page chip */
+.pk-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--paper-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+.pk-chip.solid { background: var(--ink); color: var(--paper); }
+.pk-chip.banana { background: var(--banana); }
+.pk-chip.ok { background: #d5e6cf; }
+.pk-chip.warn { background: #f4d8a8; }
+.pk-chip.bad { background: #e8bdb5; }

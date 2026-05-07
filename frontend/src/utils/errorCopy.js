@@ -31,6 +31,12 @@ export const ERROR_COPY = {
   ALL_PROVIDERS_FAILED: "All providers failed. Try again in a moment.",
   NO_PROVIDER_AVAILABLE: "No provider is currently available for this model.",
   UPSTREAM_TIMEOUT: "The upstream provider timed out. Try again.",
+
+  // ----- picker -----
+  INVALID_PICKER_STATE: "Can't finalize yet — some images are still unjudged.",
+  IMAGE_NOT_IN_SESSION: "This image isn't in the current session.",
+  SESSION_HAS_NO_IMAGES: "Nothing to export — this session has no images.",
+  SESSION_NOT_FINALIZED: "One or more sessions still need to be finalized.",
 };
 
 /**

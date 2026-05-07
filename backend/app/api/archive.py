@@ -457,7 +457,18 @@ async def post_image_star(
     Body is optional; when ``starred`` is set explicitly that value
     wins, otherwise we flip the current bit. We stream the new value
     back so the client doesn't need to re-pull details to confirm.
+
+    Picker integration (PRD v1 §8.5.3): the star bit and the picker
+    ``pick_state`` are mirrored. Starring an unjudged image transitions
+    it to ``picked``; un-starring a ``picked`` / ``final`` image drops
+    it back to ``unjudged``. Either way we broadcast the picker SSE
+    event so the picker page (if open in another tab) catches up.
     """
+    # Local import to avoid a circular dep — picker_logic imports nothing
+    # here, but we keep the import inside the function for symmetry with
+    # the rest of the archive module's lazy imports.
+    from app.services.picker_logic import sync_starred_with_pick_state
+
     job = await _load_owned_job(hash_id, user.id)
 
     async with get_session() as session:
@@ -476,7 +487,24 @@ async def post_image_star(
             new_value = bool(body.starred)
         else:
             new_value = not current
-        img.starred = 1 if new_value else 0
+
+        # Mirror into pick_state; the helper handles the broadcast
+        # bookkeeping plus session.picker_state recompute.
+        sync_payload = await sync_starred_with_pick_state(
+            session=session,
+            user_id=user.id,
+            job=job,
+            image=img,
+            new_starred=new_value,
+        )
+
+    if sync_payload is not None:
+        from app.domain.sse_hub import get_sse_hub
+
+        for ev in sync_payload:
+            await get_sse_hub().broadcast_to_user(
+                user.id, "image_pick_state", ev
+            )
 
     return StarResponse(hash_id=hash_id, order=order, starred=new_value)
 
@@ -747,6 +775,7 @@ def _project_detail(
             format=img.format,
             file_size_bytes=img.file_size_bytes,
             starred=bool(img.starred),
+            pick_state=img.pick_state or "unjudged",
         )
         for img in images
     ]
