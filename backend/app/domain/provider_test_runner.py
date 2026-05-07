@@ -424,28 +424,52 @@ def _judge_gemini_aspect(target: str, tol: float = 0.06):
     return _judge
 
 
-def _judge_gemini_size(min_long_edge: int, label: str):
+def _judge_gemini_size(
+    label: str,
+    *,
+    min_long_edge: int | None = None,
+    max_long_edge: int | None = None,
+):
+    """Build a judge that asserts ``max(w,h)`` lies in [min, max].
+
+    Either bound is optional: 1K/2K/4K only need a lower bound (relays
+    can render *bigger* than requested without it being a regression),
+    while 512 only needs an upper bound (the spec says 512 maps to
+    something around 512–768px). Catches the symmetric "relay ignored
+    imageConfig" failure for both.
+    """
+
     def _judge(
         request: NormalizedRequest, response: NormalizedResponse
     ) -> tuple[bool, list[Verdict]]:
         verdicts: list[Verdict] = []
-        ok = response.image_count > 0
-        if not ok:
+        if response.image_count <= 0:
             verdicts.append(Verdict(False, "未返回任何图片"))
-            return ok, verdicts
+            return False, verdicts
+
         info = probe_image(response.images[0])
         long_edge = max(info["width"], info["height"])
-        match = long_edge >= min_long_edge
+
+        bound_parts: list[str] = []
+        match = True
+        if min_long_edge is not None:
+            bound_parts.append(f"≥ {min_long_edge}px")
+            if long_edge < min_long_edge:
+                match = False
+        if max_long_edge is not None:
+            bound_parts.append(f"≤ {max_long_edge}px")
+            if long_edge > max_long_edge:
+                match = False
+        bound_text = " / ".join(bound_parts) if bound_parts else "无界"
+
         verdicts.append(
             Verdict(
                 match,
-                f"返回图最长边 {long_edge}px (image_size={label} 期望 ≥ {min_long_edge}px); "
-                + ("中继可能未透传 imageConfig" if not match else "尺寸合规"),
+                f"返回图最长边 {long_edge}px (image_size={label} 期望 {bound_text}); "
+                + ("尺寸合规" if match else "中继可能未透传 imageConfig"),
             )
         )
-        if not match:
-            ok = False
-        return ok, verdicts
+        return match, verdicts
 
     return _judge
 
@@ -463,6 +487,11 @@ def _judge_gemini_grounding(
     verdicts.append(
         Verdict(has_grounding, f"groundingMetadata: {'非空' if has_grounding else '缺失'}")
     )
+    # A relay that drops grounding-related fields should fail the case
+    # outright, not coast on "image returned". Earlier this was a
+    # warning-only signal and SEMI status masked the real failure.
+    if not has_grounding:
+        ok = False
     return ok, verdicts
 
 
@@ -526,12 +555,9 @@ _BASIC_JUDGES: dict[str, Callable[..., tuple[bool, list[Verdict]]]] = {
     "gemini_aspect_9_16": _judge_gemini_aspect("9:16"),
     "gemini_aspect_1_4": _judge_gemini_aspect("1:4"),
     "gemini_aspect_8_1": _judge_gemini_aspect("8:1"),
-    "gemini_size_2k": _judge_gemini_size(1900, "2K"),
-    "gemini_size_4k": _judge_gemini_size(3600, "4K"),
-    "gemini_size_512": (lambda r, s: (
-        s.image_count > 0,
-        [Verdict(True, f"返回图最长边 {max(probe_image(s.images[0])['width'], probe_image(s.images[0])['height'])}px") if s.images else Verdict(False, "未返回图片")],
-    )),
+    "gemini_size_2k": _judge_gemini_size("2K", min_long_edge=1900),
+    "gemini_size_4k": _judge_gemini_size("4K", min_long_edge=3600),
+    "gemini_size_512": _judge_gemini_size("512", max_long_edge=768),
     "gemini_grounding": _judge_gemini_grounding,
     "gemini_thoughts": _judge_gemini_thoughts,
     "gemini_basic_image": _judge_basic_image,
@@ -843,10 +869,14 @@ async def stream_run(req: RunRequest) -> AsyncIterator[bytes]:
         if case.suite == "A" and not ok:
             a_failed = True
 
-    # Compute totals.
+    # Compute totals. Short-circuit "skipped after A failed" cases are
+    # tagged with ``manual_verdict == "skip"`` regardless of judge_level,
+    # so we check that first to keep them out of the failure bucket.
     totals = {"pass": 0, "warn": 0, "fail": 0, "skipped": 0}
     for r in run.cases.values():
-        if r.judge_level == "AUTO":
+        if r.manual_verdict == "skip":
+            totals["skipped"] += 1
+        elif r.judge_level == "AUTO":
             if r.ok:
                 totals["pass"] += 1
             else:
@@ -858,8 +888,6 @@ async def stream_run(req: RunRequest) -> AsyncIterator[bytes]:
                 totals["pass"] += 1
             elif r.manual_verdict == "fail":
                 totals["fail"] += 1
-            elif r.manual_verdict == "skip":
-                totals["skipped"] += 1
             else:
                 # not yet decided — front-end will tally as "warn"
                 totals["warn"] += 1
@@ -937,6 +965,19 @@ def _case_start_payload(case: TestCase, request_params: dict[str, Any]) -> dict[
 def _case_result_payload(
     result: _CaseResult, run_id: str, provider_id: str
 ) -> dict[str, Any]:
+    # Forward ``status`` explicitly so the frontend reducer doesn't have
+    # to second-guess the difference between "failed test" and "skipped
+    # because the A-suite already failed". Without this, short-circuit
+    # cases (ok=False + manual_verdict="skip") would render as red
+    # ``fail`` cards and double-count in the totals row.
+    if result.manual_verdict == "skip":
+        status = "skipped"
+    elif result.ok and result.judge_level in ("SEMI", "MANUAL") and result.manual_required:
+        status = "manual_pending"
+    elif result.ok:
+        status = "pass"
+    else:
+        status = "fail"
     return {
         "run_id": run_id,
         "provider_id": provider_id,
@@ -945,6 +986,8 @@ def _case_result_payload(
         "title": result.title,
         "judge_level": result.judge_level,
         "ok": result.ok,
+        "status": status,
+        "manual_verdict": result.manual_verdict,
         "auto_verdict": result.auto_verdict,
         "manual_required": result.manual_required,
         "manual_prompt": result.manual_prompt,
@@ -977,6 +1020,11 @@ def _compute_verdict(run: _RunState) -> str:
     has_fail = False
     has_pending_manual = False
     for r in run.cases.values():
+        # Short-circuit skipped cases never feed into PASS/FAIL
+        # accounting — they're an admin-visible "we didn't try this"
+        # signal, distinct from a real failure.
+        if r.manual_verdict == "skip":
+            continue
         if r.judge_level == "AUTO":
             if not r.ok:
                 has_fail = True

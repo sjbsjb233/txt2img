@@ -65,8 +65,14 @@ def probe_image(img: NormalizedImage) -> dict[str, Any]:
             if w and h:
                 info["aspect_ratio"] = round(w / h, 4)
             if im.mode == "RGBA":
+                # ``alpha.histogram()`` returns a list of pixel counts
+                # indexed by intensity 0..255. Index 0 is the fully
+                # transparent count — pulling it directly avoids an
+                # O(w*h) Python loop, which matters once images get
+                # past 2K (a 4K RGBA mask is 16M pixels).
                 alpha = im.split()[-1]
-                transparent = sum(1 for px in alpha.getdata() if px == 0)
+                hist = alpha.histogram()
+                transparent = hist[0] if hist else 0
                 info["alpha_ratio"] = round(
                     transparent / max(1, w * h), 4
                 )

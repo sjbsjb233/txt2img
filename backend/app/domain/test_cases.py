@@ -254,11 +254,22 @@ def _req_gemini_a1(model_id: str) -> Callable[[], NormalizedRequest]:
 
 
 def _req_gemini_aspect(model_id: str, ratio: str) -> Callable[[], NormalizedRequest]:
+    """Pick a landscape vs portrait prompt based on the requested ratio.
+
+    The earlier implementation compared the two halves as strings, so
+    e.g. ``"9:16"`` resolved as landscape because lexicographic
+    ``"9" >= "16"`` is True. Parsed ints get the right answer.
+    """
+
     def factory() -> NormalizedRequest:
-        prompt = (
-            _PROMPT_LANDSCAPE if ":" in ratio and ratio.split(":")[0] >= ratio.split(":")[1]
-            else _PROMPT_PORTRAIT
-        )
+        is_landscape = True
+        if ":" in ratio:
+            try:
+                tw_str, th_str = ratio.split(":", 1)
+                is_landscape = int(tw_str) >= int(th_str)
+            except (TypeError, ValueError):
+                is_landscape = True
+        prompt = _PROMPT_LANDSCAPE if is_landscape else _PROMPT_PORTRAIT
         return NormalizedRequest(model=model_id, prompt=prompt, aspect_ratio=ratio)
 
     return factory

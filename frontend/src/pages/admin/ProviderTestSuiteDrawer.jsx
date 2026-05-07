@@ -100,13 +100,20 @@ function reducer(state, action) {
     case "case_result": {
       const c = state.cases[action.case_id];
       if (!c) return state;
+      // Prefer the server's explicit status when present (introduced
+      // so short-circuit "skipped after A failed" cases render as
+      // skipped instead of fail). Fall back to deriving from judge_level
+      // for older payloads.
       const judgeLevel = c.judge_level;
       const status =
-        action.ok && (judgeLevel === "SEMI" || judgeLevel === "MANUAL")
+        action.status ||
+        (action.manual_verdict === "skip"
+          ? "skipped"
+          : action.ok && (judgeLevel === "SEMI" || judgeLevel === "MANUAL")
           ? "manual_pending"
           : action.ok
           ? "pass"
-          : "fail";
+          : "fail");
       const updated = {
         ...c,
         status,
@@ -117,6 +124,7 @@ function reducer(state, action) {
         latency_ms: action.latency_ms,
         ok: action.ok,
         cost_image: action.cost_image,
+        manual_verdict: action.manual_verdict ?? c.manual_verdict,
         // Replace any optimistic image array with the canonical one when the
         // server includes a richer description in case_result.
         images:
@@ -136,6 +144,7 @@ function reducer(state, action) {
       if (status === "pass") totals.pass += 1;
       else if (status === "fail") totals.fail += 1;
       else if (status === "manual_pending") totals.warn += 1;
+      else if (status === "skipped") totals.skipped += 1;
       return {
         ...state,
         cases: { ...state.cases, [action.case_id]: updated },
@@ -202,7 +211,14 @@ export default function ProviderTestSuiteDrawer({ provider, scope, modelId, onCl
 
   useEffect(() => {
     if (!provider || !scope || !modelId) return;
-    const body = { ...SCOPE_TO_BODY[scope], model_id: modelId };
+    const scopeBody = SCOPE_TO_BODY[scope];
+    if (!scopeBody) {
+      // Defend against a future caller passing an unknown scope. Spreading
+      // ``undefined`` would TypeError; surfacing as an error is cleaner.
+      dispatch({ type: "error", message: `unknown suite scope: ${scope}` });
+      return;
+    }
+    const body = { ...scopeBody, model_id: modelId };
     const conn = startTestSuite(provider.id, body);
     connRef.current = conn;
     const onStart = (e) => dispatch({ type: "run_start", ...e.detail });

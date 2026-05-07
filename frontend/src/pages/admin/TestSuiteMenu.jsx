@@ -32,9 +32,19 @@ export default function TestSuiteMenu({ onPing, onRunSuite, models, defaultModel
   const [model, setModel] = useState(defaultModel || (models && models[0]) || "");
   const wrapRef = useRef(null);
 
+  // Resync the controlled <select> value when the upstream models prop
+  // arrives asynchronously (parent fetches the provider list, then
+  // re-renders with the actual models). Without this, the <select>
+  // would show "" against a populated option list and onRunSuite would
+  // fire with model="".
   useEffect(() => {
-    if (defaultModel && model === "") setModel(defaultModel);
-  }, [defaultModel, model]);
+    if (model && models && models.includes(model)) return;
+    if (defaultModel && (!models || models.includes(defaultModel))) {
+      setModel(defaultModel);
+    } else if (models && models.length > 0) {
+      setModel(models[0]);
+    }
+  }, [defaultModel, models, model]);
 
   useEffect(() => {
     if (!open) return;
@@ -65,13 +75,18 @@ export default function TestSuiteMenu({ onPing, onRunSuite, models, defaultModel
         type="button"
         className="btn sm"
         data-test="test-suite-menu"
+        aria-haspopup="true"
+        aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
         Test ▾
       </button>
       {open && (
+        // Treat as a plain popover with regular <button>s — no
+        // role="menu" because we don't implement the full ARIA menu
+        // pattern (roving focus, arrow keys). Using semantic buttons
+        // is fine for screen readers.
         <div
-          role="menu"
           className="ts-menu"
           data-test="test-suite-menu-pop"
           style={{

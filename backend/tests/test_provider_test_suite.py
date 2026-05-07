@@ -387,6 +387,63 @@ async def test_image_url_rejects_tampered_signature(
 
 
 @pytest.mark.asyncio
+async def test_short_circuit_cases_render_as_skipped_not_fail(
+    seeded_app: httpx.AsyncClient, monkeypatch
+) -> None:
+    """When the A-suite fails, downstream B/C/D cases are short-circuited.
+
+    The runner labels them with ``manual_verdict='skip'`` and a stable
+    ``error_kind=SKIPPED_AFTER_A_FAILURE``. This regression check makes
+    sure the SSE payload surfaces them as ``status='skipped'`` (not
+    ``fail``) and that the run-done totals count them in the ``skipped``
+    bucket — preventing the bug where short-circuited cases falsely
+    drove the verdict to FAIL.
+    """
+    from app.adapters import gemini_v1beta as gemini_mod
+    from app.schemas.normalized import StandardError, StandardErrorKind
+
+    async def fake_generate(self, provider, request):
+        # A1 fails → triggers short-circuit for the rest of the suite.
+        raise StandardError(
+            StandardErrorKind.UPSTREAM_ERROR, "synthetic A failure"
+        )
+
+    monkeypatch.setattr(
+        gemini_mod.GeminiV1BetaAdapter, "generate", fake_generate
+    )
+
+    token = await _login_admin(seeded_app)
+    await seeded_app.post(
+        "/api/admin/providers", headers=_auth(token), json=_provider_payload()
+    )
+
+    resp = await seeded_app.post(
+        "/api/admin/providers/bltcy/test-suite",
+        headers=_auth(token),
+        json={
+            "model_id": "gemini-3.1-flash-image-preview",
+            "suites": ["A", "D"],
+        },
+    )
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    results = [d for (e, d) in events if e == "case_result"]
+    a_results = [r for r in results if r["suite"] == "A"]
+    d_results = [r for r in results if r["suite"] == "D"]
+    assert a_results and a_results[0]["ok"] is False
+    assert d_results, "D-suite cases should still appear as short-circuited"
+    for r in d_results:
+        assert r["status"] == "skipped", r
+        assert r["error_kind"] == "SKIPPED_AFTER_A_FAILURE"
+        assert r["manual_verdict"] == "skip"
+
+    done = next(d for (e, d) in events if e == "run_done")
+    assert done["totals"]["skipped"] == len(d_results)
+    # The only real failure is A1.
+    assert done["totals"]["fail"] == 1
+
+
+@pytest.mark.asyncio
 async def test_image_path_traversal_blocked(
     seeded_app: httpx.AsyncClient, monkeypatch
 ) -> None:
