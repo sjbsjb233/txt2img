@@ -66,6 +66,8 @@ function reducer(state, action) {
             judge_level: action.judge_level,
             cost_image: action.cost_image,
             expect_error: action.expect_error,
+            manual_prompt: action.manual_prompt,
+            inputs: action.inputs || [],
             images: [],
             auto_verdict: [],
             status: "running",

@@ -399,13 +399,73 @@ OPENAI_GPT_IMAGE_2_CASES: list[TestCase] = [
              _req_openai_b6, judge_name="openai_basic_image"),
     TestCase("C1", "C", "单参考图 → /images/edits", "MANUAL", True,
              _req_openai_c1, judge_name="openai_basic_image",
-             manual_prompt="返回图是否包含原 logo 元素并放置在木架上?"),
+             manual_prompt=(
+                 "📋 此用例的入参:\n"
+                 "  • 参考图 1 张:一个深色简笔 logo (纯图形,无文字)\n"
+                 "  • prompt:\"put this logo on a wooden shelf\"\n"
+                 "\n"
+                 "✅ 同时满足 → 点 通过:\n"
+                 "  ① 输出图里能识别出参考 logo 的主要轮廓/形状(允许配色、光影变化)\n"
+                 "  ② 画面里有明显的木质架子/木板作为承载体\n"
+                 "\n"
+                 "❌ 任一 → 点 不通过:\n"
+                 "  • 输出图里完全没有 logo 元素,只有木架\n"
+                 "  • 输出图里只有 logo,没有任何木质架子/木板\n"
+                 "  • 输出图与 prompt 毫不相关(例如返回了风景照)\n"
+                 "\n"
+                 "💡 这些情况是正常的,不要扣分:\n"
+                 "  • logo 被重新着色、加阴影、加反光\n"
+                 "  • logo 被略微透视变形以匹配架子角度\n"
+                 "  • 画面整体艺术风格化(例如水彩、3D 渲染)"
+             )),
     TestCase("C2", "C", "多图融合（image[]）", "MANUAL", True,
              _req_openai_c2, judge_name="openai_basic_image",
-             manual_prompt="返回图是否融合了三张参考图的视觉元素?"),
+             manual_prompt=(
+                 "📋 此用例的入参:\n"
+                 "  • 参考图 3 张:① 简笔 logo  ② 商品照(如瓶罐/包装)  ③ 几何图形\n"
+                 "  • prompt:\"combine these elements into a poster\"\n"
+                 "\n"
+                 "✅ 同时满足 → 点 通过(海报里能至少认出 2 张参考图的元素):\n"
+                 "  ① 能在画面里指出参考 logo 的形状/轮廓\n"
+                 "  ② 能在画面里指出参考商品的轮廓或主色\n"
+                 "  ③ 能在画面里指出参考几何图形(或其衍生装饰)\n"
+                 "  → 三条里命中 ≥ 2 条即视为通过\n"
+                 "\n"
+                 "❌ 任一 → 点 不通过:\n"
+                 "  • 输出图与三张参考图全无视觉关联,完全是另一个场景\n"
+                 "  • 上游只输出了三张参考图的简单拼贴(没有海报构图/排版)\n"
+                 "  • 输出图严重残缺(空白、只有色块、严重马赛克)\n"
+                 "\n"
+                 "💡 这些情况是正常的,不要扣分:\n"
+                 "  • 元素被重新着色或材质化(转 3D / 水彩等)\n"
+                 "  • 缺少明显的文字排版(prompt 没要求文字)\n"
+                 "  • 三张参考图的相对比例与原始图不同"
+             )),
     TestCase("C3", "C", "单图 + mask 局部修改", "SEMI", True,
              _req_openai_c3, judge_name="openai_c3",
-             manual_prompt="左半区是否保留了原图,右半区是否被替换成日落?"),
+             manual_prompt=(
+                 "📋 此用例的入参:\n"
+                 "  • 原图:左黑色矩形 + 右浅色块的双色图(1024×1024)\n"
+                 "  • mask:左半 alpha=255 (要求保留)、右半 alpha=0 (允许重画)\n"
+                 "  • prompt:\"replace the right half with a sunset over hills\"\n"
+                 "\n"
+                 "✅ 同时满足 → 点 通过:\n"
+                 "  ① 输出图的左半 仍然是深色矩形(允许色调微变,不要求像素一致)\n"
+                 "  ② 输出图的右半 出现了带太阳/天空/橙色调的日落场景\n"
+                 "\n"
+                 "❌ 任一 → 点 不通过:\n"
+                 "  • 左半被改写成日落 → mask 完全没起作用\n"
+                 "  • 右半仍是原来的浅色块 → 重画没发生\n"
+                 "  • 输出图与原图毫不相关(例如直接返回风景照)\n"
+                 "\n"
+                 "💡 这些情况是正常的,不要因此扣分:\n"
+                 "  • 左半的深色变深/变浅 5–10%(中转做了接缝色调匹配)\n"
+                 "  • 输出尺寸变成 1254 而不是 1024(中转放大了)\n"
+                 "  • 中线接缝处有几像素的渐变带\n"
+                 "\n"
+                 "ℹ 上面\"左半相似度 ≈ X%\"是参考数字,真上游普遍 70–90% 之间,\n"
+                 "  数字本身不能直接判定 — 凭眼睛看是否符合上面 ① ②。"
+             )),
     TestCase("D1", "D", "未知 model", "AUTO", False,
              _req_openai_d_unknown_model, expect_error=True,
              judge_name="d_error"),
@@ -455,10 +515,47 @@ def _gemini_pro_cases(model_id: str) -> list[TestCase]:
                  _req_gemini_size(model_id, "4K"), judge_name="gemini_size_4k"),
         TestCase("B5", "B", "googleSearch grounding", "SEMI", True,
                  _req_gemini_search(model_id), judge_name="gemini_grounding",
-                 manual_prompt="返回的画面是否真切反映了当下时事 / 天气?"),
+                 manual_prompt=(
+                     "📋 此用例的入参:\n"
+                     "  • prompt:\"A photo-realistic visualization of today's weather in Tokyo.\"\n"
+                     "  • 启用了 google_search grounding(上游会做实时搜索后再生图)\n"
+                     "\n"
+                     "✅ 同时满足 → 点 通过:\n"
+                     "  ① 画面是写实摄影风格的城市/街道场景(不是插画、不是地图)\n"
+                     "  ② 画面里有可识别的天气线索:晴/阴/雨/雪/雾 任一种\n"
+                     "  ③ 场景元素与日本/东京有关联(招牌、建筑、街道氛围之一即可)\n"
+                     "\n"
+                     "❌ 任一 → 点 不通过:\n"
+                     "  • 画面与天气无关(例如纯产品照)\n"
+                     "  • 风格非写实(简笔画、卡通、抽象)\n"
+                     "  • 出现明显非东京/非日本的地标(例如埃菲尔铁塔、金门大桥)\n"
+                     "\n"
+                     "💡 不需要核实\"今天东京真实天气是什么\":\n"
+                     "  这个用例是验证 上游能不能调用 grounding 工具,\n"
+                     "  不是验证天气数据准不准。画面有任意一种合理天气状态即可。"
+                 )),
         TestCase("C1", "C", "单参考图重绘", "MANUAL", True,
                  _req_gemini_ref(model_id), judge_name="gemini_basic_image",
-                 manual_prompt="结果是否保留了参考 logo 的核心视觉元素?"),
+                 manual_prompt=(
+                     "📋 此用例的入参:\n"
+                     "  • 参考图 1 张:一个深色简笔 logo(纯图形,无文字)\n"
+                     "  • prompt:\"reimagine this logo on a billboard at night\"\n"
+                     "\n"
+                     "✅ 同时满足 → 点 通过:\n"
+                     "  ① 画面里有明显的广告牌 / 大屏 / 灯箱结构\n"
+                     "  ② 广告牌内容是参考 logo 的衍生(轮廓相似即可)\n"
+                     "  ③ 整体氛围是夜景(深色背景、灯光)\n"
+                     "\n"
+                     "❌ 任一 → 点 不通过:\n"
+                     "  • 没有广告牌或类似的承载结构\n"
+                     "  • 广告牌上是无关图案,与参考 logo 无关联\n"
+                     "  • 画面是白天/室内,完全没有夜景痕迹\n"
+                     "\n"
+                     "💡 这些情况是正常的:\n"
+                     "  • logo 被重新着色、加发光、加霓虹效果\n"
+                     "  • logo 被透视变形以匹配广告牌角度\n"
+                     "  • logo 局部细节简化或风格化"
+                 )),
         TestCase("D1", "D", "未知 model", "AUTO", False,
                  _req_gem_d("unknown-model"), expect_error=True,
                  judge_name="d_error"),
@@ -537,7 +634,25 @@ def _gemini_flash31_cases() -> list[TestCase]:
         TestCase("B11", "B", "image_search 工具", "SEMI", True,
                  _req_gemini_image_search(model_id),
                  judge_name="gemini_grounding",
-                 manual_prompt="image_search 是否让画面在物种细节上更准确?"),
+                 manual_prompt=(
+                     "📋 此用例的入参:\n"
+                     "  • prompt:\"A photoreal Timareta butterfly on a flower\"\n"
+                     "  • 启用了 google_search 和 image_search 工具(上游会先搜图再生图)\n"
+                     "\n"
+                     "✅ 同时满足 → 点 通过:\n"
+                     "  ① 画面里有清晰可辨的蝴蝶,翅膀有具体的花纹/色块(不是模糊轮廓)\n"
+                     "  ② 蝴蝶停在或靠近花朵\n"
+                     "  ③ 风格是写实摄影/微距质感(不是简笔画或卡通)\n"
+                     "\n"
+                     "❌ 任一 → 点 不通过:\n"
+                     "  • 画面是简笔画 / 卡通 / 剪贴画风格\n"
+                     "  • 蝴蝶翅膀是单色或纯渐变,无任何花纹细节\n"
+                     "  • 画面里没有蝴蝶或没有花\n"
+                     "\n"
+                     "💡 不需要核实\"这是不是真的 Timareta 蝴蝶\":\n"
+                     "  本用例验证的是 上游能不能调用 image_search 让细节具体化,\n"
+                     "  不是验证物种识别准不准。翅膀有花纹 = 工具起作用了。"
+                 )),
         TestCase("D4f", "D", "aspect_ratio 不在 14 个值集合内", "AUTO", False,
                  _req_gem_d(model_id, aspect_ratio="2:1"),
                  expect_error=True, judge_name="d_error"),

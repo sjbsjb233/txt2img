@@ -351,46 +351,90 @@ def _judge_openai_b3(
     return ok, verdicts
 
 
+def c3_left_similarity(base_bytes: bytes, out_bytes: bytes) -> float:
+    """Left-half similarity for the C3 mask test.
+
+    The earlier implementation suffered from two off-by-percent bugs:
+
+    1. Cropping in absolute pixels (``min(w//2, w'//2)``) selected
+       different proportional regions when the relay rescaled the
+       output (e.g. 1024 → 1254), so we ended up comparing ~50% of
+       base against ~40% of output.
+    2. The two crops had different aspect ratios, so the subsequent
+       resize to a common 128×128 canvas distorted them by different
+       amounts and shifted the dark rectangle's right edge by 2-3 px.
+
+    The fix: normalise BOTH images to a common 256×256 canvas first,
+    then crop each to the left half (128×256). The two regions are
+    now exactly the same proportional area of their source image and
+    no aspect-ratio drift. Real relays land in 60-90% with this
+    metric — anything <50% strongly indicates the mask was ignored.
+    """
+    with Image.open(BytesIO(base_bytes)) as base_img, Image.open(
+        BytesIO(out_bytes)
+    ) as out_img:
+        base = base_img.convert("RGB").resize((256, 256))
+        out = out_img.convert("RGB").resize((256, 256))
+    base_left = base.crop((0, 0, 128, 256))
+    out_left = out.crop((0, 0, 128, 256))
+    diff = 0
+    for a, b in zip(base_left.getdata(), out_left.getdata()):
+        if abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) > 30:
+            diff += 1
+    total = 128 * 256
+    return max(0.0, 1.0 - diff / total)
+
+
+# Threshold below which we treat the relay as having clearly ignored
+# the mask (left half regenerated). Real relays sit in 60-90%; only a
+# total disregard for the alpha mask drops below this.
+_C3_SIMILARITY_FLOOR = 0.50
+
+
 def _judge_openai_c3(
     request: NormalizedRequest, response: NormalizedResponse
 ) -> tuple[bool, list[Verdict]]:
-    verdicts: list[Verdict] = []
-    ok = response.image_count > 0
-    if response.images:
-        info = probe_image(response.images[0])
-        verdicts.append(
-            Verdict(
-                info["width"] > 0,
-                f"返回图 {info['width']}×{info['height']}",
-            )
-        )
-        # 自动算左半相似度 (相对原 base) — 仅作参考。
-        try:
-            from app.resources.test_assets import load_edit_base
+    """SEMI judge for the openai mask edit case.
 
-            base_asset = load_edit_base()
-            with Image.open(BytesIO(base_asset.data)) as base_img, Image.open(
-                BytesIO(response.images[0].data)
-            ) as out_img:
-                w = min(base_img.size[0] // 2, out_img.size[0] // 2)
-                h = min(base_img.size[1], out_img.size[1])
-                if w > 0 and h > 0:
-                    base_left = base_img.crop((0, 0, w, h)).resize((128, 128)).convert("RGB")
-                    out_left = out_img.crop((0, 0, w, h)).resize((128, 128)).convert("RGB")
-                    diff_pixels = 0
-                    for a, b in zip(base_left.getdata(), out_left.getdata()):
-                        if abs(a[0] - b[0]) + abs(a[1] - b[1]) + abs(a[2] - b[2]) > 30:
-                            diff_pixels += 1
-                    ratio = 1 - diff_pixels / (128 * 128)
-                    verdicts.append(
-                        Verdict(
-                            ratio >= 0.85,
-                            f"左半区与原图像素相似度 ≈ {ratio:.0%} (建议 ≥85%)",
-                        )
-                    )
-        except Exception as exc:
-            verdicts.append(Verdict(True, f"相似度计算跳过: {exc!r}"))
-    return ok, verdicts
+    Per design v2 §5.2 — SEMI judges never auto-fail when an image
+    is returned. The similarity ratio is surfaced as an *informational*
+    verdict bullet so the admin can sanity-check whether the relay
+    honored the mask, but the case still advances to manual_pending
+    for human review. Only "no image at all" causes ok=False.
+    """
+    verdicts: list[Verdict] = []
+    if response.image_count <= 0:
+        verdicts.append(Verdict(False, "未返回任何图片"))
+        return False, verdicts
+
+    info = probe_image(response.images[0])
+    verdicts.append(
+        Verdict(True, f"返回图 {info['width']}×{info['height']}")
+    )
+
+    try:
+        from app.resources.test_assets import load_edit_base
+
+        ratio = c3_left_similarity(load_edit_base().data, response.images[0].data)
+        if ratio >= _C3_SIMILARITY_FLOOR:
+            verdicts.append(
+                Verdict(
+                    True,
+                    f"左半区像素相似度 ≈ {ratio:.0%}(>{int(_C3_SIMILARITY_FLOOR*100)}% 视为 mask 大概率工作了 · 仅供参考)",
+                )
+            )
+        else:
+            verdicts.append(
+                Verdict(
+                    False,
+                    f"左半区像素相似度 ≈ {ratio:.0%}(<{int(_C3_SIMILARITY_FLOOR*100)}% — 中转可能忽略了 mask · 仅供参考)",
+                )
+            )
+    except Exception as exc:  # pragma: no cover — defensive
+        verdicts.append(Verdict(True, f"相似度计算跳过: {exc!r}"))
+
+    # SEMI 用例:有图就交给人看,auto 不一票否决。
+    return True, verdicts
 
 
 def _judge_gemini_a1(
@@ -485,13 +529,17 @@ def _judge_gemini_grounding(
     grounding = response.metadata.get("grounding_metadata") if response.metadata else None
     has_grounding = bool(grounding)
     verdicts.append(
-        Verdict(has_grounding, f"groundingMetadata: {'非空' if has_grounding else '缺失'}")
+        Verdict(
+            has_grounding,
+            "groundingMetadata: 非空(grounding 工具被调用)"
+            if has_grounding
+            else "groundingMetadata: 缺失(中转可能丢弃了 grounding · 仅供参考)",
+        )
     )
-    # A relay that drops grounding-related fields should fail the case
-    # outright, not coast on "image returned". Earlier this was a
-    # warning-only signal and SEMI status masked the real failure.
-    if not has_grounding:
-        ok = False
+    # SEMI 用例 — 不在 auto-judge 这里一票否决。即使 grounding 缺失,
+    # 也要让管理员看到"待人工"chip 和上面的红色 ✗ 提示,自己拍板。
+    # 早先 Copilot 的 review 让我们在这里 ok=False,但那与 SEMI 的设计
+    # 意图(参考算法,人工拍板)冲突,这里反过来。
     return ok, verdicts
 
 
@@ -607,6 +655,58 @@ def _store_images(
             )
         )
     return stored
+
+
+def _store_input_refs(
+    run: _RunState, case_id: str, request: NormalizedRequest
+) -> list[dict[str, Any]]:
+    """Persist input references / mask so the UI can render thumbnails.
+
+    Without this the admin only sees the OUTPUT image — they have no
+    visual baseline to judge "was the logo preserved?" / "is the mask
+    edge respected?". Per the design doc (manual_prompt rewrite §5.1),
+    SEMI/MANUAL cases need to surface the inputs the upstream actually
+    received. We reuse the run dir + signed-URL pipeline that already
+    serves output images, prefixing the names with ``IN_`` so they
+    can't collide with output filenames.
+
+    Returns a list of dicts ready for the ``case_start`` SSE event:
+    ``[{kind, label, name, mime, byte_size, bytes_url}, ...]``
+    """
+    out: list[dict[str, Any]] = []
+    run_dir = _run_dir(run.provider_id, run.run_id)
+
+    def _persist(label: str, kind: str, idx: int, raw_b64: str, mime: str) -> None:
+        try:
+            data = base64.b64decode(raw_b64, validate=False)
+        except Exception:
+            return
+        ext = _ext_for_mime(mime)
+        name = f"IN_{case_id}_{kind}_{idx}.{ext}"
+        path = run_dir / name
+        try:
+            path.write_bytes(data)
+        except OSError as exc:
+            logger.warning("test_suite: cannot persist input %s: %s", path, exc)
+            return
+        out.append(
+            {
+                "kind": kind,
+                "label": label,
+                "name": name,
+                "mime": mime,
+                "byte_size": len(data),
+                "bytes_url": _image_url(run.provider_id, run.run_id, name),
+            }
+        )
+
+    refs = sorted(request.references or [], key=lambda r: r.order)
+    for r in refs:
+        _persist(f"参考图 {r.order}", "ref", r.order, r.data_b64, r.mime)
+    if request.mask is not None:
+        _persist("mask", "mask", 0, request.mask.data_b64, request.mask.mime)
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -772,7 +872,16 @@ async def stream_run(req: RunRequest) -> AsyncIterator[bytes]:
             continue
 
         params_dump = _safe_dump_request(request)
-        yield _sse("case_start", _case_start_payload(case, params_dump))
+        # Persist input references / mask so the UI can show them
+        # alongside the manual_prompt block. Cheap (5KB-ish per ref)
+        # and only triggers for cases that actually have inputs.
+        case_inputs: list[dict[str, Any]] = []
+        if request.references or request.mask is not None:
+            case_inputs = _store_input_refs(run, case.case_id, request)
+        yield _sse(
+            "case_start",
+            _case_start_payload(case, params_dump, inputs=case_inputs),
+        )
 
         started = time.monotonic()
         try:
@@ -950,7 +1059,11 @@ def _image_url(provider_id: str, run_id: str, name: str) -> str:
     )
 
 
-def _case_start_payload(case: TestCase, request_params: dict[str, Any]) -> dict[str, Any]:
+def _case_start_payload(
+    case: TestCase,
+    request_params: dict[str, Any],
+    inputs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {
         "case_id": case.case_id,
         "suite": case.suite,
@@ -958,7 +1071,9 @@ def _case_start_payload(case: TestCase, request_params: dict[str, Any]) -> dict[
         "judge_level": case.judge_level,
         "cost_image": case.cost_image,
         "expect_error": case.expect_error,
+        "manual_prompt": case.manual_prompt,
         "params": request_params,
+        "inputs": inputs or [],
     }
 
 
