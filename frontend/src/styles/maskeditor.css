@@ -674,6 +674,27 @@
   background-size: 16px 16px;
   background-position: 0 0, 0 8px, 8px -8px, -8px 0;
 }
+/* Inner frame: the rectangle that both images, the divider and the grip
+   live in. Sized as a fixed % inset of the stage so its bounding box is
+   the exact reference for clipPath and grip positioning — without this,
+   clipPath (on the image element box) and the grip (positioned in stage %)
+   only meet at split=0.5 and visually drift apart everywhere else. */
+.me-compare-frame {
+  position: absolute;
+  left: 5%;
+  right: 5%;
+  top: 7.5%;
+  bottom: 7.5%;
+}
+.me-compare-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border: 1px solid var(--ink);
+  background: #fff;
+}
 .me-compare-divider {
   position: absolute;
   top: 0; bottom: 0;

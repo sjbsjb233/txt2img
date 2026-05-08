@@ -1,35 +1,25 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import MEIcon from "./MEIcon.jsx";
 
 export default function CompareSurface({ beforeUrl, afterUrl, parentLabel, derivationKind, derivedLabel }) {
-  const containerRef = useRef(null);
+  // The frame is the inner box that holds both images; divider, grip and
+  // clipPath all live in the frame's coordinate system so the visual seam
+  // stays glued to the grip handle. Pointer math measures the frame, not
+  // the outer stage — otherwise the seam (clipped on the image element box)
+  // and the grip (positioned in stage %) would only meet at split=0.5.
+  const frameRef = useRef(null);
   const [splitX, setSplitX] = useState(0.5); // 0..1
-  const [containerSize, setContainerSize] = useState({ w: 0, h: 0 });
   const draggingRef = useRef(false);
 
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return undefined;
-    const update = () => {
-      const r = el.getBoundingClientRect();
-      setContainerSize({ w: r.width, h: r.height });
-    };
-    update();
-    const obs = new ResizeObserver(update);
-    obs.observe(el);
-    return () => obs.disconnect();
-  }, []);
-
   function onPointerMove(e) {
-    if (!draggingRef.current) return;
-    const r = containerRef.current.getBoundingClientRect();
+    if (!draggingRef.current || !frameRef.current) return;
+    const r = frameRef.current.getBoundingClientRect();
     const x = (e.clientX - r.left) / r.width;
     setSplitX(Math.max(0.02, Math.min(0.98, x)));
   }
 
   return (
     <div
-      ref={containerRef}
       className="me-compare-stage"
       onPointerMove={onPointerMove}
       onPointerUp={() => (draggingRef.current = false)}
@@ -49,62 +39,47 @@ export default function CompareSurface({ beforeUrl, afterUrl, parentLabel, deriv
       <span className="me-compare-label me-compare-label--before">BEFORE · {parentLabel}</span>
       <span className="me-compare-label me-compare-label--after">AFTER · {derivedLabel}</span>
 
-      {/* Before image */}
-      {beforeUrl && (
-        <img
-          src={beforeUrl}
-          alt="before"
-          style={{
-            position: "absolute",
-            inset: 0,
-            margin: "auto",
-            maxWidth: "90%",
-            maxHeight: "85%",
-            objectFit: "contain",
-            border: "1px solid var(--ink)",
-            background: "#fff",
-          }}
-        />
-      )}
+      <div ref={frameRef} className="me-compare-frame">
+        {/* Before image — fills the frame; object-fit:contain keeps aspect. */}
+        {beforeUrl && (
+          <img
+            src={beforeUrl}
+            alt="before"
+            className="me-compare-img"
+          />
+        )}
 
-      {/* After image, clipped to right of split */}
-      {afterUrl && (
-        <img
-          src={afterUrl}
-          alt="after"
-          style={{
-            position: "absolute",
-            inset: 0,
-            margin: "auto",
-            maxWidth: "90%",
-            maxHeight: "85%",
-            objectFit: "contain",
-            clipPath: `inset(0 0 0 ${splitX * 100}%)`,
-            border: "1px solid var(--ink)",
-            background: "#fff",
-          }}
-        />
-      )}
+        {/* After image, clipped to right of split. Same box as before, so
+            the clip seam, divider and grip all share one coordinate frame. */}
+        {afterUrl && (
+          <img
+            src={afterUrl}
+            alt="after"
+            className="me-compare-img"
+            style={{ clipPath: `inset(0 0 0 ${splitX * 100}%)` }}
+          />
+        )}
 
-      {/* Divider line */}
-      <div
-        className="me-compare-divider"
-        style={{ left: `${splitX * 100}%` }}
-      />
-      {/* Grip */}
-      <div
-        className="me-compare-grip"
-        style={{
-          left: `calc(${splitX * 100}% - 14px)`,
-          top: `calc(50% - 14px)`,
-        }}
-        onPointerDown={(e) => {
-          e.currentTarget.setPointerCapture(e.pointerId);
-          draggingRef.current = true;
-        }}
-        data-testid="me-compare-grip"
-      >
-        ↔
+        {/* Divider line */}
+        <div
+          className="me-compare-divider"
+          style={{ left: `${splitX * 100}%` }}
+        />
+        {/* Grip */}
+        <div
+          className="me-compare-grip"
+          style={{
+            left: `calc(${splitX * 100}% - 14px)`,
+            top: `calc(50% - 14px)`,
+          }}
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            draggingRef.current = true;
+          }}
+          data-testid="me-compare-grip"
+        >
+          ↔
+        </div>
       </div>
     </div>
   );
