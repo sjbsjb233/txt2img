@@ -1,6 +1,14 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import MEIcon from "./MEIcon.jsx";
 import { screenToImage, computeFitTransform } from "./utils/coords.js";
+import { classifyWheel } from "./utils/gestures.js";
 import { createBrushTool } from "./tools/BrushTool.js";
 import { createRectTool } from "./tools/RectTool.js";
 import { createLassoTool } from "./tools/LassoTool.js";
@@ -15,7 +23,7 @@ import { createMagicWandTool } from "./tools/MagicWandTool.js";
 // onReady callback so the parent can run mask ops + history capture
 // without re-rendering the canvas.
 
-export default function CanvasStage({
+const CanvasStage = forwardRef(function CanvasStage({
   imageBitmap,
   imageW,
   imageH,
@@ -26,7 +34,10 @@ export default function CanvasStage({
   onCursorChange,
   onMaskChange,
   onReady,
-}) {
+  onBrushDelta,
+  onZoomChange,
+  onHudMessage,
+}, ref) {
   const containerRef = useRef(null);
   const sourceRef = useRef(null);
   const maskRef = useRef(null);
@@ -37,10 +48,26 @@ export default function CanvasStage({
     translateX: 0,
     translateY: 0,
   });
+  const transformRef = useRef(transform);
+  useEffect(() => {
+    transformRef.current = transform;
+  }, [transform]);
+
   const [cursorPos, setCursorPos] = useState(null); // screen coords
   const [containerSize, setContainerSize] = useState({ w: 1, h: 1 });
+  const containerSizeRef = useRef(containerSize);
+  useEffect(() => {
+    containerSizeRef.current = containerSize;
+  }, [containerSize]);
   const toolRef = useRef(null);
   const panActiveRef = useRef(null);
+
+  // Inertia bookkeeping for two-finger pan momentum.
+  const inertiaVxRef = useRef(0);
+  const inertiaVyRef = useRef(0);
+  const inertiaLastWheelRef = useRef(0);
+  const inertiaRafRef = useRef(null);
+  const spacePressedRef = useRef(false);
 
   // Recreate the tool when the active tool id changes.
   useEffect(() => {
@@ -100,6 +127,116 @@ export default function CanvasStage({
     setTransform(t);
   }, [imageW, imageH, containerSize.w, containerSize.h]);
 
+  // Notify parent whenever zoom changes so the status bar stays in sync.
+  useEffect(() => {
+    onZoomChange?.(Math.round(transform.scale * 100));
+  }, [transform.scale, onZoomChange]);
+
+  // === Native event listeners (gesture blocking + Space) ===================
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return undefined;
+    const block = (e) => e.preventDefault();
+    el.addEventListener("gesturestart", block);
+    el.addEventListener("gesturechange", block);
+    el.addEventListener("gestureend", block);
+    el.addEventListener("contextmenu", block);
+    el.addEventListener("dblclick", block);
+    return () => {
+      el.removeEventListener("gesturestart", block);
+      el.removeEventListener("gesturechange", block);
+      el.removeEventListener("gestureend", block);
+      el.removeEventListener("contextmenu", block);
+      el.removeEventListener("dblclick", block);
+    };
+  }, []);
+
+  // Space-to-pan: holding Space temporarily switches to the pan tool
+  // without disturbing the user's selected tool. We listen on window so
+  // the canvas doesn't need focus; we still ignore the keystroke when
+  // the user is typing into a text field.
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      if (e.code !== "Space" || e.repeat) return;
+      const tag = document.activeElement?.tagName;
+      if (tag === "TEXTAREA" || tag === "INPUT") return;
+      spacePressedRef.current = true;
+      e.preventDefault();
+      containerRef.current?.classList.add("me-stage--pan");
+    };
+    const onKeyUp = (e) => {
+      if (e.code !== "Space") return;
+      spacePressedRef.current = false;
+      containerRef.current?.classList.remove("me-stage--pan");
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, []);
+
+  // Inertia kick-off: after the wheel stream goes quiet for ~80ms we
+  // start a decay loop using the last observed pan velocity. The check
+  // also respects `prefers-reduced-motion`.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (
+        inertiaLastWheelRef.current > 0 &&
+        performance.now() - inertiaLastWheelRef.current > 80 &&
+        !inertiaRafRef.current &&
+        (Math.abs(inertiaVxRef.current) > 0.5 || Math.abs(inertiaVyRef.current) > 0.5)
+      ) {
+        inertiaLastWheelRef.current = 0;
+        startInertia();
+      }
+    }, 50);
+    return () => clearInterval(id);
+  }, []);
+
+  function cancelInertia() {
+    if (inertiaRafRef.current) {
+      cancelAnimationFrame(inertiaRafRef.current);
+      inertiaRafRef.current = null;
+    }
+  }
+
+  function startInertia() {
+    if (
+      typeof window !== "undefined" &&
+      window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      inertiaVxRef.current = 0;
+      inertiaVyRef.current = 0;
+      return;
+    }
+    cancelInertia();
+    const tick = () => {
+      inertiaVxRef.current *= 0.92;
+      inertiaVyRef.current *= 0.92;
+      if (
+        Math.abs(inertiaVxRef.current) < 0.2 &&
+        Math.abs(inertiaVyRef.current) < 0.2
+      ) {
+        inertiaVxRef.current = 0;
+        inertiaVyRef.current = 0;
+        inertiaRafRef.current = null;
+        return;
+      }
+      const vx = inertiaVxRef.current;
+      const vy = inertiaVyRef.current;
+      setTransform((t) => ({
+        ...t,
+        translateX: t.translateX + vx,
+        translateY: t.translateY + vy,
+      }));
+      inertiaRafRef.current = requestAnimationFrame(tick);
+    };
+    inertiaRafRef.current = requestAnimationFrame(tick);
+  }
+
   // === Pointer events ====================================================
 
   const isPaintingRef = useRef(false);
@@ -114,7 +251,8 @@ export default function CanvasStage({
     const rect = e.currentTarget.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
-    if (tool === "pan" || e.button === 1 || e.shiftKey === false && tool === "pan") {
+    if (tool === "pan" || e.button === 1 || spacePressedRef.current) {
+      cancelInertia();
       panActiveRef.current = { sx, sy, base: { ...transform } };
       return;
     }
@@ -132,7 +270,10 @@ export default function CanvasStage({
       isPaintingRef.current = false;
       return;
     }
-    t.onPointerDown(mCtx, pt, brushOpts);
+    const opts = brushOpts.pressure
+      ? { ...brushOpts, _pressure: e.pressure || 0.5 }
+      : brushOpts;
+    t.onPointerDown(mCtx, pt, opts);
     drawInteractionPreview();
   };
 
@@ -161,9 +302,25 @@ export default function CanvasStage({
     if (!isPaintingRef.current) return;
     const t = toolRef.current;
     if (!t) return;
-    const pt = screenToImage(sx, sy, transform);
     const mCtx = maskRef.current.getContext("2d");
-    t.onPointerMove(mCtx, pt, brushOpts);
+    // Use coalesced events so 120Hz trackpads / drawing tablets can
+    // contribute every raw sample to the stroke instead of getting
+    // lossily down-sampled to React's pointer events.
+    const native = e.nativeEvent;
+    const events = native && typeof native.getCoalescedEvents === "function"
+      ? native.getCoalescedEvents()
+      : [native || e];
+    const list = events && events.length ? events : [native || e];
+    const containerRect = e.currentTarget.getBoundingClientRect();
+    for (const ev of list) {
+      const evx = (ev.clientX ?? sx + containerRect.left) - containerRect.left;
+      const evy = (ev.clientY ?? sy + containerRect.top) - containerRect.top;
+      const pt = screenToImage(evx, evy, transform);
+      const opts = brushOpts.pressure
+        ? { ...brushOpts, _pressure: typeof ev.pressure === "number" ? ev.pressure : 0.5 }
+        : brushOpts;
+      t.onPointerMove(mCtx, pt, opts);
+    }
     drawInteractionPreview();
   };
 
@@ -226,21 +383,101 @@ export default function CanvasStage({
     ctx.clearRect(0, 0, iCanvas.width, iCanvas.height);
   }
 
-  // Wheel zoom
+  // Wheel: dispatch to zoom / pan / brush parameter handlers depending
+  // on the modifier state. macOS pinch arrives as ctrlKey + wheel.
   const onWheel = (e) => {
     e.preventDefault();
+    const gesture = classifyWheel(e.nativeEvent || e);
     const rect = containerRef.current.getBoundingClientRect();
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
-    const delta = -Math.sign(e.deltaY);
-    const factor = delta > 0 ? 1.1 : 1 / 1.1;
-    const newScale = Math.max(0.1, Math.min(8, transform.scale * factor));
-    // Keep the point under cursor stationary.
-    const before = screenToImage(sx, sy, transform);
-    const newTx = sx - before.x * newScale;
-    const newTy = sy - before.y * newScale;
-    setTransform({ scale: newScale, translateX: newTx, translateY: newTy });
+
+    if (gesture.kind === "zoom") {
+      cancelInertia();
+      inertiaVxRef.current = 0;
+      inertiaVyRef.current = 0;
+      const newScale = Math.max(0.1, Math.min(8, transform.scale * gesture.factor));
+      const before = screenToImage(sx, sy, transform);
+      const next = {
+        scale: newScale,
+        translateX: sx - before.x * newScale,
+        translateY: sy - before.y * newScale,
+      };
+      setTransform(next);
+      onHudMessage?.(`zoom ${Math.round(newScale * 100)}%`);
+      return;
+    }
+
+    if (gesture.kind === "pan") {
+      cancelInertia();
+      setTransform((t) => ({
+        ...t,
+        translateX: t.translateX + gesture.dx,
+        translateY: t.translateY + gesture.dy,
+      }));
+      inertiaVxRef.current = gesture.dx;
+      inertiaVyRef.current = gesture.dy;
+      inertiaLastWheelRef.current = performance.now();
+      return;
+    }
+
+    if (gesture.kind === "brushSize") {
+      onBrushDelta?.({ kind: "size", delta: gesture.dy });
+      return;
+    }
+    if (gesture.kind === "hardness") {
+      onBrushDelta?.({ kind: "hardness", delta: gesture.dy });
+      return;
+    }
+    if (gesture.kind === "opacity") {
+      onBrushDelta?.({ kind: "opacity", delta: gesture.dy });
+      return;
+    }
   };
+
+  // Imperative API for parent-level keyboard shortcuts (Cmd+0/1/+/-).
+  function fit() {
+    const cs = containerSizeRef.current;
+    if (!imageW || !imageH || !cs.w || !cs.h) return;
+    cancelInertia();
+    const t = computeFitTransform(imageW, imageH, cs.w, cs.h);
+    setTransform(t);
+    onHudMessage?.(`zoom ${Math.round(t.scale * 100)}%`);
+  }
+  function actual() {
+    const cs = containerSizeRef.current;
+    cancelInertia();
+    const cx = cs.w / 2;
+    const cy = cs.h / 2;
+    const t = transformRef.current;
+    const before = screenToImage(cx, cy, t);
+    setTransform({
+      scale: 1,
+      translateX: cx - before.x * 1,
+      translateY: cy - before.y * 1,
+    });
+    onHudMessage?.("zoom 100%");
+  }
+  function zoomBy(factor) {
+    cancelInertia();
+    const cs = containerSizeRef.current;
+    const cx = cs.w / 2;
+    const cy = cs.h / 2;
+    setTransform((t) => {
+      const newScale = Math.max(0.1, Math.min(8, t.scale * factor));
+      const before = screenToImage(cx, cy, t);
+      return {
+        scale: newScale,
+        translateX: cx - before.x * newScale,
+        translateY: cy - before.y * newScale,
+      };
+    });
+  }
+  useImperativeHandle(ref, () => ({
+    fit,
+    actual,
+    zoomBy,
+  }));
 
   // Frame styles
   const cw = imageW * transform.scale;
@@ -325,28 +562,13 @@ export default function CanvasStage({
         zoom={Math.round(transform.scale * 100)}
         onZoomIn={() => zoomBy(1.25)}
         onZoomOut={() => zoomBy(0.8)}
-        onFit={() => {
-          const t = computeFitTransform(imageW, imageH, containerSize.w, containerSize.h);
-          setTransform(t);
-        }}
+        onFit={fit}
       />
     </div>
   );
+});
 
-  function zoomBy(factor) {
-    const cx = containerSize.w / 2;
-    const cy = containerSize.h / 2;
-    setTransform((t) => {
-      const newScale = Math.max(0.1, Math.min(8, t.scale * factor));
-      const before = screenToImage(cx, cy, t);
-      return {
-        scale: newScale,
-        translateX: cx - before.x * newScale,
-        translateY: cy - before.y * newScale,
-      };
-    });
-  }
-}
+export default CanvasStage;
 
 function Rulers({ width, height, offX, offY, zoom, imageW, imageH }) {
   if (!width || !height) return null;

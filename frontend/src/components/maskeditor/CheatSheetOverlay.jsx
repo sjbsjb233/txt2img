@@ -39,6 +39,19 @@ const COLS = [
       ["cancel", "Esc"],
     ],
   },
+  {
+    title: "trackpad (mac)",
+    rows: [
+      ["zoom",          "pinch"],
+      ["pan",           "two-finger drag"],
+      ["brush size",    "⌥ + scroll"],
+      ["hardness",      "⇧ + scroll"],
+      ["opacity",       "⌥⇧ + scroll"],
+      ["temp pan",      "hold space"],
+      ["fit to screen", "⌘0 / pinch out"],
+      ["actual size",   "⌘1"],
+    ],
+  },
 ];
 
 export default function CheatSheetOverlay({ onClose }) {

@@ -15,6 +15,7 @@ import StreamingOverlay from "../components/maskeditor/StreamingOverlay.jsx";
 import CheatSheetOverlay from "../components/maskeditor/CheatSheetOverlay.jsx";
 import CompareSurface from "../components/maskeditor/CompareSurface.jsx";
 import CompareRightPanel from "../components/maskeditor/CompareRightPanel.jsx";
+import HudToast from "../components/maskeditor/HudToast.jsx";
 
 import { getJob, imageOriginalUrl, fetchImageBlob } from "../api/archive.js";
 import { createJob } from "../api/jobs.js";
@@ -84,8 +85,21 @@ export default function MaskEditPage() {
   const [resultUrl, setResultUrl] = useState(null);
   const [derivedVersions, setDerivedVersions] = useState([]);
   const [streaming, setStreaming] = useState(null);
+  const [hud, setHud] = useState(null);
 
   const historyStackRef = useRef(null);
+  const canvasStageRef = useRef(null);
+  const hudTimerRef = useRef(null);
+
+  function showHud(text) {
+    setHud(text);
+    if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
+    hudTimerRef.current = setTimeout(() => setHud(null), 1200);
+  }
+
+  useEffect(() => () => {
+    if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
+  }, []);
 
   // Load the source job + image bitmap.
   useEffect(() => {
@@ -355,6 +369,18 @@ export default function MaskEditPage() {
       } else if (meta && key === "Enter") {
         e.preventDefault();
         if (canSubmit) onSubmit();
+      } else if (meta && key === "0") {
+        e.preventDefault();
+        canvasStageRef.current?.fit();
+      } else if (meta && key === "1") {
+        e.preventDefault();
+        canvasStageRef.current?.actual();
+      } else if (meta && (key === "=" || key === "+")) {
+        e.preventDefault();
+        canvasStageRef.current?.zoomBy(1.25);
+      } else if (meta && key === "-") {
+        e.preventDefault();
+        canvasStageRef.current?.zoomBy(0.8);
       } else if (!meta) {
         const k = key.toLowerCase();
         if (k === "b") setTool("brush");
@@ -371,6 +397,10 @@ export default function MaskEditPage() {
           setBrushOpts({ ...brushOpts, size: Math.max(1, brushOpts.size - 2) });
         } else if (key === "]") {
           setBrushOpts({ ...brushOpts, size: Math.min(200, brushOpts.size + 2) });
+        } else if (key === "{") {
+          setBrushOpts({ ...brushOpts, hardness: Math.max(0, brushOpts.hardness - 5) });
+        } else if (key === "}") {
+          setBrushOpts({ ...brushOpts, hardness: Math.min(100, brushOpts.hardness + 5) });
         }
       }
     }
@@ -445,6 +475,7 @@ export default function MaskEditPage() {
           />
         ) : (
           <CanvasStage
+            ref={canvasStageRef}
             imageBitmap={sourceImage}
             imageW={imageW}
             imageH={imageH}
@@ -455,6 +486,28 @@ export default function MaskEditPage() {
             onCursorChange={(c) => setCursorXY({ x: c.imageX, y: c.imageY })}
             onMaskChange={onMaskChange}
             onReady={onCanvasReady}
+            onBrushDelta={({ kind, delta }) => {
+              setBrushOpts((b) => {
+                if (kind === "size") {
+                  const v = Math.max(1, Math.min(200, b.size + delta));
+                  showHud(`brush ø ${Math.round(v)}px`);
+                  return { ...b, size: v };
+                }
+                if (kind === "hardness") {
+                  const v = Math.max(0, Math.min(100, b.hardness + delta));
+                  showHud(`hardness ${Math.round(v)}%`);
+                  return { ...b, hardness: v };
+                }
+                if (kind === "opacity") {
+                  const v = Math.max(10, Math.min(100, b.opacity + delta));
+                  showHud(`opacity ${Math.round(v)}%`);
+                  return { ...b, opacity: v };
+                }
+                return b;
+              });
+            }}
+            onZoomChange={setZoomDisplay}
+            onHudMessage={showHud}
           />
         )}
         {showingCompare ? (
@@ -517,6 +570,7 @@ export default function MaskEditPage() {
           onClose={() => setErrorState(null)}
         />
       )}
+      {hud && <HudToast text={hud} />}
       {showCheat && <CheatSheetOverlay onClose={() => setShowCheat(false)} />}
       {showingCompare && (
         <div className="me-compare-actions">

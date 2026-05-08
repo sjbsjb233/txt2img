@@ -209,6 +209,11 @@
   background-size: 16px 16px;
   background-position: 0 0, 0 8px, 8px -8px, -8px 0;
   cursor: default;
+  touch-action: none;
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 .me-stage--brush { cursor: none; }
 .me-stage--pan { cursor: grab; }
@@ -955,4 +960,31 @@
   display: flex;
   gap: 8px;
   z-index: 7;
+}
+
+/* HUD toast — transient feedback for trackpad gestures */
+.me-hud-toast {
+  position: fixed;
+  top: 88px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 16px;
+  background: rgba(20, 20, 20, 0.85);
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  border-radius: 4px;
+  z-index: 50;
+  pointer-events: none;
+  animation: me-hud-fade 1.2s ease-out;
+}
+@keyframes me-hud-fade {
+  0%   { opacity: 0; transform: translateX(-50%) translateY(-4px); }
+  10%  { opacity: 1; transform: translateX(-50%) translateY(0); }
+  80%  { opacity: 1; transform: translateX(-50%) translateY(0); }
+  100% { opacity: 0; transform: translateX(-50%) translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .me-hud-toast { animation: none; }
 }
