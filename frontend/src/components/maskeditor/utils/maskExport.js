@@ -5,9 +5,24 @@
 // channel is the only real signal — alpha > 0 means "the user wants
 // this region changed".
 //
-// OpenAI's /v1/images/edits expects the OPPOSITE convention: alpha=0
-// = repaint, alpha=255 = preserve. We invert at export time, so the
-// in-editor data structure remains ergonomic ("painted = will change").
+// OpenAI's /v1/images/edits expects the OPPOSITE convention. Per
+// the API spec:
+//
+//   "Transparent areas (e.g. where alpha is 0) indicate where the
+//    image should be edited."
+//
+// Importantly, gpt-image-2 treats *only* alpha == 0 as "edit". Any
+// intermediate value (e.g. 38 from a 0.85-opacity brush stroke) is
+// rounded UP to "preserve", so the model sees no edit region at all
+// and silently ignores the mask — producing a full-canvas
+// regeneration that keeps part of the input's composition. We hit
+// this in real-API tests; see the bug audit in PR #92.
+//
+// Therefore: BINARIZE the alpha at export time. The brush's soft
+// edge / spatial feathering already happens upstream of us (the
+// brush stroke produced rgba(...,0.85) in the painted area). Here
+// we just collapse to a hard 0/255 mask before sending to the API.
+const PAINT_THRESHOLD = 16;
 
 export async function exportMaskPng(maskCanvas) {
   const w = maskCanvas.width;
@@ -24,8 +39,10 @@ export async function exportMaskPng(maskCanvas) {
   const src = sourceCtx.getImageData(0, 0, w, h);
   const out = ctx.getImageData(0, 0, w, h);
   for (let i = 0; i < src.data.length; i += 4) {
-    // Inverted alpha: painted area (high alpha in source) -> alpha=0 in out.
-    out.data[i + 3] = 255 - src.data[i + 3];
+    // Binary inversion: any visibly-painted pixel becomes alpha=0
+    // (edit), every other pixel stays alpha=255 (preserve). Without
+    // this hard threshold gpt-image-2 ignores the mask entirely.
+    out.data[i + 3] = src.data[i + 3] > PAINT_THRESHOLD ? 0 : 255;
   }
   ctx.putImageData(out, 0, 0);
 
