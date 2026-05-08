@@ -66,8 +66,13 @@ export default function Lightbox({
   onClose,
   onPrev,
   onNext,
+  imageIndex = 0,
 }) {
-  const img = row?.images?.[0];
+  // SET detail opens this for a specific panel inside a batch row;
+  // singles always use index 0. Clamp so a stale index can't crash.
+  const imgs = row?.images || [];
+  const safeIdx = Math.max(0, Math.min(imageIndex, imgs.length - 1));
+  const img = imgs[safeIdx] || imgs[0];
   const stageRef = useRef(null);
   const imgRef = useRef(null);
 
@@ -79,11 +84,12 @@ export default function Lightbox({
   const [originalSrc, setOriginalSrc] = useState(null);
   const originalUrlRef = useRef(null);
 
-  // Reset transforms when the row changes.
+  // Reset transforms when the row OR the active image (within a batch
+  // row) changes.
   useEffect(() => {
     setScale(1);
     setTranslate({ x: 0, y: 0 });
-  }, [row?.hash_id]);
+  }, [row?.hash_id, img?.order]);
 
   // Lock body scroll while open.
   useEffect(() => {
