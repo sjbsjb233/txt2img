@@ -1,5 +1,10 @@
 import MEIcon from "./MEIcon.jsx";
 
+const IS_MAC = typeof navigator !== "undefined" && (
+  (navigator.platform || "").toLowerCase().includes("mac") ||
+  (navigator.userAgent || "").includes("Mac")
+);
+
 export default function StatusBar({
   zoom = 100,
   dim = "—",
@@ -22,6 +27,15 @@ export default function StatusBar({
       <div className="me-statusbar__cell" style={{ width: 120 }} data-testid="me-statusbar-brush">
         brush ø {brush}px
       </div>
+      {IS_MAC && (
+        <div
+          className="me-statusbar__cell"
+          style={{ width: 220, opacity: 0.7 }}
+          data-testid="me-statusbar-trackpad"
+        >
+          pinch · zoom &nbsp;|&nbsp; ⌥+scroll · brush
+        </div>
+      )}
       <div className="me-statusbar__cell me-statusbar__cell--hint" data-testid="me-statusbar-hint">
         {hint}
       </div>

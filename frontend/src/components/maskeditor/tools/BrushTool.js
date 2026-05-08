@@ -44,20 +44,28 @@ export function createBrushTool({ erase = false } = {}) {
 }
 
 function stamp(ctx, pt, opts, erase) {
-  const { size, hardness, opacity } = opts;
-  const r = size / 2;
+  const { size, hardness, opacity, _pressure } = opts;
+  // _pressure is injected by the canvas layer when `opts.pressure`
+  // is true and the pointer event carries a real Force Touch reading.
+  // We clamp to 0.1 so the user always lays down at least a faint
+  // mark, otherwise the stroke would visibly snap on the first
+  // sub-threshold sample.
+  const usePressure = !!opts.pressure && typeof _pressure === "number";
+  const p = usePressure ? Math.max(0.1, _pressure) : 1;
+  const r = (size / 2) * (usePressure ? (0.4 + 0.6 * p) : 1);
+  const effOpacity = (opacity / 100) * (usePressure ? (0.5 + 0.5 * p) : 1);
   ctx.save();
   ctx.globalCompositeOperation = erase ? "destination-out" : "source-over";
   if (erase) {
     // For eraser, we want to fully remove alpha — solid white is fine
     // because destination-out only uses alpha.
-    ctx.globalAlpha = (opacity / 100) * 1.0;
+    ctx.globalAlpha = effOpacity;
     ctx.fillStyle = "rgba(255,255,255,1)";
     ctx.beginPath();
     ctx.arc(pt.x, pt.y, r, 0, Math.PI * 2);
     ctx.fill();
   } else {
-    ctx.globalAlpha = opacity / 100;
+    ctx.globalAlpha = effOpacity;
     if (hardness >= 99) {
       ctx.fillStyle = MASK_COLOR;
       ctx.beginPath();
