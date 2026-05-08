@@ -703,6 +703,32 @@
   z-index: 2;
 }
 
+/* 被抽屉聚焦时的 panel 高亮 */
+.arch-panel-focused {
+  outline: 2px solid var(--banana);
+  outline-offset: -2px;
+}
+
+/* SET 详情中的 fail / running panel 复用 contact-sheet 视觉 */
+.arch-panel .arch-pic.arch-cell-running {
+  background: repeating-linear-gradient(
+    45deg,
+    var(--paper-2) 0 6px,
+    var(--paper-3) 6px 7px
+  );
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.arch-panel .arch-pic.arch-cell-running .arch-spin {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--ink);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: archSpin 1.2s linear infinite;
+}
+
 /* ------------------------------------------------------------------
  * 动画关键帧 — 所有 archive 组件共用，前缀 arch 防冲突
  * ------------------------------------------------------------------ */

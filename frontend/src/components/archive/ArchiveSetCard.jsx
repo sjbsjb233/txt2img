@@ -21,11 +21,15 @@ import ArchiveCard from "./ArchiveCard.jsx";
  *   model      模型名 (默认 "gpt-image-2")
  *   age        相对时间 (如 "2m")
  *   images     Array<{ src?: string, bg?: string, label?: string,
- *                      state?: "done"|"running"|"fail" }>
+ *                      state?: "done"|"loading"|"running"|"fail" }>
  *              - src      图片 URL；优先于 bg
  *              - bg       占位色 (任意 CSS color，没有 src 时用)
  *              - label    cell hover 时显示的标题（可选，仅 hover 提示用）
- *              - state    单 cell 状态 (用于 partial fail / still running)
+ *              - state    单 cell 状态：
+ *                           done    → 渲染图片
+ *                           loading → 已 SUCCEEDED 但 blob 未就绪（hatch+spinner）
+ *                           running → 整组成员还在 QUEUED/RUNNING（hatch+spinner）
+ *                           fail    → FAILED 占位（红 ✕ + 角标）
  *   totalCount 集合实际总数；不传则用 images.length。
  *              当 totalCount > 4 时第 4 格自动盖 "+ N more" overlay
  *   running    整组仍在生成时设为 true，会显示右上角 RUNNING chip
@@ -110,8 +114,8 @@ export default function ArchiveSetCard({
           const showMore = isLast && overflow > 0;
           const cellState = img?.state || "done";
 
-          // 单 cell 仍在生成
-          if (cellState === "running") {
+          // 单 cell 仍在生成 / 缩略图未就绪 — 同视觉，语义保留区分
+          if (cellState === "running" || cellState === "loading") {
             return (
               <div key={i} className="arch-cell arch-cell-running">
                 <span className="arch-spin" />
