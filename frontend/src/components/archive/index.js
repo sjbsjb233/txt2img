@@ -25,3 +25,4 @@ export { default as FailCard } from "./FailCard.jsx";
 export { default as ArchiveSetCard } from "./ArchiveSetCard.jsx";
 export { default as ArchiveSetDetail } from "./ArchiveSetDetail.jsx";
 export { default as ArchiveEmptyHero } from "./ArchiveEmptyHero.jsx";
+export { default as Lightbox } from "./Lightbox.jsx";
