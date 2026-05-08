@@ -60,7 +60,7 @@ export default function ArchiveCard({
       <div className={`arch-thumb ${thumbClassName}`.trim()}>{children}</div>
       {(metaLeft != null || metaRight != null) && (
         <div className={`arch-meta ${metaToneClass}`.trim()}>
-          <span>{metaLeft}</span>
+          <span><span className="arch-meta-track">{metaLeft}</span></span>
           <span className="arch-meta-ago">{metaRight}</span>
         </div>
       )}

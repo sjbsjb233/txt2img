@@ -3,12 +3,24 @@
 // Kept out of the React tree so they're easy to unit-test and reuse
 // from anywhere (e.g. the dev-only console hooks).
 
+// Display-only short labels for model IDs. Used everywhere a card meta
+// line shows the model name — keeps cards from blowing past 280px wide.
+const SHORT_MODEL_MAP = {
+  "gpt-image-2": "gpt-2",
+  "gpt-image-2-2026-04-21": "gpt-2",
+  "gpt-image-1": "gpt-1",
+  "gemini-3-pro-image-preview": "pro",
+  "gemini-3.1-flash-image-preview": "flash",
+  "gemini-2.5-flash-image-preview": "flash",
+  "seedream-4-edit": "sd4-edit",
+  "seedream-4": "sd4",
+  "imagen-3-fast-preview": "imagen3-fast",
+  "imagen-3": "imagen3",
+};
 export function shortModel(modelId) {
   if (!modelId) return "";
-  if (modelId === "gpt-image-2" || modelId === "gpt-image-2-2026-04-21")
-    return "gpt-2";
-  if (modelId === "gemini-3-pro-image-preview") return "pro";
-  if (modelId === "gemini-3.1-flash-image-preview") return "flash";
+  const mapped = SHORT_MODEL_MAP[modelId];
+  if (mapped) return mapped;
   if (modelId.startsWith("gemini-")) return "gemini";
   return modelId.slice(0, 12);
 }

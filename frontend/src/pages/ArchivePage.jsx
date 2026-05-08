@@ -23,6 +23,7 @@ import {
   ArchiveSetCard,
   ArchiveSetDetail,
   ArchiveEmptyHero,
+  Lightbox,
 } from "../components/archive";
 import {
   downloadImageFile,
@@ -194,7 +195,7 @@ function SingleImageCard({ row, focused, onClick }) {
 // Right-side detail drawer
 // ---------------------------------------------------------------------------
 
-function JobDrawer({ row, onClose, onPrev, onNext, width }) {
+function JobDrawer({ row, onClose, onPrev, onNext, onOpenLightbox, width }) {
   const open = !!row;
   const [render, setRender] = useState(false);
 
@@ -288,23 +289,12 @@ function JobDrawer({ row, onClose, onPrev, onNext, width }) {
       </div>
 
       <div style={{ flex: 1, overflowY: "auto", padding: "20px 22px" }}>
-        <div
-          style={{
-            aspectRatio: "16/11",
-            background: img?.thumb_url ? "transparent" : "var(--paper-2)",
-            border: "1px solid var(--ink)",
-            position: "relative",
-            overflow: "hidden",
-          }}
-        >
-          {img?.thumb_url ? (
-            <AuthorizedImage
-              src={imageThumbUrl(it.hash_id, img.order)}
-              alt=""
-              style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-            />
-          ) : null}
-        </div>
+        <DrawerPreviewStage
+          row={it}
+          img={img}
+          ratio={ratio}
+          onOpen={img?.thumb_url ? onOpenLightbox : undefined}
+        />
 
         <div style={{ marginTop: 16, display: "flex", gap: 6, flexWrap: "wrap" }}>
           {img && (
@@ -472,6 +462,101 @@ function JobDrawer({ row, onClose, onPrev, onNext, width }) {
   );
 }
 
+// Drawer's hero image — renders the thumb at its natural aspect inside
+// a fixed-height frame so 9:16/16:9/1:1 all show fully without cropping.
+function DrawerPreviewStage({ row, img, ratio, onOpen }) {
+  const naturalRatio =
+    img?.width && img?.height ? `${img.width} / ${img.height}` : "1 / 1";
+  const dim = img && img.width && img.height ? `${img.width}×${img.height}` : null;
+  const interactive = !!onOpen;
+  const handleKey = (e) => {
+    if (!interactive) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onOpen?.();
+    }
+  };
+  return (
+    <div
+      data-testid="drawer-preview-stage"
+      className="drawer-preview-stage"
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      aria-label={interactive ? "Open fullscreen preview" : undefined}
+      onClick={interactive ? () => onOpen?.() : undefined}
+      onKeyDown={handleKey}
+      style={{
+        width: "100%",
+        maxHeight: "min(56vh, 520px)",
+        border: "1px solid var(--ink)",
+        background: "var(--paper-2)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        overflow: "hidden",
+        position: "relative",
+        cursor: interactive ? "zoom-in" : "default",
+      }}
+    >
+      {img?.thumb_url ? (
+        <AuthorizedImage
+          src={imageThumbUrl(row.hash_id, img.order)}
+          alt=""
+          style={{
+            maxWidth: "100%",
+            maxHeight: "min(56vh, 520px)",
+            aspectRatio: naturalRatio,
+            objectFit: "contain",
+            display: "block",
+          }}
+        />
+      ) : (
+        <div className="mono caps" style={{ fontSize: 10, color: "var(--ink-3)", letterSpacing: "0.16em" }}>
+          no preview
+        </div>
+      )}
+      {img && dim && (
+        <span
+          className="mono"
+          data-testid="drawer-preview-badge"
+          style={{
+            position: "absolute",
+            top: 6,
+            right: 6,
+            background: "var(--ink)",
+            color: "var(--paper)",
+            fontSize: 9,
+            padding: "2px 6px",
+            letterSpacing: "0.06em",
+          }}
+        >
+          {ratio} · {dim}
+        </span>
+      )}
+      {interactive && (
+        <span
+          className="drawer-preview-hint mono"
+          style={{
+            position: "absolute",
+            bottom: 6,
+            right: 6,
+            background: "rgba(25,23,20,0.85)",
+            color: "var(--paper)",
+            fontSize: 9,
+            padding: "2px 6px",
+            letterSpacing: "0.04em",
+            opacity: 0,
+            transition: "opacity 140ms ease",
+            pointerEvents: "none",
+          }}
+        >
+          ⊕ click to expand
+        </span>
+      )}
+    </div>
+  );
+}
+
 function MetaRow({ k, v, link = false }) {
   return (
     <div
@@ -519,6 +604,7 @@ export default function ArchivePage() {
   const [sortOpen, setSortOpen] = useState(false);
   const [drawerHash, setDrawerHash] = useState(null);
   const [setDetailId, setSetDetailId] = useState(null);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
 
   // RUNNING cards need a per-second tick.
   const [, setRunTick] = useState(0);
@@ -604,7 +690,10 @@ export default function ArchivePage() {
     }
   }, []);
 
-  const close = () => setDrawerHash(null);
+  const close = () => {
+    setDrawerHash(null);
+    setLightboxOpen(false);
+  };
   const closeSetDetail = () => setSetDetailId(null);
 
   // [/] in drawer navigates among visible single items only.
@@ -938,7 +1027,18 @@ export default function ArchivePage() {
         onClose={close}
         onPrev={prev}
         onNext={next}
+        onOpenLightbox={() => setLightboxOpen(true)}
         width={drawerWidth}
+      />
+
+      <Lightbox
+        open={lightboxOpen && !!drawerRow}
+        row={drawerRow}
+        position={idx >= 0 ? idx + 1 : null}
+        total={visibleSingles.length || null}
+        onClose={() => setLightboxOpen(false)}
+        onPrev={prev}
+        onNext={next}
       />
     </div>
   );
