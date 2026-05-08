@@ -343,8 +343,16 @@ async def test_edits_single_reference_uses_image_field(mock_httpx) -> None:
 
 
 @pytest.mark.asyncio
-async def test_edits_with_mask_uses_image_array(mock_httpx) -> None:
-    """When a mask is present we always use image[] for the references."""
+async def test_edits_with_mask_uses_singular_image_field(mock_httpx) -> None:
+    """When a mask is present, references go as singular ``image``.
+
+    OpenAI's /v1/images/edits endpoint accepts mask ONLY paired with
+    ``image`` (singular). The ``image[]`` field is the multi-image
+    fusion mode and proxies / OpenAI itself silently drop the mask
+    when the request mixes ``image[]`` + ``mask``. That bug is what
+    caused real submissions to come back as full-canvas regenerations
+    instead of localized edits — see PR #92 follow-up.
+    """
     mock_httpx["status"] = 200
     mock_httpx["body"] = {"created": 1, "data": [{"b64_json": _png_b64()}]}
     adapter = OpenAIV1Adapter()
@@ -358,7 +366,10 @@ async def test_edits_with_mask_uses_image_array(mock_httpx) -> None:
     )
     await adapter.generate(_provider(), req)
     body = mock_httpx["captured"]["content"].decode("latin-1")
-    assert 'name="image[]"' in body
+    assert 'name="image"' in body
+    assert 'name="image[]"' not in body, (
+        "regression: mask + image[] is the broken combo (mask gets dropped)"
+    )
     assert 'name="mask"' in body
 
 

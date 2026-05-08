@@ -484,7 +484,29 @@ class OpenAIV1Adapter(BaseAdapter):
         sorted_refs = sorted(request.references, key=lambda r: r.order)
 
         files: list[tuple[str, Any]] = []
-        if len(sorted_refs) == 1 and request.mask is None:
+        if request.mask is not None:
+            # Mask edit mode — OpenAI's /v1/images/edits accepts mask
+            # ONLY paired with the singular ``image`` field, never
+            # ``image[]`` (which is the multi-image fusion mode and
+            # silently drops any mask). The first reference is the
+            # canvas being edited; any additional references are
+            # currently ignored on this code path because OpenAI's
+            # mask-edit contract is single-image. If you need style
+            # references *and* a mask, you'd want a different adapter
+            # path entirely (or a pre-fusion step).
+            primary = sorted_refs[0]
+            files.append(
+                (
+                    "image",
+                    (
+                        primary.filename or f"ref_{primary.order:02d}",
+                        _decode_b64(primary),
+                        primary.mime,
+                    ),
+                )
+            )
+        elif len(sorted_refs) == 1:
+            # Plain image-to-image: single reference, no mask.
             ref = sorted_refs[0]
             files.append(
                 (
@@ -493,8 +515,7 @@ class OpenAIV1Adapter(BaseAdapter):
                 )
             )
         else:
-            # Multi-image fusion or single ref + mask: use repeated image[]
-            # which OpenAI documents for fusion mode.
+            # Multi-image fusion: repeated ``image[]`` per OpenAI docs.
             for ref in sorted_refs:
                 files.append(
                     (
