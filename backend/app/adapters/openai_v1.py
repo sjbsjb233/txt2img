@@ -484,7 +484,27 @@ class OpenAIV1Adapter(BaseAdapter):
         sorted_refs = sorted(request.references, key=lambda r: r.order)
 
         files: list[tuple[str, Any]] = []
-        if len(sorted_refs) == 1 and request.mask is None:
+        if request.mask is not None:
+            # Mask edit mode — OpenAI's /v1/images/edits accepts mask
+            # ONLY paired with the singular ``image`` field, never
+            # ``image[]`` (which is the multi-image fusion mode and
+            # silently drops any mask). The first reference is the
+            # canvas being edited; any additional references are
+            # currently ignored on this code path because OpenAI's
+            # mask-edit contract is single-image.
+            primary = sorted_refs[0]
+            files.append(
+                (
+                    "image",
+                    (
+                        primary.filename or f"ref_{primary.order:02d}",
+                        _decode_b64(primary),
+                        primary.mime,
+                    ),
+                )
+            )
+        elif len(sorted_refs) == 1:
+            # Plain image-to-image: single reference, no mask.
             ref = sorted_refs[0]
             files.append(
                 (
@@ -493,8 +513,7 @@ class OpenAIV1Adapter(BaseAdapter):
                 )
             )
         else:
-            # Multi-image fusion or single ref + mask: use repeated image[]
-            # which OpenAI documents for fusion mode.
+            # Multi-image fusion: repeated ``image[]`` per OpenAI docs.
             for ref in sorted_refs:
                 files.append(
                     (
@@ -508,6 +527,9 @@ class OpenAIV1Adapter(BaseAdapter):
                 )
 
         if request.mask is not None:
+            # Standard OpenAI /v1/images/edits contract: separate
+            # ``mask`` form field. PNG with alpha channel where
+            # alpha=0 indicates the region to edit.
             files.append(
                 (
                     "mask",
@@ -854,6 +876,57 @@ def _decode_b64(ref) -> bytes:  # type: ignore[no-untyped-def]
             f"reference[order={ref.order}] base64 invalid: {exc}",
             field="references",
         ) from exc
+
+
+def _merge_mask_into_image_alpha(
+    image_bytes: bytes, mask_bytes: bytes
+) -> bytes:
+    """Bake the mask's alpha channel into the source image's alpha.
+
+    OpenAI's ``/v1/images/edits`` documents the mask parameter as:
+        "An additional image whose fully transparent areas (e.g. where
+         alpha is zero) indicate where image should be edited. ...
+         If mask is not provided, image must have transparency, which
+         will be used as the mask."
+
+    Empirically, gpt-image-2 reads the alpha of the *image* parameter
+    in preference to the separate ``mask`` parameter — sending both
+    with non-trivial image alpha makes the model fall back to the
+    image's alpha and ignore the mask entirely. Concretely:
+
+    - Source image we receive is RGBA with alpha=255 everywhere
+      (because the editor's source canvas is opaque).
+    - Mask is RGBA with alpha=0 in the user-painted "edit" region
+      and alpha=255 elsewhere.
+
+    The merge replaces the source image's alpha channel with the
+    mask's alpha. The result is a single PNG that simultaneously
+    represents the source content + the edit region, which gpt-image-2
+    interprets correctly.
+
+    We still send the separate ``mask`` parameter from the caller —
+    it remains useful for older OpenAI models (gpt-image-1) that
+    consult the mask field directly. The two encodings agree, so
+    whichever path the upstream model picks lands on the same intent.
+    """
+    from io import BytesIO
+    from PIL import Image, UnidentifiedImageError
+    try:
+        src = Image.open(BytesIO(image_bytes)).convert("RGBA")
+        mask = Image.open(BytesIO(mask_bytes)).convert("RGBA")
+    except (UnidentifiedImageError, OSError):
+        # Bytes that PIL can't open — pass them through unchanged and
+        # let the upstream return a structured error (or, in tests,
+        # exercise the rest of the pipeline with placeholder bytes).
+        return image_bytes
+    if src.size != mask.size:
+        return image_bytes
+    r, g, b, _ = src.split()
+    _, _, _, mask_a = mask.split()
+    merged = Image.merge("RGBA", (r, g, b, mask_a))
+    out = BytesIO()
+    merged.save(out, format="PNG")
+    return out.getvalue()
 
 
 def _mime_for_format(fmt: str) -> str:

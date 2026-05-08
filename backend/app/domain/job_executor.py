@@ -9,6 +9,7 @@ metrics, and lands the terminal lifecycle state.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import time
@@ -48,6 +49,7 @@ from app.domain.runtime_configs import ProviderScoringConfig
 from app.domain.soft_penalty import SoftPenalty, get_soft_penalty, is_soft_quota_job
 from app.schemas.normalized import (
     NormalizedImage,
+    NormalizedReference,
     NormalizedRequest,
     NormalizedResponse,
     ProviderConfig,
@@ -157,6 +159,15 @@ class JobExecutor:
             params = _safe_json_dict(job.params_json)
             params.setdefault("model", job.model)
             params.setdefault("prompt", "")
+
+            # Re-attach reference uploads from disk so the adapter sees
+            # the full ``NormalizedRequest``. ``params_json`` does NOT
+            # carry references — they live in the ``job_references`` join
+            # table + ``data/jobs/<hash>/refs/`` on disk to keep the
+            # ``params_json`` row from blowing past the DB column limit.
+            params["references"] = await self._load_reference_payload(
+                session, job_id=job.id
+            )
             try:
                 request = NormalizedRequest.model_validate(params)
             except ValidationError as exc:
@@ -177,6 +188,52 @@ class JobExecutor:
                 request=request,
                 flags=flags,
             )
+
+    async def _load_reference_payload(
+        self, session, *, job_id: str
+    ) -> list[dict[str, Any]]:
+        """Read every ``job_references`` row for a job and produce a list
+        of dicts that ``NormalizedReference`` can validate.
+
+        Reference bytes live on disk under ``data/jobs/<hash>/refs/``;
+        we read each file, base64-encode it, and emit ``{order, mime,
+        data_b64, filename}`` so the adapter sees the same payload it
+        would have if the route had inlined them into ``params_json``.
+        Without this step ``request.references`` is silently empty and
+        the adapter sends an /v1/images/edits call without an ``image``
+        field, which 4xx's at upstream — see Bug audit in PR #92.
+        """
+        from app.db.models import JobReference  # avoid circular import
+        from app.services import image_io
+
+        rows = (
+            await session.execute(
+                select(JobReference)
+                .where(JobReference.job_id == job_id)
+                .order_by(JobReference.ref_order)
+            )
+        ).scalars().all()
+        out: list[dict[str, Any]] = []
+        data_root = image_io._data_root()
+        for ref in rows:
+            try:
+                rel = ref.rel_path
+                if rel.startswith("/"):
+                    rel = rel[1:]
+                blob = (data_root / rel).read_bytes()
+            except (OSError, FileNotFoundError) as exc:
+                logger.warning(
+                    "executor: missing reference file for job_id=%s order=%d (%s)",
+                    job_id, ref.ref_order, exc,
+                )
+                continue
+            out.append({
+                "order": ref.ref_order,
+                "mime": ref.mime,
+                "data_b64": base64.b64encode(blob).decode("ascii"),
+                "filename": ref.filename,
+            })
+        return out
 
     async def _mark_running(self, ctx: JobExecutionContext) -> None:
         now = datetime.now(timezone.utc)

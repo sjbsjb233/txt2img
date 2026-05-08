@@ -343,8 +343,16 @@ async def test_edits_single_reference_uses_image_field(mock_httpx) -> None:
 
 
 @pytest.mark.asyncio
-async def test_edits_with_mask_uses_image_array(mock_httpx) -> None:
-    """When a mask is present we always use image[] for the references."""
+async def test_edits_with_mask_uses_singular_image_and_separate_mask_field(
+    mock_httpx,
+) -> None:
+    """When a mask is present, references go as singular ``image`` and
+    the mask is sent as a separate ``mask`` form field per the
+    OpenAI /v1/images/edits contract.
+
+    The combination ``image[]`` + ``mask`` is broken (the proxy
+    silently drops the mask), so the singular ``image`` matters too.
+    """
     mock_httpx["status"] = 200
     mock_httpx["body"] = {"created": 1, "data": [{"b64_json": _png_b64()}]}
     adapter = OpenAIV1Adapter()
@@ -358,8 +366,13 @@ async def test_edits_with_mask_uses_image_array(mock_httpx) -> None:
     )
     await adapter.generate(_provider(), req)
     body = mock_httpx["captured"]["content"].decode("latin-1")
-    assert 'name="image[]"' in body
-    assert 'name="mask"' in body
+    assert 'name="image"' in body
+    assert 'name="image[]"' not in body, (
+        "regression: mask + image[] is the broken combo"
+    )
+    assert 'name="mask"' in body, (
+        "mask must be sent as a separate form field per OpenAI spec"
+    )
 
 
 # ---------------------------------------------------------------------------
