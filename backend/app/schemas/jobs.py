@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # Models the caller can request. Adapter / provider validation is the
@@ -33,6 +34,24 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 _MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$")
 _SESSION_ID_RE = re.compile(r"^sess_[A-Za-z0-9]{10}$")
 _CLIENT_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+# Public hash id format (from new_job_hash_id).
+_HASH_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+_OUTPAINT_AMOUNT_RE = re.compile(r"^(\d{1,4}%|\d{1,5}px)$")
+
+
+class DerivationKind(str, Enum):
+    """How a child job is derived from a parent job."""
+
+    MASK_EDIT = "mask_edit"
+    OUTPAINT = "outpaint"
+    IMAGE_TO_IMAGE = "i2i"
+
+
+class OutpaintDirection(str, Enum):
+    LEFT = "left"
+    RIGHT = "right"
+    TOP = "top"
+    BOTTOM = "bottom"
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +140,76 @@ class JobCreatePayload(BaseModel):
     google_search: bool = False
     image_search: bool = False
 
+    # ---- Derivation (mask edit / outpaint) — see frontend §3.x -----
+    parent_hash_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description="If this submission derives from an existing job, "
+        "the parent's hash_id.",
+    )
+    derivation_kind: DerivationKind | None = None
+    outpaint_directions: list[OutpaintDirection] | None = Field(
+        default=None,
+        description="Directions enabled for canvas extension. Required "
+        "when derivation_kind is 'outpaint'.",
+    )
+    outpaint_amount: str | None = Field(
+        default=None,
+        max_length=8,
+        description="Percent ('25%') or pixel ('256px') extend amount. "
+        "Required when derivation_kind is 'outpaint'.",
+    )
+
+    @field_validator("parent_hash_id")
+    @classmethod
+    def _validate_parent_hash_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not _HASH_ID_RE.match(v):
+            raise ValueError("parent_hash_id has an invalid format")
+        return v
+
+    @field_validator("outpaint_amount")
+    @classmethod
+    def _validate_outpaint_amount(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not _OUTPAINT_AMOUNT_RE.match(v):
+            raise ValueError(
+                "outpaint_amount must be like '25%' or '256px'"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _check_derivation(self) -> "JobCreatePayload":
+        a = self.parent_hash_id is not None
+        b = self.derivation_kind is not None
+        if a != b:
+            raise ValueError(
+                "parent_hash_id and derivation_kind must be both set or both unset"
+            )
+        is_outpaint = self.derivation_kind == DerivationKind.OUTPAINT
+        if is_outpaint:
+            if not self.outpaint_directions:
+                raise ValueError(
+                    "outpaint requires outpaint_directions (at least 1)"
+                )
+            if not self.outpaint_amount:
+                raise ValueError("outpaint requires outpaint_amount")
+            # de-duplicate directions
+            uniq: list[OutpaintDirection] = []
+            for d in self.outpaint_directions:
+                if d not in uniq:
+                    uniq.append(d)
+            object.__setattr__(self, "outpaint_directions", uniq)
+        else:
+            if self.outpaint_directions or self.outpaint_amount:
+                raise ValueError(
+                    "outpaint_directions / outpaint_amount only valid "
+                    "when derivation_kind=outpaint"
+                )
+        return self
+
     @field_validator("model")
     @classmethod
     def _validate_model(cls, v: str) -> str:
@@ -157,7 +246,15 @@ class JobCreatePayload(BaseModel):
         once it has read the multipart files.
         """
         out = self.model_dump(exclude_none=True)
-        for k in ("session_id", "client_request_id", "captcha_token"):
+        for k in (
+            "session_id",
+            "client_request_id",
+            "captcha_token",
+            "parent_hash_id",
+            "derivation_kind",
+            "outpaint_directions",
+            "outpaint_amount",
+        ):
             out.pop(k, None)
         return out
 
@@ -176,6 +273,8 @@ class JobCreateResponse(BaseModel):
     queued_at: datetime
     set_id: str | None = None
     client_request_id: str | None = None
+    parent_hash_id: str | None = None
+    derivation_kind: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -199,4 +298,6 @@ __all__ = (
     "JobCreatePayload",
     "JobCreateResponse",
     "JobActionResponse",
+    "DerivationKind",
+    "OutpaintDirection",
 )

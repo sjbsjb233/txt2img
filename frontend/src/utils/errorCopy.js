@@ -25,7 +25,11 @@ export const ERROR_COPY = {
   FORBIDDEN: "You don't have permission to do that.",
   NOT_FOUND: "Resource not found.",
   BAD_REQUEST: "Request was malformed.",
-  INVALID_PARAMETER: "One of the parameters isn't allowed for this model.",
+  // INVALID_PARAMETER intentionally NOT mapped — the backend message is
+  // already field-specific (e.g. "thinking='off' is not allowed for
+  // model 'gpt-image-2'.") and that's far more actionable than a canned
+  // generic. Letting `messageForCode` return `undefined` causes apiFetch
+  // to surface the backend message verbatim.
 
   // ----- upstream / providers -----
   ALL_PROVIDERS_FAILED: "All providers failed. Try again in a moment.",

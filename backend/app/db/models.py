@@ -265,6 +265,20 @@ class Job(Base):
         nullable=False, server_default=text("0")
     )
 
+    # Derivation metadata (mask edit / outpaint).
+    parent_hash_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    derivation_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Detailed cost / usage info from upstream — surfaced to the user
+    # in the compare view's right panel.
+    cost_dollars: Mapped[float | None] = mapped_column(nullable=True)
+    usage_input_tokens: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    usage_output_tokens: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )
@@ -286,6 +300,7 @@ class Job(Base):
         Index("idx_jobs_user_status", "user_id", "status"),
         Index("idx_jobs_status_created", "status", "created_at"),
         Index("idx_jobs_set", "set_id"),
+        Index("idx_jobs_parent_hash_id", "parent_hash_id"),
     )
 
 
