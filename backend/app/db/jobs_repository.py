@@ -127,6 +127,8 @@ class JobsRepository:
         client_request_id: str | None = None,
         set_id: str | None = None,
         session_id: str | None = None,
+        parent_hash_id: str | None = None,
+        derivation_kind: str | None = None,
         session: AsyncSession,
     ) -> CreatedJob:
         """Insert a fresh ``QUEUED`` job and return its identifiers.
@@ -162,6 +164,11 @@ class JobsRepository:
             provider_used=None,
             retries=0,
             cost_cny=0.0,
+            parent_hash_id=parent_hash_id,
+            derivation_kind=derivation_kind,
+            cost_dollars=None,
+            usage_input_tokens=None,
+            usage_output_tokens=None,
             created_at=now,
             queued_at=now,
             dispatched_at=None,

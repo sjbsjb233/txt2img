@@ -29,7 +29,7 @@ export function precheck({ model }) {
  * does not support multipart bodies on its own. We stage a thin
  * fetch() here and run the response through the same error envelope.
  */
-export async function createJob({ payload, references = [] }) {
+export async function createJob({ payload, references = [], mask = null }) {
   const body = new FormData();
   // ``payload`` is a plain JSON string carried in a text form field —
   // appending a Blob here would make Starlette decode it as an
@@ -39,6 +39,11 @@ export async function createJob({ payload, references = [] }) {
   references.forEach((file, idx) => {
     body.append(`ref_${idx}`, file, file.name || `ref_${idx + 1}`);
   });
+  if (mask) {
+    // mask is a Blob/File — single PNG with alpha channel. Backend
+    // recognises field name "mask" via _collect_attachments.
+    body.append("mask", mask, mask.name || "mask.png");
+  }
 
   const url = `${getApiBase().replace(/\/+$/, "")}/api/jobs`;
   const headers = { Accept: "application/json" };

@@ -53,6 +53,8 @@ from app.deps import CurrentUser
 from app.domain.job_queue import get_job_queue
 from app.domain.runtime_configs import EmergencyConfig
 from app.schemas.archive import (
+    DerivedJobsResponse,
+    JobCost,
     JobDetail,
     JobDetailNotFound,
     JobDetailsRequest,
@@ -145,6 +147,9 @@ async def get_jobs_index(
                 Job.seq_no,
                 Job.status,
                 Job.updated_at,
+                Job.parent_hash_id,
+                Job.derivation_kind,
+                Job.model,
             )
             .where(
                 Job.user_id == user.id,
@@ -184,8 +189,11 @@ async def get_jobs_index(
             seq_no=int(seq_no),
             status=status,
             updated_at=_aware_utc(updated_at),
+            parent_hash_id=parent_hash_id,
+            derivation_kind=derivation_kind,
+            model=model,
         )
-        for hash_id, set_id, seq_no, status, updated_at in page
+        for hash_id, set_id, seq_no, status, updated_at, parent_hash_id, derivation_kind, model in page
     ]
     next_cursor = items[-1].hash_id if has_more and items else None
     return JobIndexResponse(items=items, next_cursor=next_cursor)
@@ -332,6 +340,84 @@ async def get_job_detail(hash_id: str, user: CurrentUser) -> JobDetail:
     if detail is None:
         raise api_error(404, "NOT_FOUND", "Job not found.", field="hash_id")
     return detail
+
+
+@router.get("/jobs/{hash_id}/derived", response_model=DerivedJobsResponse)
+async def get_derived_jobs(
+    hash_id: str,
+    user: CurrentUser,
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str | None = Query(default=None),
+) -> DerivedJobsResponse:
+    """List jobs derived from ``hash_id`` (mask edits / outpaints).
+
+    Returns ``JobIndexEntry`` rows so the compare view's right panel
+    can render a small list of versions for the same source.
+    """
+    # Validate parent ownership (404 for missing or foreign).
+    async with get_session() as session:
+        parent = (
+            await session.execute(
+                select(Job).where(
+                    Job.hash_id == hash_id,
+                    Job.user_id == user.id,
+                    Job.status.in_(_VISIBLE_STATUSES),
+                )
+            )
+        ).scalar_one_or_none()
+    if parent is None:
+        raise api_error(404, "NOT_FOUND", "Job not found.", field="hash_id")
+
+    async with get_session() as session:
+        stmt = (
+            select(
+                Job.hash_id,
+                Job.set_id,
+                Job.seq_no,
+                Job.status,
+                Job.updated_at,
+                Job.parent_hash_id,
+                Job.derivation_kind,
+                Job.model,
+            )
+            .where(
+                Job.parent_hash_id == hash_id,
+                Job.user_id == user.id,
+                Job.status.in_(_VISIBLE_STATUSES),
+            )
+            .order_by(desc(Job.updated_at), Job.hash_id)
+            .limit(limit + 1)
+        )
+        if cursor is not None:
+            cursor_row = await _resolve_cursor(session, cursor, user.id)
+            if cursor_row is not None:
+                cur_updated, cur_hash = cursor_row
+                stmt = stmt.where(
+                    (Job.updated_at < cur_updated)
+                    | (
+                        (Job.updated_at == cur_updated)
+                        & (Job.hash_id > cur_hash)
+                    )
+                )
+        rows = (await session.execute(stmt)).all()
+
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    items = [
+        JobIndexEntry(
+            hash_id=h,
+            set_id=sid,
+            seq_no=int(seq),
+            status=st,
+            updated_at=_aware_utc(ua),
+            parent_hash_id=ph,
+            derivation_kind=dk,
+            model=m,
+        )
+        for h, sid, seq, st, ua, ph, dk, m in page
+    ]
+    next_cursor = items[-1].hash_id if has_more and items else None
+    return DerivedJobsResponse(items=items, next_cursor=next_cursor)
 
 
 # ---------------------------------------------------------------------------
@@ -701,8 +787,25 @@ async def _load_one_detail(
 
         set_summary = await _build_set_summary(session, job)
 
+        derived_count = (
+            await session.execute(
+                select(func.count())
+                .select_from(Job)
+                .where(
+                    Job.parent_hash_id == job.hash_id,
+                    Job.user_id == user_id,
+                    Job.status.in_(_VISIBLE_STATUSES),
+                )
+            )
+        ).scalar_one()
+
     return _project_detail(
-        job, images, refs, session_row, set_summary
+        job,
+        images,
+        refs,
+        session_row,
+        set_summary,
+        derived_count=int(derived_count or 0),
     )
 
 
@@ -781,6 +884,21 @@ async def _load_many_details(
             ).all()
             set_image_counts = {sid: int(c) for sid, c in count_rows}
 
+        # Derived count per requested job (single GROUP BY).
+        target_hashes = [j.hash_id for j in jobs]
+        derived_rows = (
+            await session.execute(
+                select(Job.parent_hash_id, func.count(Job.id))
+                .where(
+                    Job.parent_hash_id.in_(target_hashes),
+                    Job.user_id == user_id,
+                    Job.status.in_(_VISIBLE_STATUSES),
+                )
+                .group_by(Job.parent_hash_id)
+            )
+        ).all()
+        derived_by_hash = {h: int(c) for h, c in derived_rows}
+
     images_by_job: dict[str, list[Image]] = {}
     for img in images:
         images_by_job.setdefault(img.job_id, []).append(img)
@@ -807,6 +925,7 @@ async def _load_many_details(
             refs_by_job.get(job.id, []),
             session_row,
             set_summary,
+            derived_count=derived_by_hash.get(job.hash_id, 0),
         )
     return out
 
@@ -838,6 +957,7 @@ def _project_detail(
     refs: list[JobReference],
     session_row: SessionRow | None,
     set_summary: JobSetSummary | None,
+    derived_count: int | None = None,
 ) -> JobDetail:
     params = _safe_load_json(job.params_json)
     flags = _safe_load_json(job.flags_json)
@@ -880,6 +1000,22 @@ def _project_detail(
             id=session_row.id, name=session_row.name
         )
 
+    cost = None
+    if (
+        job.cost_dollars is not None
+        or job.usage_input_tokens is not None
+        or job.usage_output_tokens is not None
+    ):
+        cost = JobCost(
+            dollars=(
+                float(job.cost_dollars)
+                if job.cost_dollars is not None
+                else None
+            ),
+            input_tokens=job.usage_input_tokens,
+            output_tokens=job.usage_output_tokens,
+        )
+
     return JobDetail(
         hash_id=job.hash_id,
         seq_no=int(job.seq_no),
@@ -899,6 +1035,10 @@ def _project_detail(
         timing=timing,
         error=job.status_reason if job.status == "FAILED" else None,
         flags=flags,
+        parent_hash_id=job.parent_hash_id,
+        derivation_kind=job.derivation_kind,
+        derived_count=derived_count,
+        cost=cost,
     )
 
 

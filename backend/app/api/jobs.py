@@ -31,11 +31,14 @@ Cross-cutting wiring this module owns:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import re
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from typing import Any
 
 from fastapi import APIRouter, Form, Request
@@ -106,9 +109,24 @@ _REF_FIELD_RE = re.compile(r"^ref_(\d+)$")
 # tie up worker memory.
 _REF_MAX_BYTES = 25 * 1024 * 1024
 
+# Mask uploads can be larger than refs because they're alpha-channel PNGs
+# that compress less effectively at high resolutions; cap at 50 MB.
+_MASK_MAX_BYTES = 50 * 1024 * 1024
+
 # Allowed reference MIME types — Pillow can read all of these and the
 # adapters' wire formats accept them.
 _ALLOWED_REF_MIMES = frozenset({"image/png", "image/jpeg", "image/jpg", "image/webp"})
+
+# Mask must be a PNG with an alpha channel.
+_ALLOWED_MASK_MIMES = frozenset({"image/png"})
+
+
+@dataclass
+class JobAttachments:
+    """Container for the uploaded files attached to a ``POST /api/jobs``."""
+
+    references: list[dict[str, Any]] = field(default_factory=list)
+    mask: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +221,87 @@ async def create_job(
     # Walk the entire multipart up front so we have refs in hand for
     # both the validator (counting) and the storage step. We reject
     # if a ref comes in that we can't classify.
-    refs = await _collect_references(request)
+    attachments = await _collect_attachments(request)
+    refs = attachments.references
+
+    # Derivation: if parent_hash_id is set, validate it before we burn
+    # quota on a request that points at a missing / foreign parent.
+    parent_job: Job | None = None
+    if body.parent_hash_id is not None:
+        parent_job = await _validate_parent_for_derivation(body, user.id)
+        # Outpaint synthesises canvas + mask from the parent image, so a
+        # caller-supplied mask is forbidden in that mode.
+        if (
+            body.derivation_kind
+            and body.derivation_kind.value == "outpaint"
+            and attachments.mask is not None
+        ):
+            raise api_error(
+                422,
+                "INVALID_PARAMETER",
+                "outpaint mode synthesises its own mask; do not upload one.",
+                field="mask",
+            )
+
+    # Mask + first-reference dimension parity (mask_edit only — outpaint
+    # builds its own pair after this point).
+    if (
+        body.derivation_kind is None
+        or body.derivation_kind.value != "outpaint"
+    ):
+        _validate_mask_consistency(attachments)
+    else:
+        # Outpaint mode: synthesise the extended canvas + matching mask
+        # *here*, before the executor / adapter can see the request. The
+        # frontend uploads the original source as ``ref_0`` and provides
+        # the (directions, amount) geometry on the payload. We replace
+        # ``ref_0`` with a (potentially) wider canvas and inject a
+        # synthesised mask so the request takes the same /v1/images/edits
+        # code path that mask_edit takes downstream.
+        #
+        # Without this step, the request reached upstream as a plain
+        # i2i regeneration with no mask — see Bug #5 in the design QA
+        # report: the executor never read ``flags['outpaint']`` and
+        # ``services/outpaint.py`` was effectively dead code.
+        if not attachments.references:
+            raise api_error(
+                422,
+                "MASK_REQUIRES_REFERENCE",
+                "outpaint requires the source image as ref_0",
+                field="references",
+            )
+        try:
+            from app.services.outpaint import synthesize_outpaint
+            canvas_bytes, mask_bytes, _new_size = await asyncio.to_thread(
+                synthesize_outpaint,
+                source_png_bytes=attachments.references[0]["bytes"],
+                directions=[d.value for d in (body.outpaint_directions or [])],
+                amount=body.outpaint_amount,
+            )
+        except ValueError as exc:
+            raise api_error(
+                422,
+                "INVALID_PARAMETER",
+                f"outpaint synthesis failed: {exc}",
+                field="outpaint_amount",
+            ) from exc
+        # Substitute ref_0 with the extended canvas; preserve metadata.
+        attachments.references[0] = {
+            **attachments.references[0],
+            "bytes": canvas_bytes,
+            "mime": "image/png",
+        }
+        # Synthesise a mask attachment so the executor's NormalizedRequest
+        # reconstitutes a real edits call (alpha=255 for the original
+        # area, alpha=0 for the extended area).
+        new_w, new_h = _new_size
+        attachments.mask = {
+            "filename": "outpaint_mask.png",
+            "mime": "image/png",
+            "bytes": mask_bytes,
+            "width": new_w,
+            "height": new_h,
+        }
 
     decision = await get_access_policy().enforce(user, model=body.model)
 
@@ -241,6 +339,30 @@ async def create_job(
     params["prompt"] = body.prompt
     params["model"] = body.model
 
+    # If the caller uploaded a mask, fold it into params so the
+    # executor's NormalizedRequest can reconstitute it. The mask is
+    # base64-encoded inline; size is bounded by _MASK_MAX_BYTES (50 MB).
+    if attachments.mask is not None:
+        params["mask"] = {
+            "order": 1,
+            "mime": attachments.mask["mime"],
+            "data_b64": base64.b64encode(
+                attachments.mask["bytes"]
+            ).decode("ascii"),
+            "filename": attachments.mask["filename"],
+        }
+
+    # Outpaint geometry travels in flags so the executor (and the
+    # outpaint synthesizer) can read it without re-parsing params.
+    if (
+        body.derivation_kind
+        and body.derivation_kind.value == "outpaint"
+    ):
+        flags["outpaint"] = {
+            "directions": [d.value for d in (body.outpaint_directions or [])],
+            "amount": body.outpaint_amount,
+        }
+
     repo = get_jobs_repository()
 
     if body.session_id is not None:
@@ -257,6 +379,12 @@ async def create_job(
                 client_request_id=body.client_request_id,
                 set_id=set_id,
                 session_id=body.session_id,
+                parent_hash_id=body.parent_hash_id,
+                derivation_kind=(
+                    body.derivation_kind.value
+                    if body.derivation_kind is not None
+                    else None
+                ),
                 session=session,
             )
             # Persist the prompt on the row itself (params already has
@@ -273,6 +401,23 @@ async def create_job(
             await _persist_references(
                 session, job_id=created.job_id, hash_id=created.hash_id, refs=refs
             )
+
+            mask_meta: dict[str, Any] | None = None
+            if attachments.mask is not None:
+                mask_rel_path = await asyncio.to_thread(
+                    _save_mask_to_disk,
+                    created.hash_id,
+                    attachments.mask["filename"],
+                    attachments.mask["mime"],
+                    attachments.mask["bytes"],
+                )
+                mask_meta = {
+                    "filename": attachments.mask["filename"],
+                    "mime": attachments.mask["mime"],
+                    "rel_path": mask_rel_path,
+                    "width": attachments.mask["width"],
+                    "height": attachments.mask["height"],
+                }
 
             # Persist a lightweight meta.json snapshot for debug viewers.
             try:
@@ -297,6 +442,13 @@ async def create_job(
                             }
                             for r in refs
                         ],
+                        "mask": mask_meta,
+                        "parent_hash_id": body.parent_hash_id,
+                        "derivation_kind": (
+                            body.derivation_kind.value
+                            if body.derivation_kind is not None
+                            else None
+                        ),
                         "created_at": created.created_at.isoformat(
                             timespec="seconds"
                         ).replace("+00:00", "Z"),
@@ -343,6 +495,12 @@ async def create_job(
         queued_at=_aware_utc(created.created_at),
         set_id=set_id,
         client_request_id=body.client_request_id,
+        parent_hash_id=body.parent_hash_id,
+        derivation_kind=(
+            body.derivation_kind.value
+            if body.derivation_kind is not None
+            else None
+        ),
     )
 
     # Best-effort: tell every other tab the user has open.
@@ -494,18 +652,42 @@ def _parse_payload(raw: str) -> JobCreatePayload:
 
 
 async def _collect_references(request: Request) -> list[dict[str, Any]]:
-    """Walk multipart fields into ``[{order, filename, mime, bytes}, ...]``.
+    """Backwards-compatible wrapper for legacy callers.
 
-    Only ``ref_<int>`` fields are pulled — everything else (the
-    ``payload`` form field) is left to FastAPI's parameter binding to
-    consume. Order is the integer suffix; we sort ascending and reject
-    duplicates. Each reference is fully buffered into memory; uploads
-    above ``_REF_MAX_BYTES`` are rejected with 413.
+    Returns just the references list. New code should use
+    :func:`_collect_attachments` to also pick up the ``mask`` field.
+    """
+    attachments = await _collect_attachments(request)
+    return attachments.references
+
+
+async def _collect_attachments(request: Request) -> JobAttachments:
+    """Walk multipart fields into a :class:`JobAttachments` container.
+
+    Recognised file fields:
+
+    - ``ref_<int>`` — reference image; collected into ``.references``.
+    - ``mask`` — single PNG with alpha; collected into ``.mask``.
+
+    Unknown file fields are ignored quietly to keep the wire contract
+    forward-compatible. Each upload is buffered into memory; size limits
+    apply per field.
     """
     form = await request.form()
     out_by_order: dict[int, dict[str, Any]] = {}
+    out_mask: dict[str, Any] | None = None
     for field_name, value in form.multi_items():
         if not isinstance(value, UploadFile):
+            continue
+        if field_name == "mask":
+            if out_mask is not None:
+                raise api_error(
+                    422,
+                    "INVALID_PARAMETER",
+                    "duplicate mask field",
+                    field="mask",
+                )
+            out_mask = await _read_mask_upload(value)
             continue
         match = _REF_FIELD_RE.match(field_name)
         if not match:
@@ -565,7 +747,194 @@ async def _collect_references(request: Request) -> list[dict[str, Any]]:
                 "reference indices must be a contiguous 0..N-1 sequence.",
                 field="references",
             )
-    return refs
+    return JobAttachments(references=refs, mask=out_mask)
+
+
+async def _read_mask_upload(value: UploadFile) -> dict[str, Any]:
+    """Validate + buffer the ``mask`` upload field.
+
+    Mask must be PNG with alpha channel. We probe via Pillow on the
+    thread pool; if Pillow can't open it or the mode lacks alpha we
+    return ``INVALID_MASK_FORMAT`` so the frontend can show a precise
+    error.
+    """
+    mime = (value.content_type or "").lower()
+    if mime not in _ALLOWED_MASK_MIMES:
+        raise api_error(
+            422,
+            "INVALID_MASK_FORMAT",
+            f"mask must be PNG, got {mime!r}",
+            field="mask",
+        )
+    data = await value.read()
+    if not data:
+        raise api_error(
+            422,
+            "INVALID_MASK_FORMAT",
+            "mask file is empty",
+            field="mask",
+        )
+    if len(data) > _MASK_MAX_BYTES:
+        raise api_error(
+            413,
+            "INVALID_MASK_FORMAT",
+            f"mask exceeds {_MASK_MAX_BYTES // (1024 * 1024)}MB",
+            field="mask",
+        )
+    width, height = await asyncio.to_thread(_validate_mask_pixels, data)
+    return {
+        "filename": value.filename or "mask.png",
+        "mime": mime,
+        "bytes": data,
+        "width": width,
+        "height": height,
+    }
+
+
+def _validate_mask_pixels(data: bytes) -> tuple[int, int]:
+    """Open the mask via Pillow, ensure it has an alpha channel.
+
+    Returns ``(width, height)``. Raises ``INVALID_MASK_FORMAT`` on a
+    corrupt PNG or a mode without alpha.
+    """
+    try:
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover — Pillow is required.
+        raise api_error(
+            500,
+            "INTERNAL_ERROR",
+            "Pillow not available for mask validation.",
+        ) from exc
+    try:
+        with Image.open(BytesIO(data)) as probe:
+            probe.verify()
+    except Exception as exc:
+        raise api_error(
+            422,
+            "INVALID_MASK_FORMAT",
+            "mask is not a valid PNG",
+            field="mask",
+        ) from exc
+    # Pillow requires re-open after verify().
+    img = Image.open(BytesIO(data))
+    if img.mode not in ("RGBA", "LA"):
+        raise api_error(
+            422,
+            "INVALID_MASK_FORMAT",
+            f"mask must have alpha channel, got mode {img.mode!r}",
+            field="mask",
+        )
+    return img.size
+
+
+def _peek_image_size(data: bytes) -> tuple[int, int]:
+    try:
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover.
+        raise api_error(
+            500, "INTERNAL_ERROR", "Pillow not available."
+        ) from exc
+    try:
+        img = Image.open(BytesIO(data))
+        return img.size
+    except Exception as exc:
+        raise api_error(
+            422,
+            "INVALID_PARAMETER",
+            "reference image is not decodable",
+            field="references",
+        ) from exc
+
+
+def _validate_mask_consistency(attachments: JobAttachments) -> None:
+    """Ensure mask + first reference agree on dimensions.
+
+    OpenAI's images.edits requires the mask and the first image to be
+    the same WxH. We check this once at the boundary so a bad pair
+    never reaches the executor.
+    """
+    if attachments.mask is None:
+        return
+    if not attachments.references:
+        raise api_error(
+            422,
+            "MASK_REQUIRES_REFERENCE",
+            "mask requires at least one reference image",
+            field="mask",
+        )
+    first_ref = attachments.references[0]
+    ref_size = _peek_image_size(first_ref["bytes"])
+    if (attachments.mask["width"], attachments.mask["height"]) != ref_size:
+        raise api_error(
+            422,
+            "INVALID_MASK_DIMS",
+            f"mask {attachments.mask['width']}x{attachments.mask['height']} "
+            f"must match first reference {ref_size[0]}x{ref_size[1]}",
+            field="mask",
+        )
+
+
+def _save_mask_to_disk(
+    hash_id: str, filename: str, mime: str, data: bytes
+) -> str:
+    """Persist the mask PNG under ``data/jobs/<hash>/mask.png``.
+
+    Returns the rel-path (relative to the data root) so meta.json can
+    reference it. The mask isn't tracked in a DB table — it lives
+    entirely in ``params_json.mask`` (base64) for the executor and on
+    disk for debug/replay.
+    """
+    image_io.ensure_job_dirs(hash_id)
+    target = image_io.path_for_job(hash_id) / "mask.png"
+    target.write_bytes(data)
+    return str(target.relative_to(image_io._data_root()))
+
+
+async def _validate_parent_for_derivation(
+    body: JobCreatePayload, user_id: str
+) -> Job:
+    """Check the parent_hash_id points at a SUCCEEDED job owned by user.
+
+    Also enforces the same ``model`` so a user can't accidentally cross
+    a mask edit between two providers.
+    """
+    parent_hash_id = body.parent_hash_id
+    assert parent_hash_id is not None  # caller guard
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                select(Job).where(Job.hash_id == parent_hash_id)
+            )
+        ).scalar_one_or_none()
+    if row is None:
+        raise api_error(
+            404,
+            "PARENT_JOB_NOT_FOUND",
+            f"parent job {parent_hash_id} not found",
+            field="parent_hash_id",
+        )
+    if row.user_id != user_id:
+        raise api_error(
+            403,
+            "PARENT_JOB_NOT_OWNED",
+            "parent job belongs to another user",
+            field="parent_hash_id",
+        )
+    if row.status != "SUCCEEDED":
+        raise api_error(
+            409,
+            "PARENT_JOB_NOT_TERMINAL",
+            f"parent job status={row.status} cannot be derived from",
+            field="parent_hash_id",
+        )
+    if body.model != row.model:
+        raise api_error(
+            422,
+            "INVALID_PARAMETER",
+            f"derivation must use same model as parent ({row.model})",
+            field="model",
+        )
+    return row
 
 
 async def _persist_references(

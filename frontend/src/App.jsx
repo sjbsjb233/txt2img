@@ -7,6 +7,7 @@ import ArchivePage from "./pages/ArchivePage.jsx";
 import PickerPage from "./pages/PickerPage.jsx";
 import AdminPage from "./pages/AdminPage.jsx";
 import SettingsPage from "./pages/SettingsPage.jsx";
+import MaskEditPage from "./pages/MaskEditPage.jsx";
 import Layout from "./components/Layout.jsx";
 import RequireAuth from "./components/RequireAuth.jsx";
 import RequireAdmin from "./components/RequireAdmin.jsx";
@@ -132,6 +133,10 @@ export default function App() {
           <Route path="/create" element={<CreatePage />} />
           <Route path="/picker" element={<PickerPage />} />
           <Route path="/archive" element={<ArchivePage />} />
+          <Route
+            path="/edit/:hashId/:order"
+            element={<MaskEditPage />}
+          />
           <Route path="/settings" element={<SettingsPage />} />
           <Route
             path="/admin"

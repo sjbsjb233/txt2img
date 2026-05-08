@@ -14,8 +14,9 @@ import {
   useRef,
   useState,
 } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import Icon from "../components/Icon.jsx";
+import { supportsMaskEdit, hasUsedMaskEdit } from "../config/maskEdit.js";
 import {
   RunningCard,
   QueuedCard,
@@ -208,6 +209,7 @@ function SingleImageCard({ row, focused, onClick }) {
 // ---------------------------------------------------------------------------
 
 function JobDrawer({ row, onClose, onPrev, onNext, onOpenLightbox, width, imageIndex = 0 }) {
+  const navigate = useNavigate();
   const open = !!row;
   const [render, setRender] = useState(false);
 
@@ -333,6 +335,26 @@ function JobDrawer({ row, onClose, onPrev, onNext, onOpenLightbox, width, imageI
               onClick={() => archiveStore.toggleStar(it.hash_id, img.order)}
             >
               {img.starred ? "★ unpick" : "★ pick"}
+            </button>
+          )}
+          {img && it.status === "SUCCEEDED" && supportsMaskEdit(it.model) && (
+            <button
+              data-testid="drawer-edit"
+              className="btn sm primary shadowed"
+              style={{ position: "relative" }}
+              onClick={() => navigate(`/edit/${it.hash_id}/${img.order}`)}
+              title="Open mask editor (NEW)"
+            >
+              <Icon name="image" size={11} />
+              <span>edit with mask</span>
+              {!hasUsedMaskEdit() && (
+                <>
+                  <span className="me-new-badge" data-testid="drawer-edit-new-badge">NEW</span>
+                  <span className="me-edit-tooltip" data-testid="drawer-edit-tooltip">
+                    opens the mask editor in a takeover view
+                  </span>
+                </>
+              )}
             </button>
           )}
         </div>

@@ -120,6 +120,9 @@ class JobIndexEntry(BaseModel):
     seq_no: int
     status: str
     updated_at: datetime
+    parent_hash_id: str | None = None
+    derivation_kind: str | None = None
+    model: str | None = None
 
 
 class JobIndexResponse(BaseModel):
@@ -140,6 +143,17 @@ class JobIndexResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # /api/jobs/<hash> and POST /api/jobs/details
 # ---------------------------------------------------------------------------
+
+
+class JobCost(BaseModel):
+    """Per-job cost detail surfaced in the compare view's right panel."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dollars: float | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    currency: str = "USD"
 
 
 class JobDetail(BaseModel):
@@ -183,6 +197,14 @@ class JobDetail(BaseModel):
 
     error: str | None = None
     flags: dict[str, Any] = Field(default_factory=dict)
+
+    # Derivation (mask edit / outpaint).
+    parent_hash_id: str | None = None
+    derivation_kind: str | None = None
+    derived_count: int | None = None
+
+    # USD cost / token usage.
+    cost: JobCost | None = None
 
 
 class JobDetailNotFound(BaseModel):
@@ -298,6 +320,7 @@ __all__ = (
     "JobSetSummary",
     "JobSessionSummary",
     "JobTiming",
+    "JobCost",
     "JobIndexEntry",
     "JobIndexResponse",
     "JobDetail",
@@ -309,4 +332,14 @@ __all__ = (
     "JobStatesResponse",
     "StarRequest",
     "StarResponse",
+    "DerivedJobsResponse",
 )
+
+
+class DerivedJobsResponse(BaseModel):
+    """Reply for ``GET /api/jobs/{hash}/derived``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[JobIndexEntry]
+    next_cursor: str | None = None
