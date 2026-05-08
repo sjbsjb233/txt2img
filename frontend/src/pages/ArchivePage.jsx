@@ -90,6 +90,18 @@ function fullTimestamp(iso) {
   )}:${pad(t.getMinutes())}:${pad(t.getSeconds())}`;
 }
 
+// Best-effort estimate of how many image cells a SET member is expected
+// to produce. Used so a RUNNING / FAILED member still occupies the right
+// number of slots in the contact-sheet layout. Falls back to 1 when the
+// row has neither image_count nor params.n nor any images yet.
+function expectedImagesForMember(row) {
+  if (row?.image_count && row.image_count > 0) return row.image_count;
+  if (Array.isArray(row?.images) && row.images.length > 0) return row.images.length;
+  const n = row?.params?.n ?? row?.params?.batch_size ?? row?.batch_size;
+  if (typeof n === "number" && n > 0) return n;
+  return 1;
+}
+
 function formatSeconds(s) {
   if (s == null) return null;
   if (s < 1) return `${Math.round(s * 1000)}ms`;
@@ -195,7 +207,7 @@ function SingleImageCard({ row, focused, onClick }) {
 // Right-side detail drawer
 // ---------------------------------------------------------------------------
 
-function JobDrawer({ row, onClose, onPrev, onNext, onOpenLightbox, width }) {
+function JobDrawer({ row, onClose, onPrev, onNext, onOpenLightbox, width, imageIndex = 0 }) {
   const open = !!row;
   const [render, setRender] = useState(false);
 
@@ -226,7 +238,9 @@ function JobDrawer({ row, onClose, onPrev, onNext, onOpenLightbox, width }) {
 
   if (!render && !open) return null;
   const it = row || {};
-  const img = it.images?.[0];
+  const imgs = it.images || [];
+  const safeIdx = Math.max(0, Math.min(imageIndex, imgs.length - 1));
+  const img = imgs[safeIdx] || imgs[0];
   const ratio = aspectFromImage(img);
   const shape = img ? `${ratio} · ${img.width}×${img.height}` : ratio;
   const sessionLabel = it.session?.name || "—";
@@ -605,6 +619,22 @@ export default function ArchivePage() {
   const [drawerHash, setDrawerHash] = useState(null);
   const [setDetailId, setSetDetailId] = useState(null);
   const [lightboxOpen, setLightboxOpen] = useState(false);
+  // SET detail: which panel (global index, 0-based) is selected.
+  // Persists after the drawer is dismissed so the panel stays highlighted.
+  const [setDetailPanelIdx, setSetDetailPanelIdx] = useState(null);
+  // SET detail: whether the right-side drawer is currently rendered.
+  // Decoupled from panel selection so ESC can dismiss drawer without
+  // losing focus, and a second ESC exits the detail view.
+  const [setDetailDrawerOpen, setSetDetailDrawerOpen] = useState(false);
+  // SET detail: 1-based page when panel count > pageSize.
+  const [setDetailPage, setSetDetailPage] = useState(1);
+
+  useEffect(() => {
+    // Reset panel + page state when entering / leaving a SET.
+    setSetDetailPanelIdx(null);
+    setSetDetailDrawerOpen(false);
+    setSetDetailPage(1);
+  }, [setDetailId]);
 
   // RUNNING cards need a per-second tick.
   const [, setRunTick] = useState(0);
@@ -656,7 +686,9 @@ export default function ArchivePage() {
     resetPagination();
   }, [filterSignature, sortKey, resetPagination]);
 
-  // Pre-fetch blob URLs for visible items only.
+  // Pre-fetch blob URLs for visible items only. When the SET detail
+  // is open we also prefetch every member of the focused SET so the
+  // panel grid hydrates as fast as the list grid does.
   const visibleThumbSources = useMemo(() => {
     const out = [];
     for (const it of visibleItems) {
@@ -671,8 +703,20 @@ export default function ArchivePage() {
         if (img) out.push(imageThumbUrl(it.row.hash_id, img.order));
       }
     }
+    if (setDetailId) {
+      const setItem = sortedItems.find(
+        (it) => it.kind === "set" && it.set_id === setDetailId
+      );
+      if (setItem) {
+        for (const m of setItem.members) {
+          for (const img of m.images || []) {
+            out.push(imageThumbUrl(m.hash_id, img.order));
+          }
+        }
+      }
+    }
     return out;
-  }, [visibleItems]);
+  }, [visibleItems, setDetailId, sortedItems]);
   const blobByUrl = useAuthorizedBlobUrls(visibleThumbSources);
 
   // Drawer + set detail navigation
@@ -741,6 +785,20 @@ export default function ArchivePage() {
   const filterTriggerRef = useRef(null);
   const sortTriggerRef = useRef(null);
 
+  // ESC handler for the SET detail page. JobDrawer already owns ESC
+  // while the drawer is open (it closes the drawer); this fires only
+  // when the drawer is closed and exits the detail view entirely.
+  useEffect(() => {
+    if (!setDetailId || setDetailDrawerOpen) return;
+    const onKey = (e) => {
+      if (e.key === "Escape") {
+        setSetDetailId(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [setDetailId, setDetailDrawerOpen]);
+
   // SET full-page detail
   if (setDetailId) {
     const setItem = sortedItems.find(
@@ -750,58 +808,166 @@ export default function ArchivePage() {
       setSetDetailId(null);
       return null;
     }
-    const allImages = setItem.members.flatMap((row) =>
-      (row.images || []).map((img) => ({
-        ...img,
-        _ownerHash: row.hash_id,
-        _ownerSeq: row.seq_no,
-      }))
-    );
+    // Expand SET into one panel per expected image. RUNNING / FAILED
+    // members emit placeholder panels so the grid mirrors the SET card.
+    const detailPanels = [];
+    for (const member of setItem.members) {
+      const expected = expectedImagesForMember(member);
+      if (member.status === "FAILED" || member.status === "CANCELLED") {
+        for (let k = 0; k < expected; k++) {
+          detailPanels.push({
+            ownerRow: member,
+            ownerImage: null,
+            title: `#${member.seq_no}`,
+            state: "fail",
+          });
+        }
+        continue;
+      }
+      if (member.status === "QUEUED" || member.status === "RUNNING") {
+        for (let k = 0; k < expected; k++) {
+          detailPanels.push({
+            ownerRow: member,
+            ownerImage: null,
+            title: `#${member.seq_no}`,
+            state: "running",
+          });
+        }
+        continue;
+      }
+      const imgs = member.images || [];
+      if (imgs.length === 0) {
+        for (let k = 0; k < expected; k++) {
+          detailPanels.push({
+            ownerRow: member,
+            ownerImage: null,
+            title: `#${member.seq_no}`,
+            state: "loading",
+          });
+        }
+        continue;
+      }
+      for (const img of imgs) {
+        const apiUrl = imageThumbUrl(member.hash_id, img.order);
+        const blob = blobByUrl[apiUrl];
+        detailPanels.push({
+          ownerRow: member,
+          ownerImage: img,
+          title: `#${member.seq_no}`,
+          starred: !!img.starred,
+          src: blob || apiUrl,
+          state: blob ? "done" : "loading",
+        });
+      }
+    }
     const firstRow = setItem.members[0];
+    const drawerPanel =
+      setDetailDrawerOpen && setDetailPanelIdx != null
+        ? detailPanels[setDetailPanelIdx] || null
+        : null;
+    const setDrawerRow = drawerPanel?.ownerRow
+      ? archiveStore.getRow(drawerPanel.ownerRow.hash_id) || drawerPanel.ownerRow
+      : null;
+    const setDrawerImageIndex = drawerPanel?.ownerImage
+      ? Math.max(
+          0,
+          (setDrawerRow?.images || []).findIndex(
+            (i) => i.order === drawerPanel.ownerImage.order
+          )
+        )
+      : 0;
+
+    const openPanelDrawer = (_, i) => {
+      setSetDetailPanelIdx(i);
+      setSetDetailDrawerOpen(true);
+      const targetPage = Math.floor(i / 12) + 1;
+      if (targetPage !== setDetailPage) setSetDetailPage(targetPage);
+    };
+    const closePanelDrawer = () => setSetDetailDrawerOpen(false);
+    const prevPanel = () => {
+      const cur = setDetailPanelIdx ?? 0;
+      const ni = Math.max(0, cur - 1);
+      setSetDetailPanelIdx(ni);
+      const tp = Math.floor(ni / 12) + 1;
+      if (tp !== setDetailPage) setSetDetailPage(tp);
+    };
+    const nextPanel = () => {
+      const cur = setDetailPanelIdx ?? -1;
+      const ni = Math.min(detailPanels.length - 1, cur + 1);
+      setSetDetailPanelIdx(ni);
+      const tp = Math.floor(ni / 12) + 1;
+      if (tp !== setDetailPage) setSetDetailPage(tp);
+    };
+
+    const focusedSubLabel =
+      setDetailDrawerOpen && setDetailPanelIdx != null
+        ? `panel ${String(setDetailPanelIdx + 1).padStart(2, "0")}`
+        : null;
+
     return (
       <div
         data-testid="archive-set-detail"
         style={{
           flex: 1,
-          overflowY: "auto",
+          overflow: "hidden",
           background: "var(--paper)",
-          padding: "32px 56px 60px",
+          display: "flex",
+          flexDirection: "column",
+          position: "relative",
         }}
       >
-        <ArchiveSetDetail
-          id={firstRow?.seq_no}
-          model={firstRow?.model_display_name || firstRow?.model}
-          age={`${relativeAge(firstRow?.updated_at)} ago`}
-          prompt={firstRow?.prompt || ""}
-          panelCount={allImages.length}
-          panels={allImages.map((img) => ({
-            src:
-              blobByUrl[imageThumbUrl(img._ownerHash, img.order)] ||
-              imageThumbUrl(img._ownerHash, img.order),
-            title: `#${img._ownerSeq}`,
-            starred: !!img.starred,
-          }))}
-          onBack={() => {
-            // Cleanup the URL session detail id; users return via close button.
-            setSetDetailId(null);
+        <div
+          data-testid="archive-set-detail-scroll"
+          style={{
+            flex: 1,
+            overflowY: "auto",
+            paddingRight: setDetailDrawerOpen ? drawerWidth : 0,
+            transition: "padding-right 360ms cubic-bezier(.22,.85,.22,1)",
+            willChange: "padding-right",
           }}
-        />
-        <div style={{ marginTop: 24 }}>
-          <button
-            data-testid="set-detail-close"
-            onClick={closeSetDetail}
-            style={{
-              padding: "8px 14px",
-              border: "1px solid var(--ink)",
-              background: "var(--card, #fffdf7)",
-              cursor: "pointer",
-              fontFamily: "var(--font-mono)",
-              fontSize: 12,
-            }}
-          >
-            close set
-          </button>
+        >
+          <div style={{ padding: "32px 56px 60px" }}>
+            <ArchiveSetDetail
+              id={firstRow?.seq_no}
+              model={firstRow?.model_display_name || firstRow?.model}
+              age={`${relativeAge(firstRow?.updated_at)} ago`}
+              prompt={firstRow?.prompt || ""}
+              panelCount={detailPanels.length}
+              panels={detailPanels}
+              focusedIndex={setDetailPanelIdx}
+              focusedSub={focusedSubLabel}
+              onPanelClick={openPanelDrawer}
+              page={setDetailPage}
+              pageSize={12}
+              onPageChange={(p) => setSetDetailPage(p)}
+              onBack={() => setSetDetailId(null)}
+            />
+            <div style={{ marginTop: 24 }}>
+              <button
+                data-testid="set-detail-close"
+                onClick={closeSetDetail}
+                style={{
+                  padding: "8px 14px",
+                  border: "1px solid var(--ink)",
+                  background: "var(--card, #fffdf7)",
+                  cursor: "pointer",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 12,
+                }}
+              >
+                close set
+              </button>
+            </div>
+          </div>
         </div>
+        <JobDrawer
+          row={setDrawerRow}
+          imageIndex={setDrawerImageIndex}
+          onClose={closePanelDrawer}
+          onPrev={prevPanel}
+          onNext={nextPanel}
+          width={drawerWidth}
+        />
       </div>
     );
   }
@@ -1084,12 +1250,35 @@ function PageSection({ page, totalPages, items, drawerHash, blobByUrl, onItemCli
       >
         {items.map((item) => {
           if (item.kind === "set") {
-            const images = item.members.flatMap((row) =>
-              (row.images || []).map((img) => {
-                const apiUrl = imageThumbUrl(row.hash_id, img.order);
-                return { src: blobByUrl[apiUrl] || undefined };
-              })
-            );
+            // Expand each member into one cell per expected image so the
+            // SET badge total and per-cell state stay correct even when
+            // members are still RUNNING / FAILED / blob-pending.
+            const cells = [];
+            for (const member of item.members) {
+              const expected = expectedImagesForMember(member);
+              if (member.status === "FAILED" || member.status === "CANCELLED") {
+                for (let k = 0; k < expected; k++) cells.push({ state: "fail" });
+                continue;
+              }
+              if (member.status === "QUEUED" || member.status === "RUNNING") {
+                for (let k = 0; k < expected; k++) cells.push({ state: "running" });
+                continue;
+              }
+              const imgs = member.images || [];
+              if (imgs.length === 0) {
+                for (let k = 0; k < expected; k++) cells.push({ state: "loading" });
+                continue;
+              }
+              for (const img of imgs) {
+                const apiUrl = imageThumbUrl(member.hash_id, img.order);
+                const blob = blobByUrl[apiUrl];
+                cells.push(
+                  blob
+                    ? { src: blob, state: "done" }
+                    : { state: "loading" }
+                );
+              }
+            }
             const stillRunning = item.members.some(
               (r) => r.status === "QUEUED" || r.status === "RUNNING"
             );
@@ -1097,6 +1286,7 @@ function PageSection({ page, totalPages, items, drawerHash, blobByUrl, onItemCli
               const t = Date.parse(r.updated_at || 0) || 0;
               return t > acc.t ? { row: r, t } : acc;
             }, { row: item.members[0], t: 0 });
+            const expectedTotal = cells.length || item.members.length;
             return (
               <div
                 data-testid={`card-set-${item.set_id}`}
@@ -1107,8 +1297,8 @@ function PageSection({ page, totalPages, items, drawerHash, blobByUrl, onItemCli
                   id={newest.row.seq_no}
                   model={shortModel(newest.row.model)}
                   age={relativeAge(newest.row.updated_at)}
-                  images={images.length > 0 ? images : item.members.map(() => ({}))}
-                  totalCount={images.length || item.members.length}
+                  images={cells}
+                  totalCount={expectedTotal}
                   running={stillRunning}
                   onClick={() => onItemClick(item)}
                 />

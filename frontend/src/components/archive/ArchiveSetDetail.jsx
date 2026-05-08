@@ -1,3 +1,5 @@
+import PaginationPager from "./PaginationPager.jsx";
+
 /**
  * ArchiveSetDetail
  * ------------------------------------------------------------------
@@ -14,31 +16,18 @@
  *   model        模型名 (如 "gpt-image-2")
  *   age          相对时间 (如 "2m ago")
  *   panelCount   面板总数；不传则用 panels.length
- *   prompt       prompt 主体；可传字符串或 React 节点。如果传字符串，
- *                组件会自动把 "01." / "02." 等子提示标记包成 <b> 高亮。
- *   panels       Array<{ src?, bg?, title?, starred? }>
- *                每张图一个 panel，title 是 panel 下方说明字
+ *   prompt       prompt 主体；可传字符串或 React 节点。
+ *   panels       Array<{ src?, bg?, title?, starred?, state? }>
+ *                每张图一个 panel；state 用法同 ArchiveSetCard:
+ *                  done | loading | running | fail
+ *   onPanelClick (panel, globalIndex) => void  — 点击 panel 时触发
+ *   focusedIndex 当前聚焦 panel 的全局 index（用于在抽屉中导航时高亮）
+ *   focusedSub   面包屑中显示的小标签（如 `panel 02`），抽屉关闭时传 null
  *   onBack       返回归档主页回调（点击面包屑左侧）
+ *   pageSize     P3 — 单页 panel 数；超过此阈值时显示分页器（默认 12）
+ *   page         当前页码（1-based）；不传则不分页
+ *   onPageChange (nextPage) => void
  *   className    额外 className
- *
- * 示例:
- *   <ArchiveSetDetail
- *     id={1427}
- *     model="gpt-image-2"
- *     age="2m ago"
- *     prompt={`A four-panel storyboard of a coffee shop opening day —
- *       01. empty interior at dawn, warm yellow tones.
- *       02. close-up of barista grinding beans, terracotta.
- *       03. forest light through the window, deep green.
- *       04. packed cafe at peak hour, cobalt rush.`}
- *     panels={[
- *       { src: u1, title: "dawn interior", starred: true },
- *       { src: u2, title: "barista close-up" },
- *       { src: u3, title: "morning light" },
- *       { src: u4, title: "peak hour" },
- *     ]}
- *     onBack={() => navigate("/archive")}
- *   />
  */
 export default function ArchiveSetDetail({
   id,
@@ -47,10 +36,22 @@ export default function ArchiveSetDetail({
   panelCount,
   prompt,
   panels = [],
+  onPanelClick,
+  focusedIndex = null,
+  focusedSub = null,
   onBack,
   className = "",
+  pageSize = 12,
+  page = null,
+  onPageChange,
 }) {
   const total = panelCount ?? panels.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const isPaged = page != null && total > pageSize;
+  const safePage = isPaged ? Math.min(Math.max(1, page), totalPages) : 1;
+  const start = isPaged ? (safePage - 1) * pageSize : 0;
+  const end = isPaged ? Math.min(start + pageSize, total) : panels.length;
+  const visible = isPaged ? panels.slice(start, end) : panels;
 
   return (
     <div className={`arch-detail-frame ${className}`.trim()}>
@@ -67,9 +68,25 @@ export default function ArchiveSetDetail({
           </a>
           <span className="arch-sep">/</span>
           <span className="arch-here">SET #{id}</span>
+          {focusedSub ? (
+            <>
+              <span className="arch-sep">/</span>
+              <span className="arch-here">{focusedSub}</span>
+            </>
+          ) : null}
         </div>
-        <div>
-          {model} · {total} panels{age ? ` · ${age}` : ""}
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span>
+            {model} · {total} panels{age ? ` · ${age}` : ""}
+          </span>
+          {isPaged && (
+            <PaginationPager
+              current={safePage}
+              total={totalPages}
+              onPrev={() => onPageChange?.(Math.max(1, safePage - 1))}
+              onNext={() => onPageChange?.(Math.min(totalPages, safePage + 1))}
+            />
+          )}
         </div>
       </div>
 
@@ -79,8 +96,10 @@ export default function ArchiveSetDetail({
       </div>
 
       <div className="arch-panels">
-        {panels.map((p, i) => {
-          const picStyle = p?.src
+        {visible.map((p, localIdx) => {
+          const i = start + localIdx;
+          const cellState = p?.state || "done";
+          const picStyle = p?.src && cellState === "done"
             ? {
                 backgroundImage: `url(${p.src})`,
                 backgroundSize: "cover",
@@ -89,12 +108,37 @@ export default function ArchiveSetDetail({
             : p?.bg
             ? { background: p.bg }
             : undefined;
+          const focusedClass = i === focusedIndex ? "arch-panel-focused" : "";
+          const interactive = !!onPanelClick && cellState !== "fail";
+          const handleClick = interactive
+            ? () => onPanelClick(p, i)
+            : undefined;
+          const stateClass =
+            cellState === "fail" ? "arch-cell-fail" :
+            cellState === "running" || cellState === "loading" ? "arch-cell-running" :
+            "";
           return (
-            <div key={i} className="arch-panel">
-              <div className="arch-pic" style={picStyle}>
+            <div
+              key={i}
+              data-testid={`set-detail-panel-${i}`}
+              data-panel-state={cellState}
+              className={`arch-panel ${focusedClass}`.trim()}
+              onClick={handleClick}
+              style={interactive ? { cursor: "pointer" } : undefined}
+            >
+              <div
+                className={`arch-pic ${stateClass}`.trim()}
+                style={picStyle}
+              >
                 <div className="arch-panel-num">
                   {String(i + 1).padStart(2, "0")}
                 </div>
+                {cellState === "fail" && (
+                  <div className="arch-cell-corner">!</div>
+                )}
+                {(cellState === "running" || cellState === "loading") && (
+                  <span className="arch-spin" />
+                )}
               </div>
               <div className="arch-pmeta">
                 <span>{p?.title || ""}</span>
