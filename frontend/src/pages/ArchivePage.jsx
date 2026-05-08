@@ -630,10 +630,11 @@ export default function ArchivePage() {
   const [setDetailPage, setSetDetailPage] = useState(1);
 
   useEffect(() => {
-    // Reset panel + page state when entering / leaving a SET.
+    // Reset panel + page + lightbox state when entering / leaving a SET.
     setSetDetailPanelIdx(null);
     setSetDetailDrawerOpen(false);
     setSetDetailPage(1);
+    setLightboxOpen(false);
   }, [setDetailId]);
 
   // RUNNING cards need a per-second tick.
@@ -966,7 +967,19 @@ export default function ArchivePage() {
           onClose={closePanelDrawer}
           onPrev={prevPanel}
           onNext={nextPanel}
+          onOpenLightbox={() => setLightboxOpen(true)}
           width={drawerWidth}
+        />
+
+        <Lightbox
+          open={lightboxOpen && !!setDrawerRow}
+          row={setDrawerRow}
+          imageIndex={setDrawerImageIndex}
+          position={setDetailPanelIdx != null ? setDetailPanelIdx + 1 : null}
+          total={detailPanels.length || null}
+          onClose={() => setLightboxOpen(false)}
+          onPrev={prevPanel}
+          onNext={nextPanel}
         />
       </div>
     );
