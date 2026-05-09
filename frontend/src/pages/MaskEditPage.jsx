@@ -27,6 +27,10 @@ import {
   applyContract, applySmooth,
 } from "../components/maskeditor/ops/maskOps.js";
 import { exportMaskPng, countMaskPaintedPixels, maskPaintedRatio } from "../components/maskeditor/utils/maskExport.js";
+import { useAuth } from "../store/auth.js";
+import { useMaskDraftAutosave } from "../hooks/useMaskDraftAutosave.js";
+import * as maskDraftDB from "../storage/maskDraftDB.js";
+import DraftToast from "../components/DraftToast.jsx";
 
 const MIN_MASK_PIXELS = 100;
 const MAX_MASK_RATIO = 0.95;
@@ -53,6 +57,8 @@ export default function MaskEditPage() {
   const { hashId, order } = useParams();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const userId = user?.id || null;
 
   const [sourceJob, setSourceJob] = useState(null);
   const [sourceImage, setSourceImage] = useState(null); // ImageBitmap
@@ -90,6 +96,15 @@ export default function MaskEditPage() {
   const historyStackRef = useRef(null);
   const canvasStageRef = useRef(null);
   const hudTimerRef = useRef(null);
+
+  // Holds a draft record while we wait for the mask canvas to mount,
+  // so the restoration sequence works regardless of which arrives
+  // first: the IDB read (driven by the hook) or the canvas onReady
+  // event (driven by image load).
+  const pendingRestoreRef = useRef(null);
+  // Status-bar message for non-fatal restore notes ("mask sized
+  // changed, restored text only" etc).
+  const [restoreNote, setRestoreNote] = useState(null);
 
   function showHud(text) {
     setHud(text);
@@ -137,24 +152,158 @@ export default function MaskEditPage() {
         setSourceImageUrl(URL.createObjectURL(blob));
       } catch (e) {
         console.error("Failed to load source:", e);
+        // Source job is gone — drop any orphan draft so the user
+        // doesn't see a phantom "resume" entry pointing to nothing.
+        if (userId) {
+          const orphanMode = searchParams.get("mode") === "outpaint" ? "outpaint" : "inpaint";
+          const orphanId = maskDraftDB.makeDraftId(hashId, order, orphanMode);
+          maskDraftDB.deleteDraft(userId, orphanId).catch(() => {});
+        }
         alert(`Could not open editor: ${e.message || e}`);
         navigate("/archive");
       }
     })();
     return () => { cancelled = true; };
-  }, [hashId, order, navigate]);
+  }, [hashId, order, navigate, userId, searchParams]);
 
-  // Initialise history stack once mask canvas is available.
+  // Apply a pending restore record to the mask canvas. Returns true
+  // when the mask blob was painted, false otherwise (no blob,
+  // dimension mismatch, or paint failed).
+  async function applyMaskBlobToCanvas(canvas, record) {
+    if (!canvas || !record || !record.mask_blob) return false;
+    if (
+      record.mask_w &&
+      record.mask_h &&
+      (record.mask_w !== canvas.width || record.mask_h !== canvas.height)
+    ) {
+      // Source size changed (job re-rendered, model swapped output).
+      // Don't paint a wrong-sized mask; let the page surface a note.
+      return false;
+    }
+    try {
+      const bmp = await createImageBitmap(record.mask_blob);
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(bmp, 0, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Initialise history stack once mask canvas is available, and
+  // replay any pending mask restoration.
   const onCanvasReady = useCallback(({ sourceCanvas, maskCanvas }) => {
     setSourceCanvasRef(sourceCanvas);
     setMaskCanvasRef(maskCanvas);
     if (!historyStackRef.current && maskCanvas) {
-      const ctx = maskCanvas.getContext("2d");
-      const snap = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
-      historyStackRef.current = createHistoryStack(snap, { kind: "init", label: "open source" });
-      setHistory(historyStackRef.current.getList());
+      const pending = pendingRestoreRef.current;
+      pendingRestoreRef.current = null;
+      const finishInit = () => {
+        const ctx = maskCanvas.getContext("2d");
+        const snap = ctx.getImageData(0, 0, maskCanvas.width, maskCanvas.height);
+        historyStackRef.current = createHistoryStack(snap, {
+          kind: pending && pending.has_paint ? "restore" : "init",
+          label: pending && pending.has_paint ? "restored draft" : "open source",
+        });
+        setHistory(historyStackRef.current.getList());
+      };
+      if (pending && pending.mask_blob) {
+        applyMaskBlobToCanvas(maskCanvas, pending).then((painted) => {
+          if (!painted && pending.has_paint) {
+            setRestoreNote("mask size changed — restored prompt + settings only");
+          }
+          finishInit();
+        });
+      } else {
+        finishInit();
+      }
     }
   }, []);
+
+  // ── Draft autosave ──────────────────────────────────────────────────
+  const draftMode = outpaintMode ? "outpaint" : "inpaint";
+  const onRestoreDraft = useCallback(
+    (record) => {
+      if (!record) return;
+      // Source identity changed (job re-rendered to a different model)
+      // — keep the text, drop the mask.
+      const modelChanged =
+        record.source_model && sourceJob?.model && record.source_model !== sourceJob.model;
+      if (modelChanged) {
+        setRestoreNote("source model changed — restored prompt + settings only");
+      }
+      if (typeof record.prompt === "string") setPrompt(record.prompt);
+      if (typeof record.negative === "string") setNegative(record.negative);
+      if (record.brush_opts && typeof record.brush_opts === "object") {
+        setBrushOpts((b) => ({ ...b, ...record.brush_opts }));
+      }
+      if (record.advanced && typeof record.advanced === "object") {
+        setAdvanced((a) => ({ ...a, ...record.advanced }));
+      }
+      if (record.outpaint && typeof record.outpaint === "object") {
+        setOutpaint((o) => ({ ...o, ...record.outpaint }));
+      }
+      if (Array.isArray(record.refs) && record.refs.length > 0) {
+        const restoredRefs = record.refs
+          .filter((f) => f instanceof Blob)
+          .map((file) => ({
+            file,
+            name: file.name || "ref",
+            url: URL.createObjectURL(file),
+          }));
+        if (restoredRefs.length > 0) setRefs(restoredRefs);
+      }
+      if (record.active_tool) setTool(record.active_tool);
+      if (record.active_tab) setTab(record.active_tab);
+      // The canvas may not be mounted yet — stash the record so
+      // onCanvasReady can paint the mask blob.
+      if (!modelChanged && record.has_paint && record.mask_blob) {
+        if (maskCanvasRef) {
+          // Already mounted: paint immediately and reseed history.
+          applyMaskBlobToCanvas(maskCanvasRef, record).then((painted) => {
+            if (!painted) {
+              setRestoreNote("mask size changed — restored prompt + settings only");
+              return;
+            }
+            const ctx = maskCanvasRef.getContext("2d");
+            const snap = ctx.getImageData(0, 0, maskCanvasRef.width, maskCanvasRef.height);
+            historyStackRef.current = createHistoryStack(snap, {
+              kind: "restore",
+              label: "restored draft",
+            });
+            setHistory(historyStackRef.current.getList());
+          });
+        } else {
+          pendingRestoreRef.current = record;
+        }
+      }
+    },
+    [maskCanvasRef, sourceJob]
+  );
+
+  const { toast: draftToast, clearDraft, markCanvasDirty } = useMaskDraftAutosave({
+    userId,
+    hashId,
+    order,
+    mode: draftMode,
+    enabled: !!sourceImage && !!userId,
+    prompt,
+    negative,
+    refs,
+    brushOpts,
+    advanced,
+    outpaint,
+    outpaintMode,
+    activeTool: tool,
+    activeTab: tab,
+    maskCanvas: maskCanvasRef,
+    sourceJob,
+    status,
+    imageW,
+    imageH,
+    onRestore: onRestoreDraft,
+  });
 
   function captureSnapshot(meta) {
     if (!historyStackRef.current || !maskCanvasRef) return;
@@ -162,6 +311,7 @@ export default function MaskEditPage() {
     const snap = ctx.getImageData(0, 0, maskCanvasRef.width, maskCanvasRef.height);
     historyStackRef.current.push(snap, meta);
     setHistory(historyStackRef.current.getList());
+    markCanvasDirty();
   }
 
   function applyOp(opId, value) {
@@ -188,6 +338,7 @@ export default function MaskEditPage() {
     const ctx = maskCanvasRef.getContext("2d");
     ctx.putImageData(step.snapshot, 0, 0);
     setHistory(historyStackRef.current.getList());
+    markCanvasDirty();
   }
   function undo() {
     if (!historyStackRef.current || !maskCanvasRef) return;
@@ -196,6 +347,7 @@ export default function MaskEditPage() {
     const ctx = maskCanvasRef.getContext("2d");
     ctx.putImageData(step.snapshot, 0, 0);
     setHistory(historyStackRef.current.getList());
+    markCanvasDirty();
   }
   function redo() {
     if (!historyStackRef.current || !maskCanvasRef) return;
@@ -204,6 +356,7 @@ export default function MaskEditPage() {
     const ctx = maskCanvasRef.getContext("2d");
     ctx.putImageData(step.snapshot, 0, 0);
     setHistory(historyStackRef.current.getList());
+    markCanvasDirty();
   }
 
   // Refs management
@@ -305,6 +458,9 @@ export default function MaskEditPage() {
         setStatus("done");
         setStatusHint(`completed · #${done.seq_no}`);
         setResultJob(done);
+        // Submit succeeded → the work is on the server now, no need
+        // to keep the local draft around.
+        clearDraft({ silent: true }).catch(() => {});
         const firstImg = (done.images || [])[0];
         if (firstImg) {
           const blob = await fetchImageBlob(imageOriginalUrl(done.hash_id, firstImg.order));
@@ -444,8 +600,22 @@ export default function MaskEditPage() {
           status
         }
         canSubmit={canSubmit}
-        onBack={() => navigate("/archive")}
+        onBack={() => {
+          // Only nag the user when there is something they could lose.
+          const dirty =
+            (maskCanvasRef && countMaskPaintedPixels(maskCanvasRef) > 0) ||
+            !!prompt.trim() ||
+            refs.length > 0;
+          if (dirty && status !== "done") {
+            const ok = window.confirm(
+              "放弃这次未提交的 mask edit 吗？草稿会被清除，无法恢复。"
+            );
+            if (!ok) return;
+          }
+          clearDraft({ silent: true }).finally(() => navigate("/archive"));
+        }}
         onSubmit={onSubmit}
+        draftToast={draftToast}
       />
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
         <Toolbar
@@ -551,7 +721,7 @@ export default function MaskEditPage() {
         dim={`${imageW}×${imageH}`}
         cursor={`(${cursorXY.x}, ${cursorXY.y})`}
         brush={Math.round(brushOpts.size)}
-        hint={validationMessage || statusHint}
+        hint={restoreNote || validationMessage || statusHint}
         onHelp={() => setShowCheat(true)}
       />
       {validationMessage && !showingCompare && (

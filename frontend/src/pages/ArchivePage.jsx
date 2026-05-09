@@ -56,6 +56,7 @@ import ChipStrip, { FilterTrigger } from "../components/archive/ChipStrip.jsx";
 import PaginationPager from "../components/archive/PaginationPager.jsx";
 import PullMembrane from "../components/archive/PullMembrane.jsx";
 import ArchiveNoMatches from "../components/archive/ArchiveNoMatches.jsx";
+import ResumeBanner from "../components/archive/ResumeBanner.jsx";
 import useArchivePagination from "../hooks/useArchivePagination.js";
 
 // ---------------------------------------------------------------------------
@@ -1064,6 +1065,8 @@ export default function ArchivePage() {
               }
             </h1>
           </div>
+
+          <ResumeBanner userId={userId} />
 
           {/* Toolbar */}
           <div

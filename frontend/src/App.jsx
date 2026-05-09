@@ -24,6 +24,7 @@ import * as archiveStore from "./store/archive.js";
 import * as batchStore from "./store/batch.js";
 import * as preferencesStore from "./store/preferences.js";
 import * as sseStoreModule from "./store/sse.js";
+import * as maskDraftDB from "./storage/maskDraftDB.js";
 
 export default function App() {
   const { isAuthenticated, user } = useAuth();
@@ -52,6 +53,9 @@ export default function App() {
   useEffect(() => {
     if (isAuthenticated && user?.id) {
       void archiveStore.mount(user.id);
+      // Cheap one-shot prune of stale mask drafts (TTL + LRU). Doesn't
+      // need to block anything; failures are silently ignored.
+      maskDraftDB.prune(user.id).catch(() => {});
     } else {
       archiveStore.unmount();
     }
