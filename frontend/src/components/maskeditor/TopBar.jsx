@@ -1,4 +1,5 @@
 import MEIcon from "./MEIcon.jsx";
+import DraftToast from "../DraftToast.jsx";
 
 const STATUS_TEXT = {
   idle: "ready · ⌘↵",
@@ -25,6 +26,7 @@ export default function TopBar({
   canSubmit = true,
   onBack,
   onSubmit,
+  draftToast = null,
 }) {
   return (
     <div className="me-topbar" data-testid="me-topbar">
@@ -55,6 +57,7 @@ export default function TopBar({
           {STATUS_TEXT[status] || status}
         </span>
       </div>
+      <DraftToast value={draftToast} />
       <button
         className="me-topbar__submit"
         disabled={!canSubmit}
