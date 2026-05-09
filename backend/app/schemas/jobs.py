@@ -33,6 +33,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 # shape so a malformed value doesn't propagate further.
 _MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$")
 _SESSION_ID_RE = re.compile(r"^sess_[A-Za-z0-9]{10}$")
+_BATCH_ID_RE = re.compile(r"^bat_[A-Za-z0-9]{10}$")
+_SET_ID_RE = re.compile(r"^set_[A-Za-z0-9]{10}$")
 _CLIENT_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 # Public hash id format (from new_job_hash_id).
 _HASH_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
@@ -120,6 +122,15 @@ class JobCreatePayload(BaseModel):
     session_id: str | None = None
     client_request_id: str | None = None
     captcha_token: str | None = Field(default=None, min_length=1, max_length=4096)
+
+    # Batch binding (frontend / backend doc v0.3). When the caller is
+    # submitting a job as part of a registered batch, it passes the
+    # parent ``bat_<10char>`` here; the route handler binds the new
+    # ``jobs`` row to it inside the same transaction. ``set_id`` is
+    # also accepted top-level so a multi-image slot can reuse a
+    # frontend-allocated set across slot.image_count siblings.
+    batch_id: str | None = None
+    set_id: str | None = None
 
     # gpt-image-2 fields.
     size: str | None = Field(default=None, max_length=64)
@@ -237,6 +248,24 @@ class JobCreatePayload(BaseModel):
             raise ValueError("client_request_id must be 1..64 chars [A-Za-z0-9_-]")
         return v
 
+    @field_validator("batch_id")
+    @classmethod
+    def _validate_batch_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not _BATCH_ID_RE.match(v):
+            raise ValueError("batch_id must match ^bat_[A-Za-z0-9]{10}$")
+        return v
+
+    @field_validator("set_id")
+    @classmethod
+    def _validate_set_id_field(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not _SET_ID_RE.match(v):
+            raise ValueError("set_id must match ^set_[A-Za-z0-9]{10}$")
+        return v
+
     def to_normalized_dict(self) -> dict[str, Any]:
         """Return the params dict the executor's NormalizedRequest expects.
 
@@ -254,6 +283,8 @@ class JobCreatePayload(BaseModel):
             "derivation_kind",
             "outpaint_directions",
             "outpaint_amount",
+            "batch_id",
+            "set_id",
         ):
             out.pop(k, None)
         return out
@@ -275,6 +306,7 @@ class JobCreateResponse(BaseModel):
     client_request_id: str | None = None
     parent_hash_id: str | None = None
     derivation_kind: str | None = None
+    batch_id: str | None = None
 
 
 # ---------------------------------------------------------------------------

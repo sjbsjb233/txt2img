@@ -247,6 +247,11 @@ class Job(Base):
     seq_no: Mapped[int] = mapped_column(Integer, nullable=False)
     set_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Optional reference to a ``batches`` row when the job was submitted
+    # as part of a batch (frontend / backend v0.3 docs). ``NULL`` for
+    # ordinary single-job creates. No SQL FK — application layer is the
+    # authoritative gate, mirroring ``set_id`` / ``session_id``.
+    batch_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     model: Mapped[str] = mapped_column(Text, nullable=False)
     params_json: Mapped[str] = mapped_column(Text, nullable=False)
@@ -301,6 +306,7 @@ class Job(Base):
         Index("idx_jobs_status_created", "status", "created_at"),
         Index("idx_jobs_set", "set_id"),
         Index("idx_jobs_parent_hash_id", "parent_hash_id"),
+        Index("idx_jobs_batch", "batch_id"),
     )
 
 
@@ -413,6 +419,65 @@ class SessionJob(Base):
 
     __table_args__ = (
         PrimaryKeyConstraint("session_id", "job_id", name="pk_session_jobs"),
+    )
+
+
+class Batch(Base):
+    """One submission grouping (frontend / backend doc v0.3).
+
+    Server-side truth for "is the user still in flight?": the row is the
+    single source for status / counters, and SSE ``batch_progress`` events
+    are derived from it. Job rows reference this row through
+    :attr:`Job.batch_id`. The status machine (see
+    :mod:`app.domain.batch_service`) lives in the application layer; the
+    DB CHECK constraint mirrors the allowed names so a stray UPDATE can
+    never push the row into an invalid state.
+    """
+
+    __tablename__ = "batches"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("users.id"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    spec_json: Mapped[str] = mapped_column(Text, nullable=False)
+    total_job_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    submitted_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    succeeded_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    failed_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    cancelled_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    last_activity_at: Mapped[datetime] = mapped_column(nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        nullable=False, server_default=text("CURRENT_TIMESTAMP")
+    )
+    finalized_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('submitting','running','completed','partial','cancelled','abandoned')",
+            name="ck_batches_status",
+        ),
+        Index("idx_batches_user_status", "user_id", "status"),
+        Index("idx_batches_user_updated", "user_id", "updated_at"),
+        Index(
+            "idx_batches_watchdog",
+            "status",
+            "last_activity_at",
+            sqlite_where=text("status = 'submitting'"),
+        ),
     )
 
 

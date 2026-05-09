@@ -8,6 +8,7 @@ import { usePreferences } from "../store/preferences.js";
 const NAV = [
   { id: "dashboard", label: "Dashboard", icon: "chart", path: "/dashboard" },
   { id: "create", label: "Create", icon: "spark", path: "/create" },
+  { id: "batch", label: "Batch", icon: "layers", path: "/batch" },
   { id: "picker", label: "Picker", icon: "star", path: "/picker" },
   { id: "history", label: "Archive", icon: "archive", path: "/archive" },
 ];

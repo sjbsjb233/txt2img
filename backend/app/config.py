@@ -67,6 +67,21 @@ class Settings(BaseSettings):
     SSE_HEARTBEAT_SECONDS: int = Field(default=15, ge=1, le=300)
     SSE_MAX_CONNECTIONS_PER_USER: int = Field(default=4, ge=1, le=64)
 
+    # ===== Batch (frontend / backend doc v0.3) =====
+    # Per-submit fan-out parallelism the frontend uses inside one batch.
+    BATCH_CONCURRENCY_MAX: int = Field(default=4, ge=1, le=32)
+    # Hard ceiling on the user's simultaneous non-terminal batches.
+    BATCH_MAX_CONCURRENT_PER_USER: int = Field(default=3, ge=1, le=16)
+    # Slot / image guards for ``POST /api/batches`` shape validation.
+    BATCH_SLOTS_MAX: int = Field(default=50, ge=1, le=200)
+    BATCH_SLOT_IMAGE_COUNT_MAX: int = Field(default=16, ge=1, le=64)
+    BATCH_TOTAL_IMAGES_MAX: int = Field(default=400, ge=1, le=4000)
+    # Watchdog: a ``submitting`` batch with no Job-bind activity for
+    # this many seconds is flipped to ``abandoned`` automatically.
+    BATCH_ABANDONED_AFTER_SECONDS: int = Field(default=60, ge=10, le=3600)
+    BATCH_WATCHDOG_INTERVAL_SECONDS: int = Field(default=5, ge=1, le=60)
+    BATCH_WATCHDOG_ENABLED: bool = True
+
     @field_validator("JWT_SECRET")
     @classmethod
     def _jwt_secret_long_enough(cls, v: str) -> str:

@@ -59,6 +59,7 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
     from app.db import engine as db_engine
     from app.db.migrate import upgrade_to_head
     from app.domain.access_policy import reset_access_policy_for_tests
+    from app.domain.batch_service import reset_batch_progress_emitter_for_tests
     from app.domain.circuit_breaker import reset_circuit_breaker_for_tests
     from app.domain.config_center import reset_config_center_for_tests
     from app.domain.job_executor import reset_job_executor_for_tests
@@ -85,6 +86,7 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
     reset_job_scheduler_for_tests()
     reset_soft_penalty_for_tests()
     reset_sse_hub_for_tests()
+    reset_batch_progress_emitter_for_tests()
 
     upgrade_to_head()
     db_engine.init_engine()
@@ -104,6 +106,7 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
         reset_job_scheduler_for_tests()
         reset_soft_penalty_for_tests()
         reset_sse_hub_for_tests()
+        reset_batch_progress_emitter_for_tests()
 
 
 @pytest_asyncio.fixture
@@ -125,6 +128,7 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
 
     from app.config import get_settings
     from app.domain.access_policy import reset_access_policy_for_tests
+    from app.domain.batch_service import reset_batch_progress_emitter_for_tests
     from app.domain.circuit_breaker import reset_circuit_breaker_for_tests
     from app.domain.config_center import reset_config_center_for_tests
     from app.domain.job_executor import reset_job_executor_for_tests
@@ -150,6 +154,7 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
     reset_job_scheduler_for_tests()
     reset_soft_penalty_for_tests()
     reset_sse_hub_for_tests()
+    reset_batch_progress_emitter_for_tests()
 
     # Import here so env vars are already in place before Settings is
     # instantiated by anything down the import graph.
@@ -177,3 +182,4 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
     reset_job_scheduler_for_tests()
     reset_soft_penalty_for_tests()
     reset_sse_hub_for_tests()
+    reset_batch_progress_emitter_for_tests()

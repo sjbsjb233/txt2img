@@ -52,7 +52,7 @@ from app.db.jobs_repository import (
     get_jobs_repository,
     serialise_params,
 )
-from app.db.models import Job, Session as SessionRow, SessionJob
+from app.db.models import Batch, Job, Session as SessionRow, SessionJob
 from app.deps import CurrentUser
 from app.domain.access_policy import AccessDecision, get_access_policy
 from app.domain.job_lifecycle import (
@@ -326,7 +326,16 @@ async def create_job(
     # NO_PROVIDER_AVAILABLE / system-side paths only).
     await get_quota_guard().record_usage(user)
 
-    set_id = new_set_id() if body.n > 1 else None
+    # ``set_id`` allocation policy:
+    # - Frontend (batch flow) may pre-allocate a ``set_<10>`` and pass
+    #   it down so multiple sibling jobs share it. We accept that
+    #   verbatim if the format checks out (regex via the schema).
+    # - Otherwise, the legacy rule kicks in: assign a new id when n > 1,
+    #   leave NULL for single-image jobs.
+    if body.set_id is not None:
+        set_id = body.set_id
+    else:
+        set_id = new_set_id() if body.n > 1 else None
 
     flags = _build_flags(decision, captcha_verified=captcha_verified)
     params = body.to_normalized_dict()
@@ -370,6 +379,8 @@ async def create_job(
 
     try:
         async with get_session() as session:
+            if body.batch_id is not None:
+                await _bind_to_batch(body.batch_id, user.id, session)
             created = await repo.insert_queued(
                 user_id=user.id,
                 tier_at_submit=user.tier,
@@ -385,6 +396,7 @@ async def create_job(
                     if body.derivation_kind is not None
                     else None
                 ),
+                batch_id=body.batch_id,
                 session=session,
             )
             # Persist the prompt on the row itself (params already has
@@ -501,10 +513,13 @@ async def create_job(
             if body.derivation_kind is not None
             else None
         ),
+        batch_id=body.batch_id,
     )
 
     # Best-effort: tell every other tab the user has open.
     asyncio.create_task(_broadcast_task_created(user.id, response))
+    if body.batch_id is not None:
+        asyncio.create_task(_emit_batch_progress_after_bind(body.batch_id))
 
     return response
 
@@ -1157,6 +1172,110 @@ async def _broadcast_task_deleted(user_id: str, hash_id: str) -> None:
 def _isoformat(value: datetime) -> str:
     aware = _aware_utc(value)
     return aware.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+async def _bind_to_batch(
+    batch_id: str, user_id: str, session
+) -> None:
+    """Validate + atomically claim a slot in the parent batch.
+
+    Errors:
+
+    - 422 ``INVALID_PARAMETER`` (batch_id) — wrong shape, missing,
+      foreign-owned (we do not differentiate to avoid leaking
+      existence).
+    - 409 ``BATCH_INVALID_STATE`` — batch is not in ``submitting``.
+    - 422 ``BATCH_FULL`` — already at ``total_job_count``.
+
+    Implementation note: under burst load (e.g. four sibling jobs from
+    the same set fanning out concurrently), an ORM-style read-modify-
+    write would race because SQLite silently drops ``with_for_update``.
+    The slot claim is therefore expressed as a single conditional
+    ``UPDATE … SET submitted_count = submitted_count + 1
+       WHERE id = :id AND user_id = :uid AND status = 'submitting'
+       AND submitted_count < total_job_count``.
+    The rowcount tells us whether we won the slot; if not we re-read to
+    decide which precise error to surface.
+    """
+    now = datetime.now(timezone.utc)
+    result = await session.execute(
+        update(Batch)
+        .where(
+            Batch.id == batch_id,
+            Batch.user_id == user_id,
+            Batch.status == "submitting",
+            Batch.submitted_count < Batch.total_job_count,
+        )
+        .values(
+            submitted_count=Batch.submitted_count + 1,
+            last_activity_at=now,
+            updated_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount == 1:
+        return
+    # The atomic claim missed — figure out why so we can return the
+    # correct error code (existence / state / full) without leaking
+    # cross-tenant info.
+    row = (
+        await session.execute(
+            select(Batch).where(Batch.id == batch_id)
+        )
+    ).scalar_one_or_none()
+    if row is None or row.user_id != user_id:
+        raise api_error(
+            422,
+            "INVALID_PARAMETER",
+            "batch_id is invalid or not owned by the caller.",
+            field="batch_id",
+        )
+    if row.status != "submitting":
+        raise api_error(
+            409,
+            "BATCH_INVALID_STATE",
+            f"batch is in status {row.status}; cannot bind new jobs.",
+            field="batch_id",
+        )
+    raise api_error(
+        422,
+        "BATCH_FULL",
+        "batch is already at total_job_count; cannot bind more jobs.",
+        field="batch_id",
+    )
+
+
+async def _emit_batch_progress_after_bind(batch_id: str) -> None:
+    """Best-effort SSE notify after a Job-bind transaction commits.
+
+    The transaction owner releases its lock on commit; we open a fresh
+    short-lived session, read the latest counters, and hand them to the
+    debounced emitter. The emitter coalesces rapid bursts so the SSE
+    fanout is one event regardless of how many ``POST /api/jobs`` calls
+    happened in the same tick.
+    """
+    try:
+        from app.domain.batch_service import (
+            _snapshot_for_event,
+            get_batch_progress_emitter,
+        )
+
+        async with get_session() as session:
+            row = (
+                await session.execute(
+                    select(Batch).where(Batch.id == batch_id)
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return
+            payload = _snapshot_for_event(row, in_flight_count=None)
+        await get_batch_progress_emitter().publish(
+            row.id, row.user_id, payload
+        )
+    except Exception:  # pragma: no cover — best effort
+        logger.exception(
+            "post-bind batch_progress emission failed batch=%s", batch_id
+        )
 
 
 # Reserved by the dedup logic — silence unused-import lint when the

@@ -480,6 +480,13 @@ class JobLifecycle:
         this, a deferred broadcast (e.g. one published seconds after
         ``commit`` because the caller had other work to do first) would
         carry a different timestamp than the audit log line.
+
+        After the standard ``job_state`` event, the lifecycle also pokes
+        the batch service if the row is bound to a ``batches`` row —
+        that bumps the per-batch counter and (when applicable) flips the
+        batch into a terminal state.  The work happens in a fresh
+        session so a slow batch update can never roll back the
+        already-committed Job state change.
         """
         payload = {
             "hash_id": result.hash_id,
@@ -504,6 +511,44 @@ class JobLifecycle:
                 "lifecycle broadcast sink raised for job=%s; ignored",
                 result.hash_id,
             )
+
+        # Batch fan-in. We import lazily to avoid a hard import cycle
+        # (batch_service imports from db.models, which is fine; the
+        # lifecycle gets imported very early during app startup).
+        if result.to_status in (SUCCEEDED, FAILED, CANCELLED):
+            try:
+                await _maybe_notify_batch(
+                    hash_id=result.hash_id,
+                    new_status=result.to_status,
+                    user_id=result.user_id,
+                )
+            except Exception:
+                logger.exception(
+                    "batch fan-in notify failed job=%s", result.hash_id
+                )
+
+
+async def _maybe_notify_batch(
+    *, hash_id: str, new_status: str, user_id: str
+) -> None:
+    """Look up the job's ``batch_id`` and forward to the batch service."""
+    from app.db.engine import get_session
+    from app.db.models import Job
+    from sqlalchemy import select
+
+    async with get_session() as session:
+        row = (
+            await session.execute(
+                select(Job.batch_id).where(Job.hash_id == hash_id)
+            )
+        ).scalar_one_or_none()
+    if not row:
+        return
+    from app.domain.batch_service import on_job_terminal
+
+    await on_job_terminal(
+        batch_id=row, new_status=new_status, user_id=user_id
+    )
 
 
 # ---------------------------------------------------------------------------

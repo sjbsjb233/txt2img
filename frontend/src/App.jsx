@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import LoginPage from "./pages/LoginPage.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
 import CreatePage from "./pages/CreatePage.jsx";
+import BatchPage from "./pages/BatchPage.jsx";
 import ArchivePage from "./pages/ArchivePage.jsx";
 import PickerPage from "./pages/PickerPage.jsx";
 import AdminPage from "./pages/AdminPage.jsx";
@@ -20,6 +21,7 @@ import {
 } from "./store/sse.js";
 import * as announcementsStore from "./store/announcements.js";
 import * as archiveStore from "./store/archive.js";
+import * as batchStore from "./store/batch.js";
 import * as preferencesStore from "./store/preferences.js";
 import * as sseStoreModule from "./store/sse.js";
 
@@ -65,6 +67,16 @@ export default function App() {
       void announcementsStore.mount(user.id);
     } else {
       announcementsStore.unmount();
+    }
+  }, [isAuthenticated, user?.id]);
+
+  // The batch store mounts here too so the /batch page renders fresh
+  // running cards on first visit (frontend doc v0.3 §5.4).
+  useEffect(() => {
+    if (isAuthenticated && user?.id) {
+      void batchStore.mount(user.id);
+    } else {
+      batchStore.unmount();
     }
   }, [isAuthenticated, user?.id]);
 
@@ -131,6 +143,7 @@ export default function App() {
         >
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/create" element={<CreatePage />} />
+          <Route path="/batch" element={<BatchPage />} />
           <Route path="/picker" element={<PickerPage />} />
           <Route path="/archive" element={<ArchivePage />} />
           <Route

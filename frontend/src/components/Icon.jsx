@@ -95,6 +95,11 @@ export default function Icon({ name, size = 16, stroke = "currentColor" }) {
         <circle cx="13" cy="8" r="1" fill="currentColor" stroke="none" />
       </>
     ),
+    layers: <path d="M8 2l6 3-6 3-6-3zM2 8l6 3 6-3M2 11l6 3 6-3" />,
+    sliders: (
+      <path d="M4 2v4M4 10v4M12 2v6M12 12v2M2 6h4M10 8h4M2 12h4M10 12h4" />
+    ),
+    trash: <path d="M3 4h10M6 4V2h4v2M5 4l.5 10h5L11 4" />,
   };
   return (
     <svg viewBox="0 0 16 16" style={s}>
