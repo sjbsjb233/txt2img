@@ -39,6 +39,7 @@ async def test_all_tables_exist(initialized_db: None) -> None:
         "announcements",
         "audit_log",
         "auth_sessions",
+        "batches",
         "billing_ledger",
         "config",
         "disk_usage",

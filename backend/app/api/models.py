@@ -21,7 +21,12 @@ from app.db.models import Session as SessionRow
 from app.db.models import SessionJob
 from app.deps import CurrentUser
 from app.domain.model_catalog import list_models_for_user
-from app.schemas.models import ModelSessionEntry, ModelsResponse
+from app.schemas.models import (
+    ModelSessionEntry,
+    ModelsResponse,
+    ModelsResponseMeta,
+)
+from app.config import get_settings
 
 router = APIRouter(prefix="/api", tags=["models"])
 
@@ -37,7 +42,19 @@ async def get_models(user: CurrentUser) -> ModelsResponse:
     """
     descriptors = await list_models_for_user(user)
     sessions = await _list_user_sessions(user.id)
-    return ModelsResponse(models=descriptors, sessions=sessions)
+    settings = get_settings()
+    meta = ModelsResponseMeta(
+        batch_concurrency_max=getattr(settings, "BATCH_CONCURRENCY_MAX", 4),
+        batch_max_concurrent_per_user=getattr(
+            settings, "BATCH_MAX_CONCURRENT_PER_USER", 3
+        ),
+        batch_slots_max=getattr(settings, "BATCH_SLOTS_MAX", 50),
+        batch_slot_image_count_max=getattr(
+            settings, "BATCH_SLOT_IMAGE_COUNT_MAX", 16
+        ),
+        batch_total_images_max=getattr(settings, "BATCH_TOTAL_IMAGES_MAX", 400),
+    )
+    return ModelsResponse(models=descriptors, sessions=sessions, meta=meta)
 
 
 async def _list_user_sessions(user_id: str) -> list[ModelSessionEntry]:

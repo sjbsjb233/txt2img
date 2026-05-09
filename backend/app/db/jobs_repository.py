@@ -129,6 +129,7 @@ class JobsRepository:
         session_id: str | None = None,
         parent_hash_id: str | None = None,
         derivation_kind: str | None = None,
+        batch_id: str | None = None,
         session: AsyncSession,
     ) -> CreatedJob:
         """Insert a fresh ``QUEUED`` job and return its identifiers.
@@ -155,6 +156,7 @@ class JobsRepository:
             seq_no=allocation.seq_no,
             set_id=set_id,
             session_id=session_id,
+            batch_id=batch_id,
             model=model,
             params_json=params_json,
             flags_json=flags_json,

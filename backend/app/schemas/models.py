@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ModelCapabilities(BaseModel):
@@ -186,6 +186,24 @@ class ModelSessionEntry(BaseModel):
     updated_at: str
 
 
+class ModelsResponseMeta(BaseModel):
+    """Per-call meta exposed via ``GET /api/models`` (frontend doc v0.3 §5.1).
+
+    Frontend reads this on Create / Batch page mount and caches the
+    values locally — they drive the Submit-button lock + the "X/K
+    batches in flight" indicator. The server is the authoritative
+    enforcer; cache invalidation happens naturally on the next call.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_concurrency_max: int = 4
+    batch_max_concurrent_per_user: int = 3
+    batch_slots_max: int = 50
+    batch_slot_image_count_max: int = 16
+    batch_total_images_max: int = 400
+
+
 class ModelsResponse(BaseModel):
     """Top-level ``GET /api/models`` shape."""
 
@@ -193,6 +211,7 @@ class ModelsResponse(BaseModel):
 
     models: list[ModelDescriptor]
     sessions: list[ModelSessionEntry]
+    meta: ModelsResponseMeta = Field(default_factory=ModelsResponseMeta)
 
 
 __all__: tuple[str, ...] = (
@@ -202,6 +221,7 @@ __all__: tuple[str, ...] = (
     "ModelSessionEntry",
     "ModelUIField",
     "ModelsResponse",
+    "ModelsResponseMeta",
 )
 
 

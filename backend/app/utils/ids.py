@@ -111,6 +111,16 @@ def new_announcement_id() -> str:
     return f"ann_{_random_suffix(10)}"
 
 
+def new_batch_id() -> str:
+    """Return ``bat_`` + 10 chars — id for a row in ``batches``.
+
+    Public-facing (the frontend stores it and embeds it in URLs / SSE
+    payloads) so we keep it short like ``set_`` rather than 12 chars
+    like the user/job public ids.
+    """
+    return f"bat_{_random_suffix(10)}"
+
+
 def new_auth_session_id() -> str:
     """Return ``as_`` + 12 chars — id for one row in ``auth_sessions``."""
     return f"as_{_random_suffix(12)}"

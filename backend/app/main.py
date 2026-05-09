@@ -15,6 +15,7 @@ from contextlib import suppress
 from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -34,6 +35,7 @@ from app.api.admin.users import router as admin_users_router
 from app.api.announcements import router as announcements_router
 from app.api.archive import router as archive_router
 from app.api.auth import router as auth_router
+from app.api.batches import router as batches_router
 from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
 from app.api.me import router as me_router
@@ -56,6 +58,7 @@ from app.domain.admin_broadcaster import (
     run_worker_pool_loop,
 )
 from app.domain.account_lifecycle import run_account_lifecycle_loop
+from app.domain.batch_service import run_watchdog_loop as run_batch_watchdog_loop
 from app.domain.cache_keeper import run_disk_usage_loop
 from app.domain.circuit_breaker import get_circuit_breaker
 from app.domain.config_center import get_config_center
@@ -186,6 +189,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.admin_pool_task = asyncio.create_task(
         run_worker_pool_loop(collect_worker_pool_snapshot, sse_hub)
     )
+    # Batch watchdog: 5s tick that flips ``submitting`` rows whose
+    # client stalled mid-fan-out into ``abandoned``. Best-effort —
+    # disabled centrally via ``BATCH_WATCHDOG_ENABLED=false`` for
+    # emergency rollback. See ``app.domain.batch_service``.
+    app.state.batch_watchdog_task = asyncio.create_task(
+        run_batch_watchdog_loop()
+    )
 
     try:
         yield
@@ -229,6 +239,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "admin_metrics_task",
             "admin_pool_task",
             "account_lifecycle_task",
+            "batch_watchdog_task",
         ):
             t = getattr(app.state, attr, None)
             if t is not None:
@@ -277,6 +288,37 @@ def create_app() -> FastAPI:
             },
         )
 
+    # FastAPI's default RequestValidationError handler returns a list-shaped
+    # ``detail`` array, but the project contract (design doc §17) is
+    # ``{detail: {code, message, field, extra}}``. Reshape here so any
+    # endpoint relying on automatic body validation gets the same envelope
+    # the manual ``api_error`` paths produce. The shape is what the
+    # frontend's apiFetch / errorCopy mapping branches on.
+    @app.exception_handler(RequestValidationError)
+    async def _validation_handler(  # type: ignore[unused-ignore]
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        errors = exc.errors() or []
+        first = errors[0] if errors else {}
+        # Drop the leading 'body'/'query'/'path' marker so the field is
+        # the dotted path inside the request shape.
+        loc = first.get("loc") or ()
+        if loc and loc[0] in ("body", "query", "path", "header"):
+            loc = loc[1:]
+        field = ".".join(str(p) for p in loc) or None
+        message = first.get("msg") or "Invalid request payload."
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": {
+                    "code": "INVALID_PARAMETER",
+                    "message": message,
+                    "field": field,
+                    "extra": None,
+                }
+            },
+        )
+
     app.include_router(health_router)
     app.include_router(auth_router)
     app.include_router(me_router)
@@ -291,6 +333,10 @@ def create_app() -> FastAPI:
     # Picker vary-seed lives at /api/jobs/vary — must come before
     # jobs_router so the static path wins over /api/jobs/{hash_id}.
     app.include_router(picker_vary_router)
+    # Batch lifecycle routes (frontend/backend doc v0.3). Registered
+    # before jobs_router so the static ``/api/batches`` prefix never
+    # collides with future ``/api/jobs/...`` patterns.
+    app.include_router(batches_router)
     app.include_router(jobs_router)
     # Picker image-write routes also live under ``/api/jobs``; register
     # before archive_router so they match before the catch-all detail
