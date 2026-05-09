@@ -383,57 +383,72 @@ const CanvasStage = forwardRef(function CanvasStage({
     ctx.clearRect(0, 0, iCanvas.width, iCanvas.height);
   }
 
-  // Wheel: dispatch to zoom / pan / brush parameter handlers depending
-  // on the modifier state. macOS pinch arrives as ctrlKey + wheel.
-  const onWheel = (e) => {
-    e.preventDefault();
-    const gesture = classifyWheel(e.nativeEvent || e);
-    const rect = containerRef.current.getBoundingClientRect();
-    const sx = e.clientX - rect.left;
-    const sy = e.clientY - rect.top;
+  // Wheel handling lives in a native, non-passive listener (see effect below).
+  // React 17+ registers `onWheel` as a passive listener on its root container,
+  // which silently ignores `e.preventDefault()`. That lets macOS pinch
+  // (ctrl+wheel) bubble up and trigger whole-page browser zoom instead of
+  // canvas zoom. Mounting our own listener with `{ passive: false }` is the
+  // only way to keep the gesture inside the editor.
+  const onBrushDeltaRef = useRef(onBrushDelta);
+  useEffect(() => { onBrushDeltaRef.current = onBrushDelta; }, [onBrushDelta]);
+  const onHudMessageRef = useRef(onHudMessage);
+  useEffect(() => { onHudMessageRef.current = onHudMessage; }, [onHudMessage]);
 
-    if (gesture.kind === "zoom") {
-      cancelInertia();
-      inertiaVxRef.current = 0;
-      inertiaVyRef.current = 0;
-      const newScale = Math.max(0.1, Math.min(8, transform.scale * gesture.factor));
-      const before = screenToImage(sx, sy, transform);
-      const next = {
-        scale: newScale,
-        translateX: sx - before.x * newScale,
-        translateY: sy - before.y * newScale,
-      };
-      setTransform(next);
-      onHudMessage?.(`zoom ${Math.round(newScale * 100)}%`);
-      return;
-    }
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return undefined;
+    const handleWheel = (e) => {
+      e.preventDefault();
+      const gesture = classifyWheel(e);
+      const rect = el.getBoundingClientRect();
+      const sx = e.clientX - rect.left;
+      const sy = e.clientY - rect.top;
+      const t = transformRef.current;
 
-    if (gesture.kind === "pan") {
-      cancelInertia();
-      setTransform((t) => ({
-        ...t,
-        translateX: t.translateX + gesture.dx,
-        translateY: t.translateY + gesture.dy,
-      }));
-      inertiaVxRef.current = gesture.dx;
-      inertiaVyRef.current = gesture.dy;
-      inertiaLastWheelRef.current = performance.now();
-      return;
-    }
+      if (gesture.kind === "zoom") {
+        cancelInertia();
+        inertiaVxRef.current = 0;
+        inertiaVyRef.current = 0;
+        const newScale = Math.max(0.1, Math.min(8, t.scale * gesture.factor));
+        const before = screenToImage(sx, sy, t);
+        setTransform({
+          scale: newScale,
+          translateX: sx - before.x * newScale,
+          translateY: sy - before.y * newScale,
+        });
+        onHudMessageRef.current?.(`zoom ${Math.round(newScale * 100)}%`);
+        return;
+      }
 
-    if (gesture.kind === "brushSize") {
-      onBrushDelta?.({ kind: "size", delta: gesture.dy });
-      return;
-    }
-    if (gesture.kind === "hardness") {
-      onBrushDelta?.({ kind: "hardness", delta: gesture.dy });
-      return;
-    }
-    if (gesture.kind === "opacity") {
-      onBrushDelta?.({ kind: "opacity", delta: gesture.dy });
-      return;
-    }
-  };
+      if (gesture.kind === "pan") {
+        cancelInertia();
+        setTransform((cur) => ({
+          ...cur,
+          translateX: cur.translateX + gesture.dx,
+          translateY: cur.translateY + gesture.dy,
+        }));
+        inertiaVxRef.current = gesture.dx;
+        inertiaVyRef.current = gesture.dy;
+        inertiaLastWheelRef.current = performance.now();
+        return;
+      }
+
+      if (gesture.kind === "brushSize") {
+        onBrushDeltaRef.current?.({ kind: "size", delta: gesture.dy });
+        return;
+      }
+      if (gesture.kind === "hardness") {
+        onBrushDeltaRef.current?.({ kind: "hardness", delta: gesture.dy });
+        return;
+      }
+      if (gesture.kind === "opacity") {
+        onBrushDeltaRef.current?.({ kind: "opacity", delta: gesture.dy });
+        return;
+      }
+    };
+    el.addEventListener("wheel", handleWheel, { passive: false });
+    return () => el.removeEventListener("wheel", handleWheel);
+  }, []);
 
   // Imperative API for parent-level keyboard shortcuts (Cmd+0/1/+/-).
   function fit() {
@@ -502,7 +517,6 @@ const CanvasStage = forwardRef(function CanvasStage({
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onWheel={onWheel}
       data-testid="me-stage"
     >
       {/* Outpaint bleed area */}
