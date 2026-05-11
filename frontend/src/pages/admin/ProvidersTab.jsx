@@ -37,6 +37,7 @@ function ProviderCard({
 
   return (
     <div
+      data-test={`provider-card-${p.id}`}
       style={{
         border: "1px solid var(--ink)",
         background: "#fffdf7",

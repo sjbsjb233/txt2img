@@ -1,0 +1,61 @@
+{
+  "scene_original": {
+    "file": "00_scene_original.png",
+    "size": [
+      1536,
+      1024
+    ]
+  },
+  "inpaint_targets": {
+    "villager": {
+      "bbox": [
+        1055,
+        310,
+        1430,
+        925
+      ],
+      "replacement": "a green Minecraft creeper",
+      "native_mask": "inpaint/villager/native_mask.png",
+      "fallback_mask": "inpaint/villager/fallback_mask.png",
+      "overlay_review": "inpaint/villager/overlay_review.png"
+    },
+    "iron_golem": {
+      "bbox": [
+        490,
+        85,
+        935,
+        905
+      ],
+      "replacement": "a Minecraft skeleton",
+      "native_mask": "inpaint/iron_golem/native_mask.png",
+      "fallback_mask": "inpaint/iron_golem/fallback_mask.png",
+      "overlay_review": "inpaint/iron_golem/overlay_review.png"
+    }
+  },
+  "outpaint_scenarios": {
+    "right": {
+      "canvas_size": [
+        2304,
+        1024
+      ],
+      "extension": "right 768px",
+      "subject": "a small Minecraft village in the distance with houses and waving villagers",
+      "canvas": "outpaint/right/canvas.png",
+      "native_mask": "outpaint/right/native_mask.png",
+      "fallback_mask": "outpaint/right/fallback_mask.png",
+      "overlay_review": "outpaint/right/overlay_review.png"
+    },
+    "bottom": {
+      "canvas_size": [
+        1536,
+        1536
+      ],
+      "extension": "bottom 512px",
+      "subject": "a Minecraft underground cross-section with dirt, stone, ores and a small cave",
+      "canvas": "outpaint/bottom/canvas.png",
+      "native_mask": "outpaint/bottom/native_mask.png",
+      "fallback_mask": "outpaint/bottom/fallback_mask.png",
+      "overlay_review": "outpaint/bottom/overlay_review.png"
+    }
+  }
+}

@@ -1,12 +1,21 @@
 import { getApiBase } from "../../api/client.js";
 
+// Cases owned by the mask plan v2. Surfacing them as a Set lets the
+// header-row chip rail decide whether to render the "审核详情" entry
+// point without having to hard-code the regex in two places.
+const MASK_CASES = new Set(["M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8"]);
+
 // bytes_url comes back as a path (``/api/admin/...``) so the runner
 // doesn't have to know its public hostname. <img src> doesn't see the
 // SPA's apiFetch base, so prepend it here. Already-absolute URLs pass
 // through untouched.
 function absoluteImageUrl(url) {
   if (!url) return url;
-  if (/^https?:\/\//.test(url)) return url;
+  // ``data:`` and ``blob:`` URLs are already self-contained — never
+  // prepend the API base to them or the browser ends up requesting
+  // ``http://host/data:...`` (404). Production URLs land on the
+  // ``/api/...`` path branch, unchanged.
+  if (/^(https?:|data:|blob:)/i.test(url)) return url;
   return getApiBase().replace(/\/+$/, "") + url;
 }
 
@@ -193,7 +202,7 @@ function Chip({ status, judgeLevel }) {
   );
 }
 
-export default function CaseCard({ caseState, onLightbox, onManual }) {
+export default function CaseCard({ caseState, onLightbox, onManual, onInspect }) {
   const {
     case_id,
     title,
@@ -232,6 +241,21 @@ export default function CaseCard({ caseState, onLightbox, onManual }) {
         </span>
         <span style={{ fontSize: 13 }}>{title}</span>
         <Chip status={status} judgeLevel={judge_level} />
+        {MASK_CASES.has(case_id) && status !== "running" && (
+          <button
+            type="button"
+            className="btn xs"
+            onClick={() => onInspect?.(case_id)}
+            data-test={`mask-inspect-${case_id}`}
+            style={{
+              padding: "2px 8px",
+              fontSize: 10,
+              letterSpacing: "0.06em",
+            }}
+          >
+            审核详情 ⌕
+          </button>
+        )}
         <span
           className="mono"
           style={{

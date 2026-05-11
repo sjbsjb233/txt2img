@@ -15,6 +15,7 @@ or into a ``NormalizedReference``.
 
 from __future__ import annotations
 
+import json
 from io import BytesIO
 from pathlib import Path
 from typing import NamedTuple
@@ -22,6 +23,8 @@ from typing import NamedTuple
 from PIL import Image, ImageDraw
 
 from app.config import get_settings
+
+_BUNDLED_ROOT = Path(__file__).resolve().parent / "_bundled"
 
 
 class Asset(NamedTuple):
@@ -135,3 +138,75 @@ def load_edit_mask() -> Asset:
 
 def load_geometry() -> Asset:
     return _read_or_make("ref_geometry.png", "image/png", _make_geometry)
+
+
+# ---------------------------------------------------------------------------
+# Mask fixtures (mask_test_materials)
+#
+# These are real Minecraft scene images shipped with the repo at
+# ``_bundled/mask/`` — never synthesised at runtime. The bundle includes
+# the 1536×1024 scene, two inpaint targets, two outpaint canvases, native
+# (alpha) + fallback (B&W) masks for each, and human-review overlays.
+# See backend/app/resources/test_assets/_bundled/mask/README.md.
+# ---------------------------------------------------------------------------
+
+_MASK_FIXTURE_ROOT = _BUNDLED_ROOT / "mask"
+
+
+def _read_mask_fixture(relpath: str, mime: str) -> Asset:
+    path = _MASK_FIXTURE_ROOT / relpath
+    if not path.exists():
+        raise RuntimeError(
+            "mask fixtures missing — expected "
+            f"{path}; reinstall mask_test_materials bundle"
+        )
+    return Asset(path.read_bytes(), mime, Path(relpath).name)
+
+
+def load_mask_scene() -> Asset:
+    """1536×1024 RGB scene; the input image for both inpaint targets."""
+
+    return _read_mask_fixture("00_scene_original.png", "image/png")
+
+
+def load_mask_inpaint(target: str, kind: str) -> Asset:
+    """Load one of the inpaint mask variants.
+
+    ``target``  ∈ ``{"villager", "iron_golem"}``
+    ``kind``    ∈ ``{"native", "fallback", "overlay"}``
+    """
+
+    fname = {
+        "native": f"inpaint/{target}/native_mask.png",
+        "fallback": f"inpaint/{target}/fallback_mask.png",
+        "overlay": f"inpaint/{target}/overlay_review.png",
+    }[kind]
+    return _read_mask_fixture(fname, "image/png")
+
+
+def load_mask_outpaint(scenario: str, kind: str) -> Asset:
+    """Load one of the outpaint variants.
+
+    ``scenario`` ∈ ``{"right", "bottom"}``
+    ``kind``     ∈ ``{"canvas", "native", "fallback", "overlay"}``
+    """
+
+    fname = {
+        "canvas": f"outpaint/{scenario}/canvas.png",
+        "native": f"outpaint/{scenario}/native_mask.png",
+        "fallback": f"outpaint/{scenario}/fallback_mask.png",
+        "overlay": f"outpaint/{scenario}/overlay_review.png",
+    }[kind]
+    return _read_mask_fixture(fname, "image/png")
+
+
+def load_mask_manifest() -> dict:
+    """``fixtures_manifest.json`` — bbox / replacement / canvas size."""
+
+    path = _MASK_FIXTURE_ROOT / "fixtures_manifest.json"
+    if not path.exists():
+        raise RuntimeError(
+            "mask fixtures missing — expected "
+            f"{path}; reinstall mask_test_materials bundle"
+        )
+    return json.loads(path.read_text(encoding="utf-8"))

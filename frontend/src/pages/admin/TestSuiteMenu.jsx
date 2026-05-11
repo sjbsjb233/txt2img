@@ -14,9 +14,15 @@ const SCOPE_OPTIONS = [
     desc: "验证 capability 中声明的每个参数",
   },
   {
+    scope: "MASK",
+    label: "仅 Mask 子套件",
+    hint: "C · M1-M8 · 8 次",
+    desc: "inpaint × 2 + outpaint × 2,各跑 native + fallback",
+  },
+  {
     scope: "FULL",
     label: "完整套件",
-    hint: "A+B+C+D · 8-15 次",
+    hint: "A+B+C+D · 16-23 次",
     desc: "包含错误路径与人工判定",
   },
   {

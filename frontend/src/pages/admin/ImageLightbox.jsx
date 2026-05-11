@@ -3,7 +3,7 @@ import { getApiBase } from "../../api/client.js";
 
 function absoluteImageUrl(url) {
   if (!url) return url;
-  if (/^https?:\/\//.test(url)) return url;
+  if (/^(https?:|data:|blob:)/i.test(url)) return url;
   return getApiBase().replace(/\/+$/, "") + url;
 }
 
