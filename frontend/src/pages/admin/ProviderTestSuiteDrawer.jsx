@@ -594,8 +594,6 @@ export default function ProviderTestSuiteDrawer({ provider, scope, modelId, onCl
       {state.maskInspectorCaseId && state.cases[state.maskInspectorCaseId] && (
         <MaskInspectorPanel
           caseState={state.cases[state.maskInspectorCaseId]}
-          providerId={provider.id}
-          runId={state.runId}
           onClose={() => dispatch({ type: "mask_inspector_close" })}
           onLightbox={(img) => dispatch({ type: "lightbox_open", payload: img })}
           onManual={(v) => onManual(state.maskInspectorCaseId, v)}

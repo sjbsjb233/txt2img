@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { getApiBase } from "../../api/client.js";
-import { postManualVerdict } from "../../api/admin/providerTestSuite.js";
 
 function absoluteImageUrl(url) {
   if (!url) return url;
@@ -89,7 +88,7 @@ function ThumbButton({ label, src, onClick, accent = false }) {
   );
 }
 
-export default function MaskInspectorPanel({ caseState, providerId, runId, onClose, onLightbox, onManual }) {
+export default function MaskInspectorPanel({ caseState, onClose, onLightbox, onManual }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -150,12 +149,11 @@ export default function MaskInspectorPanel({ caseState, providerId, runId, onClo
     if (busy) return;
     setBusy(true);
     try {
-      if (runId && providerId) {
-        await postManualVerdict(providerId, runId, case_id, verdict).catch(() => {
-          /* tolerate offline — UI already updates */
-        });
-      }
-      onManual?.(verdict);
+      // Network call is handled by the parent drawer's ``onManual``
+      // handler, which already invokes ``postManualVerdict`` and the
+      // reducer in one place. Calling it here too would double-post
+      // and create duplicate audit rows.
+      await onManual?.(verdict);
     } finally {
       setBusy(false);
     }
@@ -166,6 +164,7 @@ export default function MaskInspectorPanel({ caseState, providerId, runId, onClo
       data-test="mask-inspector"
       data-case-id={case_id}
       role="dialog"
+      aria-modal="true"
       aria-label={`Mask inspector ${case_id}`}
       style={{
         position: "fixed",

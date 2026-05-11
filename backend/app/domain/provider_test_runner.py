@@ -498,13 +498,11 @@ def _diff_magnitude(scene_rgb: Image.Image, out_rgb: Image.Image) -> Image.Image
 
     diff = ImageChops.difference(scene_rgb, out_rgb)
     r, g, b = diff.split()
-    # ``ImageMath.lambda_eval`` replaced ``ImageMath.eval`` in Pillow 11
-    # (the older API is being removed in Pillow 12). Cast back to "L" so
-    # downstream masks / stat helpers behave.
-    return ImageMath.lambda_eval(
-        lambda args: args["convert"]((args["r"] + args["g"] + args["b"]) / 3, "L"),
-        {"r": r, "g": g, "b": b},
-    )
+    # ``ImageMath.lambda_eval`` was only added in Pillow 10.3; the
+    # backend pins ``Pillow==10.*`` so use the older ``eval`` form
+    # which is available on every Pillow >= 1.x. (Pillow 11 deprecated
+    # it but kept it through Pillow 12 — long after we'll bump the pin.)
+    return ImageMath.eval("convert((r+g+b)/3, 'L')", r=r, g=g, b=b)
 
 
 def _split_regions(mask_rgba: Image.Image) -> tuple[Image.Image, Image.Image]:
@@ -676,8 +674,13 @@ def _outpaint_metrics(
     }
 
 
-def _judge_mask_inpaint(case_id: str):
-    """Factory: bind ``case_id`` so we know which fixture to compare to."""
+def _judge_mask_inpaint(case_id: str, run_id: str | None = None):
+    """Factory: bind ``case_id`` (and ``run_id`` for concurrent runs).
+
+    ``run_id`` is forwarded so the side-channel key is unique across
+    concurrent runs — two admins running the same case in parallel
+    must not overwrite each other's diagnostics.
+    """
 
     ctx = _MASK_CASE_CTX[case_id]
     target = ctx["target"]
@@ -727,7 +730,7 @@ def _judge_mask_inpaint(case_id: str):
         )
         ok = pres_ok and edit_ok and ratio_ok
 
-        _MASK_JUDGE_LAST_RUN[case_id] = {
+        _MASK_JUDGE_LAST_RUN[(run_id, case_id)] = {
             "metrics": {
                 "preserve_score": m["preserve_score"],
                 "edit_score": m["edit_score"],
@@ -747,8 +750,8 @@ def _judge_mask_inpaint(case_id: str):
     return _judge
 
 
-def _judge_mask_outpaint(case_id: str):
-    """Factory: bind ``case_id`` so we know which canvas/mask to compare."""
+def _judge_mask_outpaint(case_id: str, run_id: str | None = None):
+    """Factory: bind ``case_id`` (and ``run_id`` for concurrent runs)."""
 
     ctx = _MASK_CASE_CTX[case_id]
     scenario = ctx["scenario"]
@@ -795,7 +798,7 @@ def _judge_mask_outpaint(case_id: str):
         )
         ok = pres_ok and void_ok and edges_ok
 
-        _MASK_JUDGE_LAST_RUN[case_id] = {
+        _MASK_JUDGE_LAST_RUN[(run_id, case_id)] = {
             "metrics": {
                 "preserve_score": m["preserve_score"],
                 "black_void_pct": m["black_void_pct"],
@@ -816,10 +819,10 @@ def _judge_mask_outpaint(case_id: str):
 
 
 # Side-channel for the runner to pick up diagnostics + metrics after the
-# judge closure runs. Keyed by case_id; cleared once persisted. We keep
-# it module-level (not in the closure) so the runner doesn't need to
-# know which factory built the judge.
-_MASK_JUDGE_LAST_RUN: dict[str, dict[str, Any]] = {}
+# judge closure runs. Keyed by ``(run_id, case_id)`` so two concurrent
+# runs of the same case don't clobber each other; each judge writes its
+# own slot and the runner pops it immediately after.
+_MASK_JUDGE_LAST_RUN: dict[tuple[str | None, str], dict[str, Any]] = {}
 
 
 def _judge_gemini_a1(
@@ -1388,9 +1391,9 @@ async def stream_run(req: RunRequest) -> AsyncIterator[bytes]:
         # binding directly (so test_cases.py stays declarative), so the
         # runner builds the closure on the fly via the factory tables.
         if case.judge_name == "mask_inpaint" and case.case_id in _MASK_CASE_CTX:
-            judge = _judge_mask_inpaint(case.case_id)
+            judge = _judge_mask_inpaint(case.case_id, run_id=run_id)
         elif case.judge_name == "mask_outpaint" and case.case_id in _MASK_CASE_CTX:
-            judge = _judge_mask_outpaint(case.case_id)
+            judge = _judge_mask_outpaint(case.case_id, run_id=run_id)
         if case.expect_error:
             ok, verdicts = _judge_d_error(
                 request, error, case.case_id, req.adapter.adapter_type
@@ -1419,7 +1422,7 @@ async def stream_run(req: RunRequest) -> AsyncIterator[bytes]:
         # bare case_id outputs).
         diagnostics: list[_StoredDiagnostic] = []
         mask_metrics: dict[str, float] | None = None
-        side = _MASK_JUDGE_LAST_RUN.pop(case.case_id, None)
+        side = _MASK_JUDGE_LAST_RUN.pop((run_id, case.case_id), None)
         if side is not None:
             mask_metrics = side["metrics"]
             diagnostics = _persist_mask_diagnostics(
