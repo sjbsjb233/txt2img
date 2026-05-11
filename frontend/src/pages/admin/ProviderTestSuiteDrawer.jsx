@@ -5,10 +5,18 @@ import {
 } from "../../api/admin/providerTestSuite.js";
 import CaseCard from "./CaseCard.jsx";
 import ImageLightbox from "./ImageLightbox.jsx";
+import MaskInspectorPanel from "./MaskInspectorPanel.jsx";
 
 const SCOPE_TO_BODY = {
   A: { suites: ["A"] },
   AB: { suites: ["A", "B"] },
+  MASK: {
+    // Mask 测试方案 v2 — run only the M1..M8 subset so we don't burn
+    // image quota on A/B/D. The runner still emits PASS/WARN/FAIL +
+    // mask_subverdict normally.
+    suites: ["C"],
+    case_ids: ["M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8"],
+  },
   FULL: { suites: ["A", "B", "C", "D"] },
   DRY_RUN: { suites: ["D"], dry_run: true },
 };
@@ -18,6 +26,24 @@ const SUITE_LABELS = {
   B: "B · 参数生效",
   C: "C · 视觉特性",
   D: "D · 错误路径",
+};
+
+// 5-tier Mask 子套件 verdict label & colour set (matches the spec §5.4
+// and the backend ``compute_mask_subverdict`` keys).
+const MASK_SUBVERDICT_LABEL = {
+  PERFECT: "🟢 PERFECT",
+  STANDARD_ONLY: "🔵 STANDARD ONLY",
+  FALLBACK_ONLY: "🟠 FALLBACK ONLY",
+  PARTIAL_UNUSABLE: "🔴 PARTIAL UNUSABLE",
+  UNUSABLE: "⚫ UNUSABLE",
+};
+
+const MASK_SUBVERDICT_TONE = {
+  PERFECT: { bg: "var(--ok)", fg: "var(--paper)" },
+  STANDARD_ONLY: { bg: "#3a78a8", fg: "var(--paper)" },
+  FALLBACK_ONLY: { bg: "#d9a400", fg: "var(--ink)" },
+  PARTIAL_UNUSABLE: { bg: "var(--bad)", fg: "var(--paper)" },
+  UNUSABLE: { bg: "var(--ink-2)", fg: "var(--paper)" },
 };
 
 const initialState = {
@@ -34,6 +60,10 @@ const initialState = {
   lightbox: null,
   runId: null,
   skippedByCapability: [],
+  // Mask 测试方案 v2 fields. Only filled in when the C suite includes
+  // M1..M8 cases; otherwise the badge stays hidden.
+  maskSubverdict: null,
+  maskInspectorCaseId: null,
 };
 
 function reducer(state, action) {
@@ -141,6 +171,10 @@ function reducer(state, action) {
                 bytes_url: img.bytes_url,
               }))
             : c.images,
+        // Mask plan v2 extras — both default to empty / null so consumers
+        // that don't care never see undefined.
+        diagnostics: action.diagnostics || [],
+        mask_metrics: action.mask_metrics || null,
       };
       const totals = { ...state.totals };
       if (status === "pass") totals.pass += 1;
@@ -182,6 +216,7 @@ function reducer(state, action) {
         status: "done",
         verdict: action.verdict,
         budgetUsed: action.cost_used ?? state.budgetUsed,
+        maskSubverdict: action.mask_subverdict ?? state.maskSubverdict,
       };
     case "abort":
       return { ...state, status: "aborted" };
@@ -191,6 +226,10 @@ function reducer(state, action) {
       return { ...state, lightbox: action.payload };
     case "lightbox_close":
       return { ...state, lightbox: null };
+    case "mask_inspector_open":
+      return { ...state, maskInspectorCaseId: action.case_id };
+    case "mask_inspector_close":
+      return { ...state, maskInspectorCaseId: null };
     default:
       return state;
   }
@@ -297,15 +336,35 @@ export default function ProviderTestSuiteDrawer({ provider, scope, modelId, onCl
               color: "var(--ink-3)",
               letterSpacing: "0.16em",
               margin: "16px 0 6px",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
             }}
           >
-            {SUITE_LABELS[c.suite] || c.suite}
+            <span>{SUITE_LABELS[c.suite] || c.suite}</span>
+            {c.suite === "C" && state.maskSubverdict && (
+              <span
+                data-test="mask-subverdict-badge"
+                data-verdict={state.maskSubverdict}
+                className="mono caps"
+                style={{
+                  fontSize: 9,
+                  padding: "2px 8px",
+                  border: "1px solid var(--ink)",
+                  letterSpacing: "0.12em",
+                  ...(MASK_SUBVERDICT_TONE[state.maskSubverdict] || {}),
+                }}
+              >
+                Mask · {MASK_SUBVERDICT_LABEL[state.maskSubverdict] || state.maskSubverdict}
+              </span>
+            )}
           </div>
         )}
         <CaseCard
           caseState={c}
           onLightbox={(img) => dispatch({ type: "lightbox_open", payload: img })}
           onManual={(v) => onManual(c.case_id, v)}
+          onInspect={(cid) => dispatch({ type: "mask_inspector_open", case_id: cid })}
         />
       </Fragment>
     );
@@ -530,6 +589,17 @@ export default function ProviderTestSuiteDrawer({ provider, scope, modelId, onCl
             完成
           </button>
         </div>
+      )}
+
+      {state.maskInspectorCaseId && state.cases[state.maskInspectorCaseId] && (
+        <MaskInspectorPanel
+          caseState={state.cases[state.maskInspectorCaseId]}
+          providerId={provider.id}
+          runId={state.runId}
+          onClose={() => dispatch({ type: "mask_inspector_close" })}
+          onLightbox={(img) => dispatch({ type: "lightbox_open", payload: img })}
+          onManual={(v) => onManual(state.maskInspectorCaseId, v)}
+        />
       )}
 
       <ImageLightbox

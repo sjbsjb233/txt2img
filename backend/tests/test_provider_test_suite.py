@@ -386,6 +386,7 @@ async def test_image_url_rejects_tampered_signature(
     assert (await seeded_app.get(expired)).status_code == 403
 
 
+@pytest.mark.skip("C3 retired in mask plan v2; see test_mask_* below.")
 def test_c3_left_similarity_synthetic_inputs(fresh_env: None) -> None:
     """Direct unit test of the C3 similarity function on 4 synthetic
     boundary inputs.
@@ -440,6 +441,7 @@ def test_c3_left_similarity_synthetic_inputs(fresh_env: None) -> None:
     assert c3_left_similarity(base_bytes, sunset_bytes) < 0.30
 
 
+@pytest.mark.skip("C3 retired in mask plan v2; see test_mask_* below.")
 @pytest.mark.asyncio
 async def test_c3_judge_returns_ok_true_below_threshold(
     seeded_app: httpx.AsyncClient, monkeypatch
@@ -614,3 +616,326 @@ async def test_image_path_traversal_blocked(
     )
     # Either 404 from our guard, or 400 from FastAPI route matching — both reject.
     assert bad.status_code in (400, 404)
+
+
+# ---------------------------------------------------------------------------
+# Mask 测试方案 v2 — M1..M8 regressions
+#
+# These cover the new replacement for C3: 8 quantitative AUTO cases plus
+# the 5-tier ``mask_subverdict`` rollup. The synthetic-input metric tests
+# don't touch HTTP at all (just the pure metric functions) so they're
+# fast and don't need ``seeded_app``.
+# ---------------------------------------------------------------------------
+
+
+def test_mask_fixtures_present(fresh_env: None) -> None:
+    """All 17 fixture files + the manifest must ship with the bundle."""
+    from app.resources.test_assets import (
+        load_mask_inpaint,
+        load_mask_manifest,
+        load_mask_outpaint,
+        load_mask_scene,
+    )
+
+    assert len(load_mask_scene().data) > 1000
+    for target in ("villager", "iron_golem"):
+        for kind in ("native", "fallback", "overlay"):
+            assert len(load_mask_inpaint(target, kind).data) > 1000, (target, kind)
+    for scenario in ("right", "bottom"):
+        for kind in ("canvas", "native", "fallback", "overlay"):
+            assert len(load_mask_outpaint(scenario, kind).data) > 1000, (scenario, kind)
+    m = load_mask_manifest()
+    assert m["inpaint_targets"]["villager"]["replacement"]
+    assert m["outpaint_scenarios"]["right"]["canvas_size"] == [2304, 1024]
+
+
+def test_inpaint_metrics_perfect_passthrough(fresh_env: None) -> None:
+    """If the model returns the input scene unchanged, edit_score ≈ 0 →
+    AUTO fails (no edit happened)."""
+    from app.domain.provider_test_runner import _inpaint_metrics
+    from app.resources.test_assets import load_mask_inpaint, load_mask_scene
+
+    scene = load_mask_scene().data
+    mask = load_mask_inpaint("villager", "native").data
+    m = _inpaint_metrics(scene, mask, scene)
+    assert m["preserve_score"] == pytest.approx(0.0, abs=1e-6)
+    assert m["edit_score"] == pytest.approx(0.0, abs=1e-6)
+    assert m["edit_score"] <= 0.08  # would fail edit_ok threshold
+    assert m["heatmap_bytes"][:4] == b"\x89PNG"
+
+
+def test_inpaint_metrics_mask_ignored(fresh_env: None) -> None:
+    """If the model regenerates the entire image (red), preserve_score
+    is high and ratio_score is low → AUTO fails."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    from app.domain.provider_test_runner import _inpaint_metrics
+    from app.resources.test_assets import load_mask_inpaint, load_mask_scene
+
+    scene_bytes = load_mask_scene().data
+    mask_bytes = load_mask_inpaint("villager", "native").data
+    buf = BytesIO()
+    Image.new("RGB", (1536, 1024), (220, 30, 20)).save(buf, format="PNG")
+    m = _inpaint_metrics(scene_bytes, mask_bytes, buf.getvalue())
+    assert m["preserve_score"] > 0.05  # preserve_ok fails
+    assert m["ratio_score"] <= 3.0  # ratio_ok fails too
+
+
+def test_inpaint_metrics_happy_path(fresh_env: None) -> None:
+    """Scene preserved + a sharp red splash inside the villager bbox →
+    preserve ≈ 0 / edit > 0.08 / ratio ≫ 3.0 → AUTO passes."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    from app.domain.provider_test_runner import _inpaint_metrics
+    from app.resources.test_assets import (
+        load_mask_inpaint,
+        load_mask_manifest,
+        load_mask_scene,
+    )
+
+    scene_bytes = load_mask_scene().data
+    mask_bytes = load_mask_inpaint("villager", "native").data
+    bbox = load_mask_manifest()["inpaint_targets"]["villager"]["bbox"]
+
+    with Image.open(BytesIO(scene_bytes)) as scene_img:
+        out = scene_img.convert("RGB").copy()
+    splash = Image.new("RGB", (bbox[2] - bbox[0], bbox[3] - bbox[1]), (255, 30, 20))
+    out.paste(splash, (bbox[0], bbox[1]))
+    buf = BytesIO()
+    out.save(buf, format="PNG")
+
+    m = _inpaint_metrics(scene_bytes, mask_bytes, buf.getvalue())
+    assert m["preserve_score"] < 0.05, m
+    assert m["edit_score"] > 0.08, m
+    assert m["ratio_score"] > 3.0, m
+
+
+def test_outpaint_metrics_black_void(fresh_env: None) -> None:
+    """Original area preserved + extension filled with pure black →
+    black_void_pct → 100% → AUTO fails."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    from app.domain.provider_test_runner import _outpaint_metrics
+    from app.resources.test_assets import load_mask_outpaint
+
+    canvas_bytes = load_mask_outpaint("right", "canvas").data
+    mask_bytes = load_mask_outpaint("right", "native").data
+    with Image.open(BytesIO(canvas_bytes)) as canvas_img:
+        canvas_rgba = canvas_img.convert("RGBA")
+        out = canvas_rgba.convert("RGB")
+    # Right 768px → fill with pure black
+    void = Image.new("RGB", (768, 1024), (0, 0, 0))
+    out.paste(void, (1536, 0))
+    buf = BytesIO()
+    out.save(buf, format="PNG")
+
+    m = _outpaint_metrics(canvas_bytes, mask_bytes, buf.getvalue())
+    assert m["preserve_score"] < 0.05, m
+    assert m["black_void_pct"] > 50.0, m
+    assert m["black_void_pct"] <= 100.0
+
+
+def test_outpaint_metrics_happy_path(fresh_env: None) -> None:
+    """Original area preserved + extension filled with hi-freq noise →
+    void ≈ 0% / edges > 1% → AUTO passes."""
+    import random
+    from io import BytesIO
+
+    from PIL import Image
+
+    from app.domain.provider_test_runner import _outpaint_metrics
+    from app.resources.test_assets import load_mask_outpaint
+
+    canvas_bytes = load_mask_outpaint("right", "canvas").data
+    mask_bytes = load_mask_outpaint("right", "native").data
+    with Image.open(BytesIO(canvas_bytes)) as canvas_img:
+        out = canvas_img.convert("RGB").copy()
+
+    # 768x1024 of high-contrast checker noise so Sobel produces lots of
+    # > 20 magnitudes. Deterministic seed so the test is stable.
+    rng = random.Random(42)
+    pixels = bytes(
+        bytearray(
+            rng.choice((20, 220))
+            for _ in range(768 * 1024 * 3)
+        )
+    )
+    noise = Image.frombytes("RGB", (768, 1024), pixels)
+    out.paste(noise, (1536, 0))
+    buf = BytesIO()
+    out.save(buf, format="PNG")
+
+    m = _outpaint_metrics(canvas_bytes, mask_bytes, buf.getvalue())
+    assert m["preserve_score"] < 0.05, m
+    assert m["black_void_pct"] < 5.0, m
+    assert m["extension_edges_pct"] > 1.0, m
+
+
+def test_mask_subverdict_aggregation(fresh_env: None) -> None:
+    """All 16 method-mix combinations (× target / scenario pairings) must
+    map to the right 5-tier verdict."""
+    from app.domain.provider_test_runner import compute_mask_subverdict
+
+    def m(**kw):
+        # missing keys mean "case did not run" — they default to False.
+        return {k: v for k, v in kw.items() if v is not None}
+
+    # PERFECT — all 8 pass.
+    assert (
+        compute_mask_subverdict(
+            m(M1=True, M2=True, M3=True, M4=True, M5=True, M6=True, M7=True, M8=True)
+        )
+        == "PERFECT"
+    )
+    # STANDARD_ONLY — both native pairs pass, fallback fails everywhere.
+    assert (
+        compute_mask_subverdict(
+            m(M1=True, M3=True, M5=True, M7=True,
+              M2=False, M4=False, M6=False, M8=False)
+        )
+        == "STANDARD_ONLY"
+    )
+    # FALLBACK_ONLY — symmetric.
+    assert (
+        compute_mask_subverdict(
+            m(M2=True, M4=True, M6=True, M8=True,
+              M1=False, M3=False, M5=False, M7=False)
+        )
+        == "FALLBACK_ONLY"
+    )
+    # PARTIAL_UNUSABLE — only one inpaint target works (single-target
+    # "model guessed" case the spec calls out).
+    assert (
+        compute_mask_subverdict(
+            m(M1=True, M3=False, M5=True, M7=True,
+              M2=False, M4=False, M6=False, M8=False)
+        )
+        == "PARTIAL_UNUSABLE"
+    )
+    # PARTIAL_UNUSABLE — cross-method coverage (native inpaint OK, but
+    # only fallback outpaint works) means no single method is reliable.
+    assert (
+        compute_mask_subverdict(
+            m(M1=True, M3=True, M5=False, M7=False,
+              M2=False, M4=False, M6=True, M8=True)
+        )
+        == "PARTIAL_UNUSABLE"
+    )
+    # UNUSABLE — every case ran and failed.
+    assert (
+        compute_mask_subverdict(
+            m(M1=False, M2=False, M3=False, M4=False,
+              M5=False, M6=False, M7=False, M8=False)
+        )
+        == "UNUSABLE"
+    )
+    # None — no mask case ran at all.
+    assert compute_mask_subverdict({}) is None
+
+
+def test_mask_prompt_lint_script(fresh_env: None) -> None:
+    """The fixtures lint script must pass for the 8 shipped prompts."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    script = repo_root / "scripts" / "lint_mask_prompts.py"
+    assert script.exists(), script
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        cwd=str(repo_root),
+    )
+    assert result.returncode == 0, result.stdout + "\n" + result.stderr
+    assert "all 8 mask prompts are clean" in result.stdout
+
+
+@pytest.mark.asyncio
+async def test_mask_full_suite_streams_eight_cases(
+    seeded_app: httpx.AsyncClient, monkeypatch
+) -> None:
+    """End-to-end: run the C suite, get 8 mask case_result frames and a
+    mask_subverdict in run_done.
+
+    Adapter is faked to return a PNG with the original input area echoed
+    back unchanged (a "mask ignored" failure mode) → all 8 cases fail
+    AUTO → mask_subverdict == UNUSABLE.
+    """
+    from io import BytesIO
+
+    from PIL import Image
+
+    from app.adapters import openai_v1 as openai_mod
+    from app.schemas.normalized import NormalizedImage, NormalizedResponse
+
+    def make_png(size: tuple[int, int]) -> bytes:
+        buf = BytesIO()
+        Image.new("RGB", size, (220, 30, 20)).save(buf, format="PNG")
+        return buf.getvalue()
+
+    async def fake_generate(self, provider, request):
+        # Size depends on the requested target dimensions — keep the
+        # returned image at the same canvas so the geometry checks in
+        # the judges still align.
+        w, h = (int(x) for x in (request.size or "1536x1024").split("x"))
+        return NormalizedResponse(
+            images=[NormalizedImage(data=make_png((w, h)), mime="image/png")],
+            image_count=1,
+        )
+
+    monkeypatch.setattr(openai_mod.OpenAIV1Adapter, "generate", fake_generate)
+
+    token = await _login_admin(seeded_app)
+    await seeded_app.post(
+        "/api/admin/providers",
+        headers=_auth(token),
+        json={
+            "provider_id": "openai-mask",
+            "label": "openai mask",
+            "adapter_type": "openai_v1",
+            "base_url": "https://example.invalid/v1",
+            "api_key": "sk-mock-FQBR",
+            "cost_per_image_cny": 0.0,
+            "initial_balance_cny": 100,
+            "enabled": True,
+            "max_concurrency": 4,
+            "rpm_limit": 60,
+            "supported_models": [
+                {"model_id": "gpt-image-2", "capabilities": {}, "enabled": True}
+            ],
+            "tier_access": ["vip"],
+        },
+    )
+
+    resp = await seeded_app.post(
+        "/api/admin/providers/openai-mask/test-suite",
+        headers=_auth(token),
+        json={"model_id": "gpt-image-2", "suites": ["C"]},
+    )
+    assert resp.status_code == 200, resp.text
+    events = _parse_sse(resp.text)
+    case_ids = [
+        d["case_id"]
+        for (e, d) in events
+        if e == "case_result" and d["case_id"].startswith("M")
+    ]
+    assert sorted(case_ids) == ["M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8"]
+
+    # Every M case should have a diff_heatmap + mask_overlay diagnostic.
+    for ev, d in events:
+        if ev != "case_result" or not d["case_id"].startswith("M"):
+            continue
+        diags = {x["kind"] for x in d.get("diagnostics") or []}
+        assert diags == {"heatmap", "overlay"}, (d["case_id"], diags)
+        assert d.get("mask_metrics") is not None, d["case_id"]
+
+    done = next(d for (e, d) in events if e == "run_done")
+    assert done["mask_subverdict"] == "UNUSABLE", done

@@ -28,7 +28,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageFilter, ImageMath, ImageStat
 
 from app.adapters.base import BaseAdapter
 from app.config import get_settings
@@ -69,6 +69,22 @@ class _StoredImage:
 
 
 @dataclass
+class _StoredDiagnostic:
+    """Auxiliary file attached to a case for human review.
+
+    Currently used by mask cases (heatmap + overlay) but the shape is
+    generic so future judges can attach their own artifacts.
+    """
+
+    name: str
+    label: str
+    kind: str  # "heatmap" | "overlay"
+    mime: str
+    byte_size: int
+    file_path: Path
+
+
+@dataclass
 class _CaseResult:
     case_id: str
     suite: str
@@ -84,6 +100,8 @@ class _CaseResult:
     error_message: str | None
     latency_ms: float | None
     images: list[_StoredImage]
+    diagnostics: list[_StoredDiagnostic] = field(default_factory=list)
+    mask_metrics: dict[str, float] | None = None
 
 
 @dataclass
@@ -437,6 +455,373 @@ def _judge_openai_c3(
     return True, verdicts
 
 
+# ---------------------------------------------------------------------------
+# Mask plan v2 — quantitative judges for M1..M8
+#
+# Both judges:
+#   * resize the upstream output to the canonical mask geometry so
+#     per-pixel comparison is exact, regardless of relay rescaling
+#   * use the native alpha mask to split the image into "preserve" and
+#     "edit" regions (alpha=255 → preserve, alpha=0 → edit)
+#   * compute the metrics from §5.1/§5.2 of the design doc and emit a
+#     diff heatmap diagnostic so the admin can review failures visually
+# ---------------------------------------------------------------------------
+
+
+# Per-case context. The judge receives ``request`` + ``response`` but not
+# ``case_id``, so the runner uses this table to dispatch to a closure
+# carrying the right target / scenario (mirrors ``_judge_gemini_aspect``
+# but keyed by case id rather than by a hard-coded constant in the judge
+# registry).
+_MASK_CASE_CTX: dict[str, dict[str, str]] = {
+    "M1": {"kind": "inpaint", "target": "villager", "method": "native"},
+    "M2": {"kind": "inpaint", "target": "villager", "method": "fallback"},
+    "M3": {"kind": "inpaint", "target": "iron_golem", "method": "native"},
+    "M4": {"kind": "inpaint", "target": "iron_golem", "method": "fallback"},
+    "M5": {"kind": "outpaint", "scenario": "right", "method": "native"},
+    "M6": {"kind": "outpaint", "scenario": "right", "method": "fallback"},
+    "M7": {"kind": "outpaint", "scenario": "bottom", "method": "native"},
+    "M8": {"kind": "outpaint", "scenario": "bottom", "method": "fallback"},
+}
+
+MASK_CASE_IDS: tuple[str, ...] = tuple(_MASK_CASE_CTX.keys())
+
+
+def _diff_magnitude(scene_rgb: Image.Image, out_rgb: Image.Image) -> Image.Image:
+    """Per-pixel ``L1`` colour distance, normalised to mode ``L``.
+
+    Pixel value is ``(|ΔR|+|ΔG|+|ΔB|)/3`` clamped to ``0..255``. We use
+    L1 rather than L2 because PIL has no per-pixel sqrt and the absolute
+    delta is monotonic with the L2 distance for the thresholds we care
+    about (mean ≪ 1.0 vs ≪ 0.05).
+    """
+
+    diff = ImageChops.difference(scene_rgb, out_rgb)
+    r, g, b = diff.split()
+    # ``ImageMath.lambda_eval`` replaced ``ImageMath.eval`` in Pillow 11
+    # (the older API is being removed in Pillow 12). Cast back to "L" so
+    # downstream masks / stat helpers behave.
+    return ImageMath.lambda_eval(
+        lambda args: args["convert"]((args["r"] + args["g"] + args["b"]) / 3, "L"),
+        {"r": r, "g": g, "b": b},
+    )
+
+
+def _split_regions(mask_rgba: Image.Image) -> tuple[Image.Image, Image.Image]:
+    """Return ``(preserve_mask_L, edit_mask_L)`` from a native alpha mask.
+
+    PIL's ``ImageStat.Stat(image, mask)`` includes pixels where mask is
+    non-zero. So:
+
+    * ``preserve_mask_L``: 255 where alpha == 255 (preserve), 0 elsewhere
+    * ``edit_mask_L``:     255 where alpha == 0   (edit), 0 elsewhere
+    """
+
+    alpha = mask_rgba.split()[-1]  # the alpha channel as mode "L"
+    preserve = alpha.point(lambda v: 255 if v == 255 else 0)
+    edit = alpha.point(lambda v: 255 if v == 0 else 0)
+    return preserve, edit
+
+
+def _region_mean(diff_L: Image.Image, region_L: Image.Image) -> float:
+    """Mean of ``diff_L`` over pixels where ``region_L`` is non-zero.
+
+    Returns 0.0 when the region is empty so callers don't have to guard.
+    """
+
+    stat = ImageStat.Stat(diff_L, mask=region_L)
+    if not stat.count or stat.count[0] == 0:
+        return 0.0
+    return float(stat.mean[0]) / 255.0
+
+
+def _region_pixel_count(region_L: Image.Image) -> int:
+    """Number of non-zero pixels in ``region_L``."""
+
+    # PIL stores histogram as a 256-length list; index 0 is the count of
+    # zero pixels, everything else is "covered by the mask".
+    hist = region_L.histogram()
+    return sum(hist[1:])
+
+
+def _make_diff_heatmap(
+    diff_L: Image.Image, edit_region: Image.Image | None = None
+) -> bytes:
+    """Render a coloured PNG heatmap from the diff magnitude image.
+
+    * pixels with magnitude below 13 (≈5% of 255) are transparent so the
+      heatmap reads as "where did the model change things" rather than a
+      blanket overlay
+    * the visible range is mapped via a hand-rolled jet-ish palette
+      (blue → cyan → green → yellow → red) without numpy
+    """
+
+    width, height = diff_L.size
+    src = diff_L.tobytes()
+    rgba = bytearray(width * height * 4)
+    for i, v in enumerate(src):
+        if v < 13:
+            continue  # leave transparent
+        # Jet-ish ramp on [13, 255]
+        t = (v - 13) / (255 - 13)
+        if t < 0.25:
+            r, g, b = 0, int(255 * (t / 0.25)), 255
+        elif t < 0.5:
+            r, g, b = 0, 255, int(255 * (1 - (t - 0.25) / 0.25))
+        elif t < 0.75:
+            r, g, b = int(255 * ((t - 0.5) / 0.25)), 255, 0
+        else:
+            r, g, b = 255, int(255 * (1 - (t - 0.75) / 0.25)), 0
+        off = i * 4
+        rgba[off] = r
+        rgba[off + 1] = g
+        rgba[off + 2] = b
+        rgba[off + 3] = 220
+    heat = Image.frombytes("RGBA", (width, height), bytes(rgba))
+    if edit_region is not None:
+        # Mask the heatmap to the edit region so we don't mislead the
+        # admin into thinking pixel noise outside the mask is a problem.
+        heat.putalpha(
+            ImageChops.multiply(
+                heat.split()[-1],
+                edit_region,
+            )
+        )
+    out_buf = BytesIO()
+    heat.save(out_buf, format="PNG", optimize=True)
+    return out_buf.getvalue()
+
+
+def _inpaint_metrics(
+    scene_bytes: bytes, mask_rgba_bytes: bytes, out_bytes: bytes
+) -> dict[str, Any]:
+    with Image.open(BytesIO(scene_bytes)) as scene_img, Image.open(
+        BytesIO(mask_rgba_bytes)
+    ) as mask_img, Image.open(BytesIO(out_bytes)) as out_img:
+        mask_rgba = mask_img.convert("RGBA")
+        W, H = mask_rgba.size
+        scene = scene_img.convert("RGB")
+        if scene.size != (W, H):
+            scene = scene.resize((W, H), Image.LANCZOS)
+        out = out_img.convert("RGB")
+        if out.size != (W, H):
+            out = out.resize((W, H), Image.LANCZOS)
+
+    preserve_region, edit_region = _split_regions(mask_rgba)
+    diff_scene_vs_out = _diff_magnitude(scene, out)
+
+    preserve_score = _region_mean(diff_scene_vs_out, preserve_region)
+    edit_score = _region_mean(diff_scene_vs_out, edit_region)
+    ratio_score = edit_score / max(preserve_score, 1e-3)
+    heatmap_bytes = _make_diff_heatmap(diff_scene_vs_out)
+
+    return {
+        "preserve_score": preserve_score,
+        "edit_score": edit_score,
+        "ratio_score": ratio_score,
+        "heatmap_bytes": heatmap_bytes,
+    }
+
+
+def _outpaint_metrics(
+    canvas_bytes: bytes, mask_rgba_bytes: bytes, out_bytes: bytes
+) -> dict[str, Any]:
+    with Image.open(BytesIO(canvas_bytes)) as canvas_img, Image.open(
+        BytesIO(mask_rgba_bytes)
+    ) as mask_img, Image.open(BytesIO(out_bytes)) as out_img:
+        canvas_rgba = canvas_img.convert("RGBA")
+        W, H = canvas_rgba.size
+        mask_rgba = mask_img.convert("RGBA")
+        if mask_rgba.size != (W, H):
+            mask_rgba = mask_rgba.resize((W, H), Image.NEAREST)
+        out = out_img.convert("RGB")
+        if out.size != (W, H):
+            out = out.resize((W, H), Image.LANCZOS)
+
+    preserve_region, edit_region = _split_regions(mask_rgba)
+
+    # For preserve_score, compare RGB of canvas vs RGB of output in the
+    # preserve region. The canvas's preserve region is the original photo
+    # so this directly measures "did the model touch the original?".
+    canvas_rgb = canvas_rgba.convert("RGB")
+    diff_canvas_vs_out = _diff_magnitude(canvas_rgb, out)
+    preserve_score = _region_mean(diff_canvas_vs_out, preserve_region)
+
+    # Black-void detection: count pixels in the edit region where all
+    # three channels are < 10. The 10-threshold matches the design doc
+    # and is generous enough to catch dithered upstream blacks.
+    r, g, b = out.split()
+    out_max = ImageChops.lighter(ImageChops.lighter(r, g), b)
+    void_pixels_L = out_max.point(lambda v: 255 if v < 10 else 0)
+    void_in_edit = ImageChops.multiply(void_pixels_L, edit_region)
+    void_count = _region_pixel_count(void_in_edit)
+    edit_count = max(_region_pixel_count(edit_region), 1)
+    black_void_pct = 100.0 * void_count / edit_count
+
+    # Edge density in the edit region — Sobel via PIL's FIND_EDGES filter.
+    out_L = out.convert("L")
+    edges = out_L.filter(ImageFilter.FIND_EDGES)
+    edge_pixels_L = edges.point(lambda v: 255 if v > 20 else 0)
+    edge_in_edit = ImageChops.multiply(edge_pixels_L, edit_region)
+    edge_count = _region_pixel_count(edge_in_edit)
+    extension_edges_pct = 100.0 * edge_count / edit_count
+
+    heatmap_bytes = _make_diff_heatmap(diff_canvas_vs_out, edit_region=edit_region)
+
+    return {
+        "preserve_score": preserve_score,
+        "black_void_pct": black_void_pct,
+        "extension_edges_pct": extension_edges_pct,
+        "heatmap_bytes": heatmap_bytes,
+    }
+
+
+def _judge_mask_inpaint(case_id: str):
+    """Factory: bind ``case_id`` so we know which fixture to compare to."""
+
+    ctx = _MASK_CASE_CTX[case_id]
+    target = ctx["target"]
+
+    def _judge(
+        request: NormalizedRequest, response: NormalizedResponse
+    ) -> tuple[bool, list[Verdict]]:
+        verdicts: list[Verdict] = []
+        if response.image_count <= 0:
+            return False, [Verdict(False, "未返回任何图片")]
+
+        info = probe_image(response.images[0])
+        verdicts.append(Verdict(True, f"返回图 {info['width']}×{info['height']}"))
+
+        try:
+            from app.resources.test_assets import (
+                load_mask_inpaint,
+                load_mask_scene,
+            )
+
+            scene_bytes = load_mask_scene().data
+            mask_bytes = load_mask_inpaint(target, "native").data
+            m = _inpaint_metrics(scene_bytes, mask_bytes, response.images[0].data)
+        except Exception as exc:  # pragma: no cover — defensive
+            return False, [Verdict(False, f"指标计算失败: {exc!r}")]
+
+        pres_ok = m["preserve_score"] < 0.05
+        edit_ok = m["edit_score"] > 0.08
+        ratio_ok = m["ratio_score"] > 3.0
+        verdicts.append(
+            Verdict(
+                pres_ok,
+                f"preserve_score = {m['preserve_score']:.3f} (< 0.05 → 保留区未被波及)",
+            )
+        )
+        verdicts.append(
+            Verdict(
+                edit_ok,
+                f"edit_score = {m['edit_score']:.3f} (> 0.08 → mask 区确实被改)",
+            )
+        )
+        verdicts.append(
+            Verdict(
+                ratio_ok,
+                f"ratio_score = {m['ratio_score']:.1f} (> 3.0 → 改和不改有显著区分)",
+            )
+        )
+        ok = pres_ok and edit_ok and ratio_ok
+
+        _MASK_JUDGE_LAST_RUN[case_id] = {
+            "metrics": {
+                "preserve_score": m["preserve_score"],
+                "edit_score": m["edit_score"],
+                "ratio_score": m["ratio_score"],
+                "preserve_threshold": 0.05,
+                "edit_threshold": 0.08,
+                "ratio_threshold": 3.0,
+                "preserve_ok": pres_ok,
+                "edit_ok": edit_ok,
+                "ratio_ok": ratio_ok,
+            },
+            "heatmap_bytes": m["heatmap_bytes"],
+            "overlay_loader": ("inpaint", target),
+        }
+        return ok, verdicts
+
+    return _judge
+
+
+def _judge_mask_outpaint(case_id: str):
+    """Factory: bind ``case_id`` so we know which canvas/mask to compare."""
+
+    ctx = _MASK_CASE_CTX[case_id]
+    scenario = ctx["scenario"]
+
+    def _judge(
+        request: NormalizedRequest, response: NormalizedResponse
+    ) -> tuple[bool, list[Verdict]]:
+        verdicts: list[Verdict] = []
+        if response.image_count <= 0:
+            return False, [Verdict(False, "未返回任何图片")]
+
+        info = probe_image(response.images[0])
+        verdicts.append(Verdict(True, f"返回图 {info['width']}×{info['height']}"))
+
+        try:
+            from app.resources.test_assets import load_mask_outpaint
+
+            canvas_bytes = load_mask_outpaint(scenario, "canvas").data
+            mask_bytes = load_mask_outpaint(scenario, "native").data
+            m = _outpaint_metrics(canvas_bytes, mask_bytes, response.images[0].data)
+        except Exception as exc:  # pragma: no cover — defensive
+            return False, [Verdict(False, f"指标计算失败: {exc!r}")]
+
+        pres_ok = m["preserve_score"] < 0.05
+        void_ok = m["black_void_pct"] < 5.0
+        edges_ok = m["extension_edges_pct"] > 1.0
+        verdicts.append(
+            Verdict(
+                pres_ok,
+                f"preserve_score = {m['preserve_score']:.3f} (< 0.05 → 原图区未被波及)",
+            )
+        )
+        verdicts.append(
+            Verdict(
+                void_ok,
+                f"black_void_pct = {m['black_void_pct']:.1f}% (< 5% → 扩展区无黑色 void)",
+            )
+        )
+        verdicts.append(
+            Verdict(
+                edges_ok,
+                f"extension_edges_pct = {m['extension_edges_pct']:.2f}% (> 1.0% → 扩展区有内容)",
+            )
+        )
+        ok = pres_ok and void_ok and edges_ok
+
+        _MASK_JUDGE_LAST_RUN[case_id] = {
+            "metrics": {
+                "preserve_score": m["preserve_score"],
+                "black_void_pct": m["black_void_pct"],
+                "extension_edges_pct": m["extension_edges_pct"],
+                "preserve_threshold": 0.05,
+                "black_void_threshold": 5.0,
+                "extension_edges_threshold": 1.0,
+                "preserve_ok": pres_ok,
+                "black_void_ok": void_ok,
+                "extension_edges_ok": edges_ok,
+            },
+            "heatmap_bytes": m["heatmap_bytes"],
+            "overlay_loader": ("outpaint", scenario),
+        }
+        return ok, verdicts
+
+    return _judge
+
+
+# Side-channel for the runner to pick up diagnostics + metrics after the
+# judge closure runs. Keyed by case_id; cleared once persisted. We keep
+# it module-level (not in the closure) so the runner doesn't need to
+# know which factory built the judge.
+_MASK_JUDGE_LAST_RUN: dict[str, dict[str, Any]] = {}
+
+
 def _judge_gemini_a1(
     request: NormalizedRequest, response: NormalizedResponse
 ) -> tuple[bool, list[Verdict]]:
@@ -709,6 +1094,72 @@ def _store_input_refs(
     return out
 
 
+def _persist_mask_diagnostics(
+    run: _RunState,
+    case_id: str,
+    heatmap_bytes: bytes,
+    overlay_loader: tuple[str, str] | None,
+) -> list[_StoredDiagnostic]:
+    """Persist the diff heatmap + the human-review overlay for a mask case.
+
+    ``overlay_loader`` is ``(kind, target_or_scenario)``; we look up the
+    overlay PNG via the existing asset loaders rather than copying yet
+    another piece of fixture data through SSE.
+    """
+
+    out: list[_StoredDiagnostic] = []
+    run_dir = _run_dir(run.provider_id, run.run_id)
+
+    def _save(name: str, label: str, kind: str, data: bytes, mime: str) -> None:
+        path = run_dir / name
+        try:
+            path.write_bytes(data)
+        except OSError as exc:
+            logger.warning("test_suite: cannot persist diagnostic %s: %s", path, exc)
+            return
+        out.append(
+            _StoredDiagnostic(
+                name=name,
+                label=label,
+                kind=kind,
+                mime=mime,
+                byte_size=len(data),
+                file_path=path,
+            )
+        )
+
+    _save(
+        f"DX_{case_id}_diff_heatmap.png",
+        "差分热力图",
+        "heatmap",
+        heatmap_bytes,
+        "image/png",
+    )
+
+    if overlay_loader is not None:
+        try:
+            kind, key = overlay_loader
+            if kind == "inpaint":
+                from app.resources.test_assets import load_mask_inpaint
+
+                overlay = load_mask_inpaint(key, "overlay")
+            else:
+                from app.resources.test_assets import load_mask_outpaint
+
+                overlay = load_mask_outpaint(key, "overlay")
+            _save(
+                f"DX_{case_id}_mask_overlay.png",
+                "Mask 叠加 (人工审核用)",
+                "overlay",
+                overlay.data,
+                overlay.mime,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("test_suite: overlay load failed for %s: %s", case_id, exc)
+
+    return out
+
+
 # ---------------------------------------------------------------------------
 # SSE event helpers
 # ---------------------------------------------------------------------------
@@ -932,6 +1383,14 @@ async def stream_run(req: RunRequest) -> AsyncIterator[bytes]:
         ok = False
         verdicts: list[Verdict] = []
         judge = _BASIC_JUDGES.get(case.judge_name)
+        # Mask cases need a per-case_id binding to know which fixture
+        # to compare against. We don't want the case rows to carry that
+        # binding directly (so test_cases.py stays declarative), so the
+        # runner builds the closure on the fly via the factory tables.
+        if case.judge_name == "mask_inpaint" and case.case_id in _MASK_CASE_CTX:
+            judge = _judge_mask_inpaint(case.case_id)
+        elif case.judge_name == "mask_outpaint" and case.case_id in _MASK_CASE_CTX:
+            judge = _judge_mask_outpaint(case.case_id)
         if case.expect_error:
             ok, verdicts = _judge_d_error(
                 request, error, case.case_id, req.adapter.adapter_type
@@ -954,6 +1413,19 @@ async def stream_run(req: RunRequest) -> AsyncIterator[bytes]:
         if not ok:
             manual_required = False
 
+        # Pick up any diagnostics + metrics the mask judge stashed for
+        # this case. Persist them with a ``DX_`` prefix so the run-dir
+        # listing stays human-scannable (IN_* inputs, DX_* diagnostics,
+        # bare case_id outputs).
+        diagnostics: list[_StoredDiagnostic] = []
+        mask_metrics: dict[str, float] | None = None
+        side = _MASK_JUDGE_LAST_RUN.pop(case.case_id, None)
+        if side is not None:
+            mask_metrics = side["metrics"]
+            diagnostics = _persist_mask_diagnostics(
+                run, case.case_id, side["heatmap_bytes"], side["overlay_loader"]
+            )
+
         # SEMI/MANUAL cases default-pass-and-warn until admin clicks. For
         # AUTO cases the runner's verdict is final.
         result = _CaseResult(
@@ -971,6 +1443,8 @@ async def stream_run(req: RunRequest) -> AsyncIterator[bytes]:
             error_message=error.message if error else None,
             latency_ms=round(elapsed, 2),
             images=stored_images,
+            diagnostics=diagnostics,
+            mask_metrics=mask_metrics,
         )
         run.cases[case.case_id] = result
         yield _sse("case_result", _case_result_payload(result, run_id, req.provider_id))
@@ -1005,6 +1479,16 @@ async def stream_run(req: RunRequest) -> AsyncIterator[bytes]:
     run.verdict = verdict
     run.finished = True
 
+    # Mask subverdict — only relevant when at least one M-case ran. Only
+    # AUTO success counts (admin manual overrides don't roll up here; the
+    # subverdict is a quantitative provider-capability signal).
+    mask_results = {
+        cid: r.ok
+        for cid, r in run.cases.items()
+        if cid in _MASK_CASE_CTX and r.manual_verdict != "skip"
+    }
+    mask_subverdict = compute_mask_subverdict(mask_results)
+
     yield _sse(
         "run_done",
         {
@@ -1015,6 +1499,7 @@ async def stream_run(req: RunRequest) -> AsyncIterator[bytes]:
             "verdict": verdict,
             "skipped_by_capability": dropped,
             "cost_used": run.cost_used,
+            "mask_subverdict": mask_subverdict,
         },
     )
 
@@ -1122,7 +1607,81 @@ def _case_result_payload(
             }
             for img in result.images
         ],
+        "diagnostics": [
+            {
+                "kind": d.kind,
+                "label": d.label,
+                "name": d.name,
+                "mime": d.mime,
+                "byte_size": d.byte_size,
+                "bytes_url": _image_url(provider_id, run_id, d.name),
+            }
+            for d in result.diagnostics
+        ],
+        "mask_metrics": result.mask_metrics,
     }
+
+
+def compute_mask_subverdict(case_results: dict[str, Any]) -> str | None:
+    """5-tier mask subverdict for the C suite header.
+
+    ``case_results`` is a mapping ``case_id → bool`` where ``True`` means
+    "auto-judge passed". Missing case ids count as failures. Returns
+    ``None`` when no mask case ran at all (e.g. only A/B suites were
+    requested), so the UI can hide the badge.
+
+    Tiers (matches the design doc §5.4):
+
+    * PERFECT          — both native AND fallback succeeded on every
+                         task (inpaint × outpaint × method).
+    * STANDARD_ONLY    — native succeeded on both inpaint targets and
+                         both outpaint scenarios; fallback may fail.
+    * FALLBACK_ONLY    — fallback succeeded on both inpaint targets and
+                         both outpaint scenarios; native may fail.
+    * PARTIAL_UNUSABLE — at least one task (inpaint or outpaint) has at
+                         least one working method, but the other task
+                         has no working method.
+    * UNUSABLE         — neither inpaint nor outpaint has a working
+                         method.
+
+    The "both targets must pass" rule defends against the model accident-
+    ally guessing one target. ``M1 ∧ M3`` ⇒ native inpaint works;
+    ``M2 ∧ M4`` ⇒ fallback inpaint works; analogously for outpaint.
+    """
+
+    def ran(case_id: str) -> bool:
+        return case_id in case_results
+
+    def passed(case_id: str) -> bool:
+        return bool(case_results.get(case_id))
+
+    if not any(ran(c) for c in MASK_CASE_IDS):
+        return None
+
+    native_inpaint = passed("M1") and passed("M3")
+    fallback_inpaint = passed("M2") and passed("M4")
+    native_outpaint = passed("M5") and passed("M7")
+    fallback_outpaint = passed("M6") and passed("M8")
+
+    inpaint_has_method = native_inpaint or fallback_inpaint
+    outpaint_has_method = native_outpaint or fallback_outpaint
+
+    if not inpaint_has_method and not outpaint_has_method:
+        return "UNUSABLE"
+    if not (inpaint_has_method and outpaint_has_method):
+        return "PARTIAL_UNUSABLE"
+    if (
+        native_inpaint and fallback_inpaint
+        and native_outpaint and fallback_outpaint
+    ):
+        return "PERFECT"
+    if native_inpaint and native_outpaint:
+        return "STANDARD_ONLY"
+    if fallback_inpaint and fallback_outpaint:
+        return "FALLBACK_ONLY"
+    # Cross-method success (e.g. native inpaint + fallback outpaint) →
+    # at least one method per task, but neither method is consistent.
+    return "PARTIAL_UNUSABLE"
 
 
 def _compute_verdict(run: _RunState) -> str:

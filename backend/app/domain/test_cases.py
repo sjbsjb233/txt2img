@@ -20,6 +20,10 @@ from app.resources.test_assets import (
     load_edit_base,
     load_edit_mask,
     load_geometry,
+    load_mask_inpaint,
+    load_mask_manifest,
+    load_mask_outpaint,
+    load_mask_scene,
     load_ref_logo,
     load_ref_product,
 )
@@ -164,6 +168,243 @@ def _req_openai_c3() -> NormalizedRequest:
         references=[_ref_from_asset(load_edit_base(), 1)],
         mask=_ref_from_asset(load_edit_mask(), 1),
     )
+
+
+# ---------------------------------------------------------------------------
+# Mask plan v2 — M1..M8 request factories (inpaint + outpaint × native +
+# fallback). See ``mask_test_materials`` README and the project Mask 测试
+# 方案 v2 doc for the prompt-design rules; key points:
+#
+# * native      → pass the alpha PNG via the ``mask=`` field
+# * fallback    → ship the B&W PNG as ``references[2]``, no ``mask``
+# * the prompt never names a position (right / left) or species (villager
+#   / golem) — the test would otherwise pass on prompt knowledge alone.
+# ---------------------------------------------------------------------------
+
+
+def _req_mask_inpaint(target: str, method: str):
+    """Factory for ``M1..M4``.
+
+    ``target`` ∈ ``{"villager", "iron_golem"}``;
+    ``method`` ∈ ``{"native", "fallback"}``.
+    """
+
+    manifest = load_mask_manifest()["inpaint_targets"][target]
+    replacement = manifest["replacement"]
+
+    if method == "native":
+        prompt = (
+            f"Replace the creature that is marked with {replacement}. "
+            "Keep everything else exactly the same as in the reference image."
+        )
+    elif method == "fallback":
+        prompt = (
+            "I'm giving you two images. The first image is the scene to edit. "
+            "The second image is a black-and-white mask that defines which region "
+            "to modify: the white region marks the area to be changed; "
+            "the black region must remain unchanged. "
+            f"Replace the creature located inside the white region of the mask "
+            f"with {replacement}. "
+            "Keep everything in the black region exactly the same as in the first image."
+        )
+    else:  # pragma: no cover — guarded at call sites
+        raise ValueError(f"unknown method: {method!r}")
+
+    def factory() -> NormalizedRequest:
+        scene = load_mask_scene()
+        if method == "native":
+            return NormalizedRequest(
+                model="gpt-image-2",
+                prompt=prompt,
+                n=1,
+                size="1536x1024",
+                quality="medium",
+                references=[_ref_from_asset(scene, 1)],
+                mask=_ref_from_asset(load_mask_inpaint(target, "native"), 1),
+            )
+        return NormalizedRequest(
+            model="gpt-image-2",
+            prompt=prompt,
+            n=1,
+            size="1536x1024",
+            quality="medium",
+            references=[
+                _ref_from_asset(scene, 1),
+                _ref_from_asset(load_mask_inpaint(target, "fallback"), 2),
+            ],
+            mask=None,
+        )
+
+    return factory
+
+
+def _req_mask_outpaint(scenario: str, method: str):
+    """Factory for ``M5..M8``.
+
+    ``scenario`` ∈ ``{"right", "bottom"}``;
+    ``method``   ∈ ``{"native", "fallback"}``.
+    """
+
+    manifest = load_mask_manifest()["outpaint_scenarios"][scenario]
+    subject = manifest["subject"]
+    canvas_w, canvas_h = manifest["canvas_size"]
+    size_str = f"{canvas_w}x{canvas_h}"
+    style_hint = {
+        "right": "grass, sky, and blocky clouds",
+        "bottom": "grass texture",
+    }[scenario]
+
+    if method == "native":
+        prompt = (
+            f"In the marked region, render {subject}. "
+            f"Continue the {style_hint} smoothly from the reference image. "
+            "Keep everything outside the marked region exactly the same as in the reference image."
+        )
+    elif method == "fallback":
+        prompt = (
+            "I'm giving you two images. The first image is the scene to edit. "
+            "The second image is a black-and-white mask that defines which region "
+            "to fill: the white region marks the area to be newly generated; "
+            "the black region must remain unchanged. "
+            f"In the white region, render {subject}. "
+            f"Continue the {style_hint} smoothly from the first image. "
+            "Keep everything in the black region exactly the same as in the first image."
+        )
+    else:  # pragma: no cover
+        raise ValueError(f"unknown method: {method!r}")
+
+    def factory() -> NormalizedRequest:
+        canvas = load_mask_outpaint(scenario, "canvas")
+        if method == "native":
+            return NormalizedRequest(
+                model="gpt-image-2",
+                prompt=prompt,
+                n=1,
+                size=size_str,
+                quality="medium",
+                references=[_ref_from_asset(canvas, 1)],
+                mask=_ref_from_asset(load_mask_outpaint(scenario, "native"), 1),
+            )
+        return NormalizedRequest(
+            model="gpt-image-2",
+            prompt=prompt,
+            n=1,
+            size=size_str,
+            quality="medium",
+            references=[
+                _ref_from_asset(canvas, 1),
+                _ref_from_asset(load_mask_outpaint(scenario, "fallback"), 2),
+            ],
+            mask=None,
+        )
+
+    return factory
+
+
+_MANUAL_INPAINT_VILLAGER = (
+    "📋 此用例的入参:\n"
+    "  • 原图:1536×1024 Minecraft 场景(左僵尸 / 中铁傀儡 / 右村民)\n"
+    "  • mask:仅覆盖右侧村民的 alpha PNG(或 fallback 黑白图)\n"
+    "  • prompt:\"Replace the creature that is marked with a green Minecraft creeper.\n"
+    "             Keep everything else exactly the same as in the reference image.\"\n"
+    "  • 期望:村民被替换成 creeper, 僵尸和铁傀儡保持不变\n"
+    "\n"
+    "✅ 同时满足 → 自动判定通过:\n"
+    "  ① preserve_score < 0.05  (僵尸 + 铁傀儡 + 背景未被波及)\n"
+    "  ② edit_score > 0.08      (村民位置确实变了)\n"
+    "  ③ ratio_score > 3.0      (改和不改区分显著)\n"
+    "\n"
+    "❌ 任一 → 自动判定不通过:\n"
+    "  • preserve_score 偏高 → 中转把 mask 当成纯增量, 对全图重渲染\n"
+    "  • edit_score 偏低     → mask 被静默丢弃, 村民没动\n"
+    "  • ratio_score 偏低    → 全图被均匀改了一遍, 无区分\n"
+    "\n"
+    "💡 自动判定通过后, 你仍可点 \"审核详情\" 在右侧弹窗手动复核:\n"
+    "  • 输出图右半应能识别 creeper 的绿色 + 长形身体\n"
+    "  • 中线接缝处有 5–10px 渐变带是正常的, 不影响 preserve 分\n"
+    "\n"
+    "ℹ 上面三个数值是参考算法, gpt-image-2 普遍 preserve 0.01–0.04 / edit 0.10–0.20。\n"
+    "  阈值偏严会增加误报, 偏松会放过 fallback-only provider 的原生路径,\n"
+    "  请勿在不重新校准的情况下修改阈值表。"
+)
+
+
+_MANUAL_INPAINT_GOLEM = (
+    "📋 此用例的入参:\n"
+    "  • 原图:1536×1024 Minecraft 场景(左僵尸 / 中铁傀儡 / 右村民)\n"
+    "  • mask:仅覆盖中央铁傀儡的 alpha PNG(或 fallback 黑白图)\n"
+    "  • prompt:\"Replace the creature that is marked with a Minecraft skeleton.\n"
+    "             Keep everything else exactly the same as in the reference image.\"\n"
+    "  • 期望:铁傀儡被替换成 skeleton, 僵尸和村民保持不变\n"
+    "\n"
+    "✅ 同时满足 → 自动判定通过:\n"
+    "  ① preserve_score < 0.05  (僵尸 + 村民 + 背景未被波及)\n"
+    "  ② edit_score > 0.08      (铁傀儡位置确实变了)\n"
+    "  ③ ratio_score > 3.0      (改和不改区分显著)\n"
+    "\n"
+    "❌ 任一 → 自动判定不通过:\n"
+    "  • preserve_score 偏高 → 中转把 mask 当成纯增量, 对全图重渲染\n"
+    "  • edit_score 偏低     → mask 被静默丢弃, 铁傀儡没动\n"
+    "  • ratio_score 偏低    → 全图被均匀改了一遍, 无区分\n"
+    "\n"
+    "💡 自动判定通过后, 你仍可点 \"审核详情\" 在右侧弹窗手动复核:\n"
+    "  • 输出图中部应能识别 skeleton 的白骨轮廓\n"
+    "  • 中线接缝处有 5–10px 渐变带是正常的, 不影响 preserve 分\n"
+    "\n"
+    "ℹ 上面三个数值是参考算法, gpt-image-2 普遍 preserve 0.01–0.04 / edit 0.10–0.20。"
+)
+
+
+_MANUAL_OUTPAINT_RIGHT = (
+    "📋 此用例的入参:\n"
+    "  • 画布:2304×1024 RGBA, 左侧 1536px 是原场景(不透明), 右侧 768px 是透明扩展区\n"
+    "  • mask:右侧扩展区为编辑区(native 透明 / fallback 白色)\n"
+    "  • prompt:\"In the marked region, render a small Minecraft village in the distance ...\n"
+    "             Continue the grass, sky, and blocky clouds smoothly from the reference image.\"\n"
+    "  • 期望:右侧扩展区出现远景小村庄, 左侧原图保持不变\n"
+    "\n"
+    "✅ 同时满足 → 自动判定通过:\n"
+    "  ① preserve_score < 0.05     (原图区未被波及)\n"
+    "  ② black_void_pct < 5%       (扩展区无大块黑色 void)\n"
+    "  ③ extension_edges_pct > 1%  (扩展区有真实内容, 非单色填充)\n"
+    "\n"
+    "❌ 任一 → 自动判定不通过:\n"
+    "  • preserve 偏高 → 中转把原图区也重画了\n"
+    "  • void 偏高     → 扩展区被填成纯黑, 模型 / 中转没识别 alpha 通道\n"
+    "  • edges 偏低    → 扩展区只有一团模糊色块, 没有具体物体\n"
+    "\n"
+    "💡 自动判定通过后, 你仍可点 \"审核详情\" 在右侧弹窗手动复核:\n"
+    "  • 扩展区应能看出房子 / 村民身影, 而不是一片空地\n"
+    "  • 草地 / 天空 / 云能从左侧延续过来, 没有断层\n"
+    "\n"
+    "ℹ 阈值已用 4 个 provider 实测校准, KEY 3 失败样本 void 99–100%, 成功样本 0%。"
+)
+
+
+_MANUAL_OUTPAINT_BOTTOM = (
+    "📋 此用例的入参:\n"
+    "  • 画布:1536×1536 RGBA, 上方 1024px 是原场景, 下方 512px 是透明扩展区\n"
+    "  • mask:下方扩展区为编辑区(native 透明 / fallback 白色)\n"
+    "  • prompt:\"In the marked region, render a Minecraft underground cross-section ...\n"
+    "             Continue the grass texture smoothly from the reference image.\"\n"
+    "  • 期望:下方扩展区出现地下剖面(泥土 / 石头 / 矿石 / 小洞), 上方原图保持不变\n"
+    "\n"
+    "✅ 同时满足 → 自动判定通过:\n"
+    "  ① preserve_score < 0.05     (原图区未被波及)\n"
+    "  ② black_void_pct < 5%       (扩展区无大块黑色 void)\n"
+    "  ③ extension_edges_pct > 1%  (扩展区有真实地下纹理, 非单色填充)\n"
+    "\n"
+    "❌ 任一 → 自动判定不通过:\n"
+    "  • preserve 偏高 → 中转把原图区也重画了\n"
+    "  • void 偏高     → 扩展区被填成纯黑\n"
+    "  • edges 偏低    → 扩展区只有一团模糊色块\n"
+    "\n"
+    "💡 自动判定通过后, 你仍可点 \"审核详情\" 在右侧弹窗手动复核:\n"
+    "  • 扩展区应能看出泥土 / 石头分层, 草地纹理从上方延续\n"
+    "  • 矿石 / 小洞不出现也可接受, 只要有连贯的地下层次\n"
+    "\n"
+    "ℹ 阈值已用 4 个 provider 实测校准。"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -441,31 +682,42 @@ OPENAI_GPT_IMAGE_2_CASES: list[TestCase] = [
                  "  • 缺少明显的文字排版(prompt 没要求文字)\n"
                  "  • 三张参考图的相对比例与原始图不同"
              )),
-    TestCase("C3", "C", "单图 + mask 局部修改", "SEMI", True,
-             _req_openai_c3, judge_name="openai_c3",
-             manual_prompt=(
-                 "📋 此用例的入参:\n"
-                 "  • 原图:左黑色矩形 + 右浅色块的双色图(1024×1024)\n"
-                 "  • mask:左半 alpha=255 (要求保留)、右半 alpha=0 (允许重画)\n"
-                 "  • prompt:\"replace the right half with a sunset over hills\"\n"
-                 "\n"
-                 "✅ 同时满足 → 点 通过:\n"
-                 "  ① 输出图的左半 仍然是深色矩形(允许色调微变,不要求像素一致)\n"
-                 "  ② 输出图的右半 出现了带太阳/天空/橙色调的日落场景\n"
-                 "\n"
-                 "❌ 任一 → 点 不通过:\n"
-                 "  • 左半被改写成日落 → mask 完全没起作用\n"
-                 "  • 右半仍是原来的浅色块 → 重画没发生\n"
-                 "  • 输出图与原图毫不相关(例如直接返回风景照)\n"
-                 "\n"
-                 "💡 这些情况是正常的,不要因此扣分:\n"
-                 "  • 左半的深色变深/变浅 5–10%(中转做了接缝色调匹配)\n"
-                 "  • 输出尺寸变成 1254 而不是 1024(中转放大了)\n"
-                 "  • 中线接缝处有几像素的渐变带\n"
-                 "\n"
-                 "ℹ 上面\"左半相似度 ≈ X%\"是参考数字,真上游普遍 70–90% 之间,\n"
-                 "  数字本身不能直接判定 — 凭眼睛看是否符合上面 ① ②。"
-             )),
+    # Mask 测试方案 v2 — replaces the single SEMI C3 with eight AUTO cases
+    # covering inpaint × outpaint × native × fallback. Each case has a
+    # quantified verdict (see provider_test_runner._judge_mask_inpaint /
+    # _judge_mask_outpaint) and a manual_prompt for human re-review.
+    TestCase("M1", "C", "inpaint · villager · native", "AUTO", True,
+             _req_mask_inpaint("villager", method="native"),
+             judge_name="mask_inpaint",
+             manual_prompt=_MANUAL_INPAINT_VILLAGER),
+    TestCase("M2", "C", "inpaint · villager · fallback", "AUTO", True,
+             _req_mask_inpaint("villager", method="fallback"),
+             judge_name="mask_inpaint",
+             manual_prompt=_MANUAL_INPAINT_VILLAGER),
+    TestCase("M3", "C", "inpaint · iron_golem · native", "AUTO", True,
+             _req_mask_inpaint("iron_golem", method="native"),
+             judge_name="mask_inpaint",
+             manual_prompt=_MANUAL_INPAINT_GOLEM),
+    TestCase("M4", "C", "inpaint · iron_golem · fallback", "AUTO", True,
+             _req_mask_inpaint("iron_golem", method="fallback"),
+             judge_name="mask_inpaint",
+             manual_prompt=_MANUAL_INPAINT_GOLEM),
+    TestCase("M5", "C", "outpaint · right · native", "AUTO", True,
+             _req_mask_outpaint("right", method="native"),
+             judge_name="mask_outpaint",
+             manual_prompt=_MANUAL_OUTPAINT_RIGHT),
+    TestCase("M6", "C", "outpaint · right · fallback", "AUTO", True,
+             _req_mask_outpaint("right", method="fallback"),
+             judge_name="mask_outpaint",
+             manual_prompt=_MANUAL_OUTPAINT_RIGHT),
+    TestCase("M7", "C", "outpaint · bottom · native", "AUTO", True,
+             _req_mask_outpaint("bottom", method="native"),
+             judge_name="mask_outpaint",
+             manual_prompt=_MANUAL_OUTPAINT_BOTTOM),
+    TestCase("M8", "C", "outpaint · bottom · fallback", "AUTO", True,
+             _req_mask_outpaint("bottom", method="fallback"),
+             judge_name="mask_outpaint",
+             manual_prompt=_MANUAL_OUTPAINT_BOTTOM),
     TestCase("D1", "D", "未知 model", "AUTO", False,
              _req_openai_d_unknown_model, expect_error=True,
              judge_name="d_error"),
