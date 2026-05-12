@@ -988,3 +988,381 @@
 @media (prefers-reduced-motion: reduce) {
   .me-hud-toast { animation: none; }
 }
+
+/* =====================================================================
+ * Lineage panel — git-style ancestry view in the history tab.
+ * ===================================================================== */
+
+.me-lineage {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  outline: none;
+  padding: 0;
+  position: relative;
+}
+.me-lineage-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 16px;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.me-lineage__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 28px;
+  padding: 0 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+.me-lineage__head-title {
+  text-transform: uppercase;
+  color: var(--ink);
+  font-weight: 700;
+}
+.me-lineage__head-count {
+  color: var(--ink-3);
+}
+
+.me-lineage__path {
+  padding: 6px 16px 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.me-lineage-path {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.me-lineage-path__step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.me-lineage-path__btn {
+  background: transparent;
+  border: none;
+  font: inherit;
+  color: var(--ink-2);
+  cursor: pointer;
+  padding: 1px 3px;
+}
+.me-lineage-path__btn:disabled {
+  cursor: default;
+}
+.me-lineage-path__btn.is-current {
+  color: var(--ink);
+  font-weight: 700;
+}
+.me-lineage-path__btn:hover:not(:disabled) {
+  text-decoration: underline;
+}
+.me-lineage-path__sep {
+  color: var(--ink-3);
+}
+.me-lineage-path__ellipsis {
+  background: transparent;
+  border: 1px solid var(--ink-3);
+  font: inherit;
+  cursor: pointer;
+  padding: 0 6px;
+  color: var(--ink-3);
+}
+.me-lineage-path-empty {
+  color: var(--ink-3);
+  font-style: italic;
+}
+
+.me-lineage__rule {
+  height: 1px;
+  background: var(--rule, var(--ink-3));
+  margin: 0;
+}
+
+.me-lineage__scroller {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px 12px 12px 16px;
+  position: relative;
+}
+.me-lineage__hint {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3, #8a8a83);
+  text-align: center;
+  padding: 4px 0;
+}
+.me-lineage__canvas {
+  position: relative;
+}
+.me-lineage__edges {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}
+
+.me-lineage-set {
+  position: absolute;
+  border: 0.8px dashed var(--ink-3);
+  border-radius: 4px;
+  background: transparent;
+  pointer-events: none;
+}
+.me-lineage-set__label {
+  position: absolute;
+  top: -10px;
+  left: 8px;
+  background: var(--paper);
+  padding: 0 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+.me-lineage-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+  outline: none;
+}
+.me-lineage-node__box {
+  width: 32px;
+  height: 32px;
+  border: 0.8px solid var(--ink-2);
+  border-radius: 4px;
+  background: var(--paper-2);
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 8px;
+}
+.me-lineage-node.is-current .me-lineage-node__box {
+  width: 36px;
+  height: 36px;
+  margin-top: 4px;
+  border: 1.5px solid var(--ink);
+  box-shadow: 0 0 0 4px var(--banana-soft, #ffe9a366);
+}
+.me-lineage-node.is-ghost .me-lineage-node__box {
+  background: var(--paper-3, #efe9d8);
+}
+.me-lineage-node__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.me-lineage-node__placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+}
+/* Derivation kind marker — anchored to the LineageNode wrapper (not
+ * the inner box), positioned at the box's top-right corner so it sits
+ * half on the border, never reaching into the thumbnail interior. */
+.me-lineage-node__kind {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 9px;
+  height: 9px;
+  z-index: 2;
+  pointer-events: none;
+}
+.me-lineage-node.is-current .me-lineage-node__kind {
+  top: 0;
+  right: 0;
+}
+.me-lineage-node__kind--mask_edit {
+  background: var(--ink);
+}
+.me-lineage-node__kind--outpaint {
+  background: var(--paper);
+  border: 1.2px solid var(--ink);
+}
+/* Source-of-next member — quiet ink dot at the bottom-right corner.
+ * The old big triangle felt redundant alongside the kind marker. */
+.me-lineage-node__source-dot {
+  position: absolute;
+  bottom: -3px;
+  right: -3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink);
+  z-index: 2;
+  pointer-events: none;
+}
+
+/* Hover preview card — appears to the right of the node, ~350 ms after
+ * the cursor lands so it doesn't flash during quick scans. */
+.me-lineage-node__hover {
+  position: absolute;
+  top: -4px;
+  left: calc(100% + 12px);
+  width: 200px;
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  box-shadow: 4px 4px 0 var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink);
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+}
+.me-lineage-node__hover-thumb {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  background: var(--paper-2);
+  border-bottom: 1px solid var(--ink);
+  overflow: hidden;
+}
+.me-lineage-node__hover-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.me-lineage-node__hover-empty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-3);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+}
+.me-lineage-node__hover-body {
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.me-lineage-node__hover-title {
+  font-weight: 700;
+  margin-bottom: 4px;
+  color: var(--ink);
+}
+.me-lineage-node__hover-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+}
+.me-lineage-node__hover-key {
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.me-lineage-node__hover-val {
+  color: var(--ink);
+  text-align: right;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.me-lineage-node__label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  margin-top: 3px;
+  max-width: 56px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+.me-lineage-node.is-current .me-lineage-node__label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.me-lineage-node__now-pill {
+  position: absolute;
+  top: 50%;
+  left: 100%;
+  transform: translate(-4px, -50%);
+  background: var(--banana, #ffd84d);
+  color: var(--ink);
+  border: 1px solid var(--ink);
+  padding: 1px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 999px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.me-lineage__jumpback {
+  position: absolute;
+  right: 16px;
+  bottom: 48px;
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+  color: var(--ink);
+  z-index: 4;
+}
+.me-lineage__jumpback:hover {
+  background: var(--paper-2);
+}
+
+.me-lineage__foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  height: 28px;
+}
+.me-lineage__root-btn {
+  background: transparent;
+  border: none;
+  font: inherit;
+  color: var(--ink-2);
+  cursor: pointer;
+  padding: 0;
+}
+.me-lineage__root-btn:disabled {
+  color: var(--ink-3);
+  cursor: default;
+  opacity: 0.5;
+}
+.me-lineage__root-btn:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .me-lineage__scroller {
+    scroll-behavior: auto;
+  }
+}

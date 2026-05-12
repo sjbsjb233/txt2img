@@ -49,7 +49,10 @@ import {
   sortItems,
   computeFilterOptions,
   chipCount as chipCountFn,
+  computeSourceBadge,
 } from "../components/archive/archiveFilter.js";
+import SourceBadge from "../components/archive/SourceBadge.jsx";
+import MixedSourceBadge from "../components/archive/MixedSourceBadge.jsx";
 import FilterPopover from "../components/archive/FilterPopover.jsx";
 import SortDropdown from "../components/archive/SortDropdown.jsx";
 import ChipStrip, { FilterTrigger } from "../components/archive/ChipStrip.jsx";
@@ -117,7 +120,7 @@ function formatSeconds(s) {
 // Single-image card
 // ---------------------------------------------------------------------------
 
-function SingleImageCard({ row, focused, onClick }) {
+function SingleImageCard({ row, focused, onClick, sourceBadge = null }) {
   const img = row.images?.[0];
   const ratio = aspectFromImage(img);
   return (
@@ -167,7 +170,7 @@ function SingleImageCard({ row, focused, onClick }) {
             style={{
               position: "absolute",
               top: 6,
-              right: 6,
+              left: 6,
               width: 22,
               height: 22,
               background: "var(--banana)",
@@ -182,6 +185,7 @@ function SingleImageCard({ row, focused, onClick }) {
             ★
           </span>
         )}
+        {sourceBadge}
       </div>
       <div
         style={{
@@ -623,6 +627,7 @@ function MetaRow({ k, v, link = false }) {
 export default function ArchivePage() {
   const { user } = useAuth();
   const userId = user?.id || null;
+  const navigate = useNavigate();
 
   useEffect(() => {
     if (!userId) return;
@@ -630,6 +635,13 @@ export default function ArchivePage() {
   }, [userId]);
 
   const allRows = archiveStore.useArchive();
+  const rowsByHashId = useMemo(() => {
+    const map = new Map();
+    for (const r of allRows || []) {
+      if (r?.hash_id) map.set(r.hash_id, r);
+    }
+    return map;
+  }, [allRows]);
   const { applied, setApplied } = useArchiveFilters();
   const [sortKey, setSortKey] = useArchiveSort();
 
@@ -1189,6 +1201,10 @@ export default function ArchivePage() {
                   drawerHash={drawerHash}
                   blobByUrl={blobByUrl}
                   onItemClick={onItemClick}
+                  rowsByHashId={rowsByHashId}
+                  onNavigateToParent={(hashId, order) => {
+                    navigate(`/edit/${hashId}/${order || 1}`);
+                  }}
                 />
               ))}
               {(() => {
@@ -1248,6 +1264,32 @@ export default function ArchivePage() {
   );
 }
 
+function renderSourceBadge(desc, onNavigateToParent) {
+  if (!desc) return null;
+  if (desc.kind === "mixed") {
+    return (
+      <MixedSourceBadge
+        distinctCount={desc.distinctCount}
+        members={desc.members}
+        onPick={(m) => {
+          if (m.parentHashId) onNavigateToParent?.(m.parentHashId, m.parentOrder || 1);
+        }}
+      />
+    );
+  }
+  return (
+    <SourceBadge
+      parentSeqNo={desc.parentSeqNo}
+      parentOrder={desc.parentOrder}
+      derivationKind={desc.derivationKind}
+      unknownOrder={desc.unknownOrder}
+      onClick={() => {
+        if (desc.parentHashId) onNavigateToParent?.(desc.parentHashId, desc.parentOrder || 1);
+      }}
+    />
+  );
+}
+
 function sortKeyLabel(key) {
   switch (key) {
     case "oldest": return "oldest first";
@@ -1259,7 +1301,16 @@ function sortKeyLabel(key) {
 }
 
 // One <section data-page="N"> for each loaded page.
-function PageSection({ page, totalPages, items, drawerHash, blobByUrl, onItemClick }) {
+function PageSection({
+  page,
+  totalPages,
+  items,
+  drawerHash,
+  blobByUrl,
+  onItemClick,
+  rowsByHashId,
+  onNavigateToParent,
+}) {
   return (
     <section
       data-page={String(page)}
@@ -1287,6 +1338,8 @@ function PageSection({ page, totalPages, items, drawerHash, blobByUrl, onItemCli
         }}
       >
         {items.map((item) => {
+          const sourceBadgeDesc = computeSourceBadge(item, rowsByHashId);
+          const sourceBadge = renderSourceBadge(sourceBadgeDesc, onNavigateToParent);
           if (item.kind === "set") {
             // Expand each member into one cell per expected image so the
             // SET badge total and per-cell state stay correct even when
@@ -1339,6 +1392,7 @@ function PageSection({ page, totalPages, items, drawerHash, blobByUrl, onItemCli
                   totalCount={expectedTotal}
                   running={stillRunning}
                   onClick={() => onItemClick(item)}
+                  sourceBadge={sourceBadge}
                 />
               </div>
             );
@@ -1463,6 +1517,7 @@ function PageSection({ page, totalPages, items, drawerHash, blobByUrl, onItemCli
               row={row}
               focused={focused}
               onClick={() => onItemClick(item)}
+              sourceBadge={sourceBadge}
             />
           );
         })}

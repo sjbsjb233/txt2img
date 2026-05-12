@@ -1259,3 +1259,209 @@
     transition: none !important;
   }
 }
+
+/* =====================================================================
+ * Source-derivation badges — top-right of an archive thumbnail.
+ * Shows where the row was derived from (mask edit / outpaint parent).
+ * ===================================================================== */
+
+.arch-source-badge-wrap {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 4;
+}
+.arch-source-badge {
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  padding: 1px 6px 1px 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  min-width: 0;
+  border-radius: 2px;
+  position: relative;
+}
+.arch-source-badge:hover {
+  background: var(--paper-2);
+}
+.arch-source-badge__glyph {
+  font-size: 9px;
+  color: var(--ink);
+  line-height: 1;
+  display: inline-block;
+  transform: translateY(-0.5px);
+}
+.arch-source-badge__kind {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+}
+.arch-source-badge__kind--mask_edit {
+  background: var(--ink);
+}
+.arch-source-badge__kind--outpaint {
+  background: var(--paper);
+  border: 1.2px solid var(--ink);
+}
+.arch-source-badge__kind--default {
+  background: var(--ink-3);
+}
+.arch-source-badge__label {
+  white-space: nowrap;
+}
+
+.arch-source-badge-mixed-wrap {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 4;
+}
+.arch-source-badge--mixed {
+  position: relative;
+  top: 0;
+  right: 0;
+  padding-left: 8px;
+}
+.arch-source-badge__stack-bg-1 {
+  position: absolute;
+  top: 3px;
+  right: -3px;
+  width: 100%;
+  height: 100%;
+  background: var(--paper-3, #efe9d8);
+  border: 1px solid var(--ink);
+  z-index: -1;
+  border-radius: 2px;
+}
+.arch-source-badge__stack-bg-2 {
+  position: absolute;
+  top: 6px;
+  right: -6px;
+  width: 100%;
+  height: 100%;
+  background: var(--paper-2);
+  border: 1px solid var(--ink);
+  z-index: -2;
+  border-radius: 2px;
+}
+.arch-source-badge-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  width: 220px;
+  z-index: 6;
+  box-shadow: 4px 4px 0 var(--ink);
+  max-height: 320px;
+  overflow-y: auto;
+}
+.arch-source-badge-popover__head {
+  padding: 6px 10px;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--rule, var(--ink-3));
+  text-transform: uppercase;
+}
+.arch-source-badge-popover__list {
+  display: flex;
+  flex-direction: column;
+}
+.arch-source-badge-popover__row {
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.arch-source-badge-popover__row:hover:not(:disabled) {
+  background: var(--paper-2);
+}
+.arch-source-badge-popover__row:disabled {
+  cursor: default;
+  color: var(--ink-3);
+}
+.arch-source-badge-popover__arrow {
+  color: var(--ink-3);
+}
+
+@media (max-width: 200px) {
+  .arch-source-badge {
+    height: 16px;
+    padding: 0 4px;
+    font-size: 10px;
+  }
+  .arch-source-badge__kind {
+    display: none;
+  }
+}
+
+/* Hover detail card — appears next to the badge after a short dwell. */
+.arch-source-badge-hover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 220px;
+  background: var(--paper);
+  border: 1px solid var(--ink);
+  box-shadow: 4px 4px 0 var(--ink);
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink);
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.arch-source-badge-hover__row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.arch-source-badge-hover__key {
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 10px;
+}
+.arch-source-badge-hover__val {
+  color: var(--ink);
+  text-align: right;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.arch-source-badge-hover__preview {
+  color: var(--ink-2);
+  font-size: 10px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.arch-source-badge-hover__hint {
+  color: var(--ink-3);
+  font-size: 10px;
+  border-top: 1px solid var(--rule, var(--ink-3));
+  padding-top: 4px;
+  margin-top: 2px;
+  letter-spacing: 0.05em;
+}

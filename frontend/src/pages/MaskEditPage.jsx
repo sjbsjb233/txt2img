@@ -30,6 +30,7 @@ import { exportMaskPng, countMaskPaintedPixels, maskPaintedRatio } from "../comp
 import { useAuth } from "../store/auth.js";
 import { useMaskDraftAutosave } from "../hooks/useMaskDraftAutosave.js";
 import * as maskDraftDB from "../storage/maskDraftDB.js";
+import * as archiveStore from "../store/archive.js";
 import DraftToast from "../components/DraftToast.jsx";
 
 const MIN_MASK_PIXELS = 100;
@@ -115,6 +116,13 @@ export default function MaskEditPage() {
   useEffect(() => () => {
     if (hudTimerRef.current) clearTimeout(hudTimerRef.current);
   }, []);
+
+  // Mount the archive store so the lineage panel has rows + SSE updates.
+  // ``mount`` is idempotent — re-arming the same user is a no-op.
+  useEffect(() => {
+    if (!userId) return;
+    void archiveStore.mount(userId);
+  }, [userId]);
 
   // Load the source job + image bitmap.
   useEffect(() => {
@@ -411,11 +419,13 @@ export default function MaskEditPage() {
       // backend rejects fields that the chosen model's capabilities don't
       // expose, even if the value is something innocuous like
       // ``thinking="off"`` (which semantically means "I didn't pick one").
+      const orderNum = Math.max(1, parseInt(order, 10) || 1);
       const payload = {
         model: sourceJob.model,
         prompt: fullPrompt,
         n: 1,
         parent_hash_id: sourceJob.hash_id,
+        parent_order: orderNum,
         derivation_kind: outpaintMode ? "outpaint" : "mask_edit",
       };
       const mappedSize = sizeMap[advanced.size];
@@ -487,6 +497,50 @@ export default function MaskEditPage() {
     }
   }
 
+  // Promote the freshly-rendered result job to be the new editing source.
+  // Used by both "continue editing this result" and the auto-promotion
+  // path when the user dismisses the compare view (PRD §5.7).
+  async function promoteResultToSource() {
+    if (!resultJob) return;
+    // Snapshot the result before we clear it; ``resultJob`` becomes the
+    // new source so the next mask edit chains correctly.
+    const next = resultJob;
+    try {
+      const firstImg = (next.images || [])[0];
+      if (firstImg) {
+        const blob = await fetchImageBlob(
+          imageOriginalUrl(next.hash_id, firstImg.order)
+        );
+        if (blob) {
+          const bmp = await createImageBitmap(blob);
+          // Replace source first, then drop the result so the canvas
+          // stage doesn't briefly render against the old bitmap.
+          setSourceJob(next);
+          setSourceImage(bmp);
+          setImageW(bmp.width);
+          setImageH(bmp.height);
+          // Revoke old URL once we have a fresh one in hand.
+          if (sourceImageUrl) URL.revokeObjectURL(sourceImageUrl);
+          setSourceImageUrl(URL.createObjectURL(blob));
+        }
+      }
+    } catch (e) {
+      console.warn("promoteResultToSource: failed to decode result", e);
+    }
+    // Reset mask history so subsequent ⌘Z doesn't jump to the previous
+    // job's painted state.
+    historyStackRef.current = null;
+    setHistory([]);
+    setStatus("idle");
+    setStatusHint("paint a mask area before submitting (≥ 100 px)");
+    setResultJob(null);
+    if (resultUrl) URL.revokeObjectURL(resultUrl);
+    setResultUrl(null);
+    setDerivedVersions([]);
+    // Sync URL so refresh keeps us on the new source.
+    navigate(`/edit/${next.hash_id}/1`, { replace: true });
+  }
+
   async function pollUntilTerminal(targetHash, maxAttempts = 120, intervalMs = 1500) {
     for (let i = 0; i < maxAttempts; i++) {
       try {
@@ -544,8 +598,13 @@ export default function MaskEditPage() {
         else if (k === "m") setTool("rect");
         else if (k === "l") setTool("lasso");
         else if (k === "w") setTool("wand");
-        else if (k === "v" || k === "h") setTool("pan");
-        else if (k === "o") {
+        else if (k === "v") setTool("pan");
+        else if (k === "h") {
+          // ``H`` opens the lineage / history tab. The original
+          // "pan with H" shortcut moves to ``V`` only — the new
+          // history view is more valuable as the first-class home.
+          setTab("history");
+        } else if (k === "o") {
           setOutpaintMode((on) => !on);
           if (!outpaintMode) setTool("outpaint");
           else setTool("brush");
@@ -703,8 +762,6 @@ export default function MaskEditPage() {
             onRemoveRef={onRemoveRef}
             advanced={advanced}
             setAdvanced={setAdvanced}
-            history={history}
-            onJumpHistory={jumpHistory}
             onOp={applyOp}
             lastOp={lastOp}
             sourceThumbUrl={sourceImageUrl}
@@ -713,6 +770,8 @@ export default function MaskEditPage() {
             setOutpaint={setOutpaint}
             imageW={imageW}
             imageH={imageH}
+            sourceHashId={sourceJob?.hash_id}
+            sourceOrder={Math.max(1, parseInt(order, 10) || 1)}
           />
         )}
       </div>
@@ -755,12 +814,7 @@ export default function MaskEditPage() {
           <button
             className="btn shadowed"
             style={{ height: 42 }}
-            onClick={() => {
-              navigate(`/edit/${resultJob.hash_id}/1`);
-              setStatus("idle");
-              setResultJob(null);
-              setResultUrl(null);
-            }}
+            onClick={() => { void promoteResultToSource(); }}
             data-testid="me-compare-continue"
           >
             continue editing this result

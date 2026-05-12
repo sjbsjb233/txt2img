@@ -121,6 +121,7 @@ class JobIndexEntry(BaseModel):
     status: str
     updated_at: datetime
     parent_hash_id: str | None = None
+    parent_order: int | None = None
     derivation_kind: str | None = None
     model: str | None = None
 
@@ -200,6 +201,7 @@ class JobDetail(BaseModel):
 
     # Derivation (mask edit / outpaint).
     parent_hash_id: str | None = None
+    parent_order: int | None = None
     derivation_kind: str | None = None
     derived_count: int | None = None
 

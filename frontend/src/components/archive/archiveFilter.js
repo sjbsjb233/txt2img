@@ -273,6 +273,93 @@ export function chipCount(applied) {
   return n;
 }
 
+// ---------------------------------------------------------------------------
+// Source-badge resolution (PRD §5.5).
+//
+// Given an archive item (single or set) and a Map of rows keyed by
+// hash_id, return the badge descriptor to render in the thumbnail's
+// top-right. ``null`` when the item has no parent at all.
+// ---------------------------------------------------------------------------
+
+export function computeSourceBadge(item, rowsByHashId) {
+  if (!item || !rowsByHashId) return null;
+
+  // Single-image card.
+  if (item.kind === "single") {
+    const row = item.row;
+    if (!row?.parent_hash_id) return null;
+    const parent = rowsByHashId.get(row.parent_hash_id);
+    return {
+      kind: "single",
+      parentSeqNo: parent?.seq_no ?? null,
+      parentOrder: row.parent_order || null,
+      parentHashId: row.parent_hash_id,
+      derivationKind: row.derivation_kind || null,
+      unknownOrder: !row.parent_order,
+    };
+  }
+
+  // Set card. Distinguish create-set (1 jobs row, N images on it) from
+  // batch-set (N jobs rows sharing the same set_id).
+  if (item.kind === "set") {
+    const members = item.members || [];
+    if (members.length === 0) return null;
+
+    if (members.length === 1) {
+      // Create-set: a single jobs row with multi-image output. The whole
+      // set shares the parent.
+      const row = members[0];
+      if (!row?.parent_hash_id) return null;
+      const parent = rowsByHashId.get(row.parent_hash_id);
+      return {
+        kind: "single",
+        parentSeqNo: parent?.seq_no ?? null,
+        parentOrder: row.parent_order || null,
+        parentHashId: row.parent_hash_id,
+        derivationKind: row.derivation_kind || null,
+        unknownOrder: !row.parent_order,
+      };
+    }
+
+    // Batch-set: aggregate distinct parents across members.
+    const parentList = members.map((m) => m.parent_hash_id || null);
+    const nonNull = parentList.filter((p) => p);
+    if (nonNull.length === 0) return null; // pure-original batch
+    const distinct = new Set(nonNull);
+    const allSame = distinct.size === 1 && parentList.every((p) => p);
+    if (allSame) {
+      const parent = rowsByHashId.get(nonNull[0]);
+      const row = members.find((m) => m.parent_hash_id === nonNull[0]);
+      return {
+        kind: "single",
+        parentSeqNo: parent?.seq_no ?? null,
+        parentOrder: row?.parent_order || null,
+        parentHashId: nonNull[0],
+        derivationKind: row?.derivation_kind || null,
+        unknownOrder: !row?.parent_order,
+      };
+    }
+    // Mixed.
+    const mixedMembers = members.map((m) => {
+      const parent = m.parent_hash_id ? rowsByHashId.get(m.parent_hash_id) : null;
+      return {
+        memberHashId: m.hash_id,
+        memberSeqNo: m.seq_no ?? null,
+        parentHashId: m.parent_hash_id || null,
+        parentSeqNo: parent?.seq_no ?? null,
+        parentOrder: m.parent_order || null,
+      };
+    });
+    return {
+      kind: "mixed",
+      distinctCount: distinct.size,
+      members: mixedMembers,
+    };
+  }
+
+  return null;
+}
+
 // Remove a single chip from `applied` and return the resulting filter.
 export function removeChip(applied, propId, value) {
   const next = JSON.parse(JSON.stringify(applied || {}));

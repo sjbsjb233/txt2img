@@ -273,6 +273,12 @@ class Job(Base):
     # Derivation metadata (mask edit / outpaint).
     parent_hash_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     derivation_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ``parent_order`` records *which image* of the parent job was used as
+    # the source. Only meaningful when the parent is a create-set (one
+    # ``jobs`` row with multiple ``images.img_order`` outputs); for single-
+    # image parents this is always 1. NULL on historical rows predating the
+    # field — the UI degrades gracefully.
+    parent_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Detailed cost / usage info from upstream — surfaced to the user
     # in the compare view's right panel.

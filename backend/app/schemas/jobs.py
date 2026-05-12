@@ -158,6 +158,14 @@ class JobCreatePayload(BaseModel):
         description="If this submission derives from an existing job, "
         "the parent's hash_id.",
     )
+    parent_order: int | None = Field(
+        default=None,
+        ge=1,
+        le=64,
+        description="When ``parent_hash_id`` points at a create-set parent "
+        "(one job with N images), this is the 1-based image order that "
+        "was used as the source. Must be empty when ``parent_hash_id`` is.",
+    )
     derivation_kind: DerivationKind | None = None
     outpaint_directions: list[OutpaintDirection] | None = Field(
         default=None,
@@ -198,6 +206,10 @@ class JobCreatePayload(BaseModel):
         if a != b:
             raise ValueError(
                 "parent_hash_id and derivation_kind must be both set or both unset"
+            )
+        if self.parent_order is not None and self.parent_hash_id is None:
+            raise ValueError(
+                "parent_order requires parent_hash_id"
             )
         is_outpaint = self.derivation_kind == DerivationKind.OUTPAINT
         if is_outpaint:
@@ -280,6 +292,7 @@ class JobCreatePayload(BaseModel):
             "client_request_id",
             "captcha_token",
             "parent_hash_id",
+            "parent_order",
             "derivation_kind",
             "outpaint_directions",
             "outpaint_amount",
@@ -305,6 +318,7 @@ class JobCreateResponse(BaseModel):
     set_id: str | None = None
     client_request_id: str | None = None
     parent_hash_id: str | None = None
+    parent_order: int | None = None
     derivation_kind: str | None = None
     batch_id: str | None = None
 
