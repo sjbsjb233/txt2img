@@ -73,6 +73,17 @@ class ProviderModelCapabilities(BaseModel):
 
     # Numeric / boolean knobs
     n_max: int | None = Field(default=None, ge=1, le=64)
+    # ``n_max_upstream`` is the per-call upstream ceiling: how many images
+    # one *single* provider HTTP request can return. ``n_max`` above is
+    # the user-facing slider ceiling on the Create page. When
+    # ``n_max_upstream < n_max`` (e.g. Gemini upstream returns 1/req but
+    # we expose a 4-image slider), the frontend transparently fans out a
+    # user pick of n=K into K parallel n=1 POSTs sharing one ``set_id``.
+    # Server-side validation (job_validator, provider_selector) keys off
+    # ``n_max_upstream`` when present; ``None`` means "same as ``n_max``"
+    # for backward compatibility with rows written before this field
+    # existed.
+    n_max_upstream: int | None = Field(default=None, ge=1, le=64)
     partial_images_max: int | None = Field(default=None, ge=0, le=16)
     max_reference_images: int | None = Field(default=None, ge=0, le=64)
     max_prompt_chars: int | None = Field(default=None, ge=1, le=200_000)

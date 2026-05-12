@@ -231,6 +231,47 @@ async def test_capabilities_match_n_max(initialized_db: None) -> None:
 
 
 @pytest.mark.asyncio
+async def test_capabilities_match_n_max_upstream_overrides_n_max(
+    initialized_db: None,
+) -> None:
+    """``n_max_upstream`` is the per-call ceiling; ``n_max`` is just slider UX.
+
+    Mirrors the Create-page fan-out plan (§4.1.2): a Gemini-style provider
+    advertises ``n_max=4`` (slider ceiling) but ``n_max_upstream=1`` (single
+    call). A request that still carries ``n=2`` after the frontend should
+    have fanned out must not match this provider.
+    """
+    await _bootstrap()
+    await _seed_provider(
+        pid="p_gemini_like",
+        models=[("gpt-image-2", {"n_max": 4, "n_max_upstream": 1}, True)],
+    )
+    selector, _, _ = _selector()
+    out = await selector.select(_user(), _request(n=2))
+    assert [c.provider.provider_id for c in out] == []
+    # n=1 (the fan-out sub-request) is fine.
+    out_one = await selector.select(_user(), _request(n=1))
+    assert [c.provider.provider_id for c in out_one] == ["p_gemini_like"]
+
+
+@pytest.mark.asyncio
+async def test_capabilities_match_n_max_upstream_missing_falls_back_to_n_max(
+    initialized_db: None,
+) -> None:
+    """Old rows without ``n_max_upstream`` keep the prior ``n_max`` behaviour."""
+    await _bootstrap()
+    await _seed_provider(
+        pid="p_legacy",
+        models=[("gpt-image-2", {"n_max": 4}, True)],
+    )
+    selector, _, _ = _selector()
+    out = await selector.select(_user(), _request(n=4))
+    assert [c.provider.provider_id for c in out] == ["p_legacy"]
+    out_over = await selector.select(_user(), _request(n=5))
+    assert out_over == []
+
+
+@pytest.mark.asyncio
 async def test_capabilities_match_size_list(initialized_db: None) -> None:
     """An explicit allow-list rejects sizes outside it."""
     await _bootstrap()

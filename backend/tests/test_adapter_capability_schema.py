@@ -129,6 +129,10 @@ def test_openai_v1_does_not_expose_gemini_only_fields() -> None:
 
 def test_gemini_v1beta_does_not_expose_openai_only_fields() -> None:
     keys = {f.k for f in GeminiV1BetaAdapter().capability_schema()}
+    # ``n_max`` is intentionally NOT forbidden any more: the Create-page
+    # fan-out fallback relies on it as the user-facing slider ceiling,
+    # while ``n_max_upstream`` (also exposed) carries the real per-call
+    # ceiling the validator checks against.
     for forbidden in (
         "size",
         "quality",
@@ -138,9 +142,21 @@ def test_gemini_v1beta_does_not_expose_openai_only_fields() -> None:
         "supports_mask",
         "supports_transparent_bg",
         "stream",
-        "n_max",
     ):
         assert forbidden not in keys
+
+
+def test_gemini_v1beta_exposes_n_max_and_n_max_upstream_for_fanout() -> None:
+    """Both knobs must surface so admin can configure slider vs. upstream cap.
+
+    Slider ceiling lives in ``n_max``; the real per-call cap (1 for Gemini
+    today) lives in ``n_max_upstream``. The Create page reads the first
+    for slider rendering and uses the second to decide when to fan out
+    into n=1 parallel POSTs.
+    """
+    keys = {f.k for f in GeminiV1BetaAdapter().capability_schema()}
+    assert "n_max" in keys
+    assert "n_max_upstream" in keys
 
 
 def test_openai_v1_capability_schema_has_known_kinds() -> None:

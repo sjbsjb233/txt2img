@@ -129,3 +129,60 @@ def test_pydantic_n_le_64_rejects_huge_value() -> None:
         JobCreatePayload.model_validate(
             {"model": "x", "prompt": "x", "n": 1_000_000}
         )
+
+
+# ---------------------------------------------------------------------------
+# n_max_upstream — Create-page fan-out fallback (see plan §4.1.2).
+#
+# When ``n_max_upstream`` is set, it overrides ``n_max`` for the per-call
+# check: a Gemini-style model exposes ``n_max=4`` to the slider but only
+# ``n_max_upstream=1`` to the upstream call, so a job with ``n=4`` must
+# still be rejected (the frontend should have fanned out into n=1 calls).
+# ---------------------------------------------------------------------------
+
+
+def test_n_max_upstream_overrides_n_max_when_both_set() -> None:
+    caps = ModelCapabilities(n_max=4, n_max_upstream=1)
+    # Slider would let user pick 4, but a single POST with n=4 must fail
+    # because the upstream call can only return 1.
+    fail = validate_against_capabilities(
+        _payload(n=4), caps, reference_count=0
+    )
+    assert fail is not None
+    assert fail.field == "n"
+    assert "1" in fail.message
+
+
+def test_n_max_upstream_allows_per_call_value() -> None:
+    caps = ModelCapabilities(n_max=4, n_max_upstream=1)
+    # The fan-out helper on the frontend issues n=1 sub-requests — those
+    # must clear validation.
+    assert (
+        validate_against_capabilities(_payload(n=1), caps, reference_count=0)
+        is None
+    )
+
+
+def test_n_max_upstream_none_falls_back_to_n_max() -> None:
+    """Older capability rows without ``n_max_upstream`` keep old behaviour."""
+    caps = ModelCapabilities(n_max=4)  # n_max_upstream is None
+    # n=4 should still pass; n=5 should fail with n_max=4.
+    assert (
+        validate_against_capabilities(_payload(n=4), caps, reference_count=0)
+        is None
+    )
+    fail = validate_against_capabilities(
+        _payload(n=5), caps, reference_count=0
+    )
+    assert fail is not None
+    assert fail.field == "n"
+
+
+def test_n_max_upstream_alone_caps_request() -> None:
+    """``n_max_upstream`` alone (no ``n_max``) still caps the per-call n."""
+    caps = ModelCapabilities(n_max_upstream=2)
+    fail = validate_against_capabilities(
+        _payload(n=3), caps, reference_count=0
+    )
+    assert fail is not None
+    assert fail.field == "n"

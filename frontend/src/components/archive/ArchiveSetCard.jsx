@@ -119,8 +119,18 @@ export default function ArchiveSetCard({
           // 单 cell 仍在生成 / 缩略图未就绪 — 同视觉，语义保留区分
           if (cellState === "running" || cellState === "loading") {
             return (
-              <div key={i} className="arch-cell arch-cell-running">
-                <span className="arch-spin" />
+              <div
+                key={i}
+                className="arch-cell arch-cell-running"
+                data-testid="archive-set-panel"
+                data-panel-index={i}
+                data-panel-status={cellState}
+              >
+                <span
+                  data-testid="archive-set-panel-status"
+                  data-status={cellState}
+                  className="arch-spin"
+                />
               </div>
             );
           }
@@ -142,8 +152,28 @@ export default function ArchiveSetCard({
             <div
               key={i}
               className={`arch-cell ${failClass}`.trim()}
+              data-testid="archive-set-panel"
+              data-panel-index={i}
+              data-panel-status={cellState}
+              data-panel-seq-no={img?.seq_no ?? ""}
+              data-panel-hash-id={img?.hash_id ?? ""}
               style={cellStyle}
             >
+              <span
+                data-testid="archive-set-panel-status"
+                data-status={cellState}
+                style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", opacity: 0 }}
+              >
+                {cellState}
+              </span>
+              {img?.seq_no != null ? (
+                <span
+                  data-testid="archive-set-panel-seq-no"
+                  style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", opacity: 0 }}
+                >
+                  {img.seq_no}
+                </span>
+              ) : null}
               {/* partial fail 时的右上角红角标 */}
               {cellState === "fail" && <div className="arch-cell-corner">!</div>}
 

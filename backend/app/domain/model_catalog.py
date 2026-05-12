@@ -496,6 +496,7 @@ _LIST_KEYS: tuple[str, ...] = (
 # Numeric upper bounds → max across providers.
 _NUMERIC_KEYS: tuple[str, ...] = (
     "n_max",
+    "n_max_upstream",
     "partial_images_max",
     "max_reference_images",
     "max_prompt_chars",

@@ -142,6 +142,29 @@ class GeminiV1BetaAdapter(BaseAdapter):
                 help="3.1 Flash only.",
             ),
             CapabilityFieldInt(
+                k="n_max",
+                min=1,
+                max=8,
+                help=(
+                    "User-facing slider ceiling on the Create page. Gemini "
+                    "upstream returns one image per call (n_max_upstream=1), "
+                    "but a higher n_max here lets the user request multiple "
+                    "images; the frontend fans them out into parallel n=1 "
+                    "calls sharing one set_id."
+                ),
+            ),
+            CapabilityFieldInt(
+                k="n_max_upstream",
+                min=1,
+                max=8,
+                help=(
+                    "Maximum n a single upstream Gemini call returns. The "
+                    "provider currently single-shots one image per request, "
+                    "so this should stay at 1 unless Google ships true "
+                    "multi-image batching."
+                ),
+            ),
+            CapabilityFieldInt(
                 k="max_reference_images",
                 min=0,
                 max=_MAX_REFERENCES,
@@ -190,8 +213,12 @@ class GeminiV1BetaAdapter(BaseAdapter):
 
         fields: list[ModelUIField] = [
             ModelUIField(
-                # Gemini hard-codes n=1, but the panel still renders the
-                # ticker so the slot doesn't shift when switching models.
+                # Gemini upstream returns 1 image per call, but the
+                # Create page renders a 1/2/4 ticker and the frontend
+                # fans out higher picks into parallel n=1 POSTs sharing
+                # one set_id. The adapter-side ceiling is 8 to leave the
+                # operator headroom; the actual user-visible max is the
+                # merged ``capabilities.n_max`` across providers.
                 k="n_max",
                 value_key="n",
                 control="number",
@@ -200,8 +227,8 @@ class GeminiV1BetaAdapter(BaseAdapter):
                 group="primary",
                 order=10,
                 min=1,
-                max=1,
-                presets=[1],
+                max=8,
+                presets=[1, 2, 4],
             ),
             ModelUIField(
                 k="aspect_ratio",
