@@ -8,15 +8,21 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import HoverPortal from "../HoverPortal.jsx";
+
 export default function MixedSourceBadge({ distinctCount, members, onPick }) {
   const [open, setOpen] = useState(false);
   const [hover, setHover] = useState(false);
   const ref = useRef(null);
+  const popoverRef = useRef(null);
 
   useEffect(() => {
     function onDocClick(e) {
-      if (!ref.current) return;
-      if (!ref.current.contains(e.target)) setOpen(false);
+      const wrap = ref.current;
+      const popover = popoverRef.current;
+      if (wrap && wrap.contains(e.target)) return;
+      if (popover && popover.contains(e.target)) return;
+      setOpen(false);
     }
     if (open) {
       document.addEventListener("mousedown", onDocClick);
@@ -61,7 +67,12 @@ export default function MixedSourceBadge({ distinctCount, members, onPick }) {
         <span className="arch-source-badge__glyph" aria-hidden="true">▶</span>
         <span className="arch-source-badge__label">mixed · {distinctCount}</span>
       </button>
-      {hover && !open && (
+      <HoverPortal
+        anchorRef={ref}
+        open={hover && !open}
+        preferredSide="below"
+        align="end"
+      >
         <div className="arch-source-badge-hover" role="tooltip">
           <div className="arch-source-badge-hover__row">
             <span className="arch-source-badge-hover__key">sources</span>
@@ -74,11 +85,19 @@ export default function MixedSourceBadge({ distinctCount, members, onPick }) {
           <div className="arch-source-badge-hover__preview">{memberSummary}</div>
           <div className="arch-source-badge-hover__hint">click → expand list</div>
         </div>
-      )}
-      {open && (
+      </HoverPortal>
+      <HoverPortal
+        anchorRef={ref}
+        open={open}
+        preferredSide="below"
+        align="end"
+        pointerEvents="auto"
+        zIndex={5100}
+      >
         <div
           className="arch-source-badge-popover"
           data-testid="arch-source-badge-popover"
+          ref={popoverRef}
           onClick={(e) => e.stopPropagation()}
         >
           <div className="arch-source-badge-popover__head">members → sources</div>
@@ -105,7 +124,7 @@ export default function MixedSourceBadge({ distinctCount, members, onPick }) {
             ))}
           </div>
         </div>
-      )}
+      </HoverPortal>
     </div>
   );
 }
