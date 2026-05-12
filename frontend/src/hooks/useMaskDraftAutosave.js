@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as maskDraftDB from "../storage/maskDraftDB.js";
 import { countMaskPaintedPixels } from "../components/maskeditor/utils/maskExport.js";
 
-const SCHEMA_V = 1;
+const SCHEMA_V = 2;
 const DEBOUNCE_MS = 800;
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -80,7 +80,6 @@ export function useMaskDraftAutosave({
   mode,
   enabled,
   prompt,
-  negative,
   refs,
   brushOpts,
   advanced,
@@ -122,7 +121,6 @@ export function useMaskDraftAutosave({
 
   const liveRef = useRef({
     prompt,
-    negative,
     refs,
     brushOpts,
     advanced,
@@ -138,7 +136,6 @@ export function useMaskDraftAutosave({
   useEffect(() => {
     liveRef.current = {
       prompt,
-      negative,
       refs,
       brushOpts,
       advanced,
@@ -153,7 +150,6 @@ export function useMaskDraftAutosave({
     };
   }, [
     prompt,
-    negative,
     refs,
     brushOpts,
     advanced,
@@ -282,7 +278,6 @@ export function useMaskDraftAutosave({
       mask_h: live.maskCanvas?.height || live.imageH || 0,
       has_paint: hasPaint,
       prompt: live.prompt || "",
-      negative: live.negative || "",
       refs: refsFiles,
       brush_opts: { ...(live.brushOpts || {}) },
       advanced: { ...(live.advanced || {}) },
@@ -364,7 +359,6 @@ export function useMaskDraftAutosave({
       mask_h: live.maskCanvas?.height || live.imageH || 0,
       has_paint: hasPaint,
       prompt: live.prompt || "",
-      negative: live.negative || "",
       refs: refsFiles,
       brush_opts: { ...(live.brushOpts || {}) },
       advanced: { ...(live.advanced || {}) },
@@ -454,7 +448,6 @@ export function useMaskDraftAutosave({
     draftId,
     status,
     prompt,
-    negative,
     refs,
     brushOpts,
     advanced,

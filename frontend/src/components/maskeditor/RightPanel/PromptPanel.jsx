@@ -1,19 +1,31 @@
 import { useRef } from "react";
 import { Field, FieldLabel, Seg, Toggle } from "./atoms.jsx";
-import { PROMPT_PRESETS } from "../../../config/maskEdit.js";
+import {
+  PROMPT_PRESETS,
+  FALLBACK_TEMPLATE_INPAINT,
+  FALLBACK_TEMPLATE_OUTPAINT,
+} from "../../../config/maskEdit.js";
 import MEIcon from "../MEIcon.jsx";
+import MaskMethodBar from "./MaskMethodBar.jsx";
+import FallbackTemplateBlock from "./FallbackTemplateBlock.jsx";
 
 export default function PromptPanel({
   prompt,
   setPrompt,
-  negative,
-  setNegative,
   refs = [],
   onAddRef,
   onRemoveRef,
   advanced,
   setAdvanced,
   sourceThumbUrl,
+  maskMethod = "native",
+  outpaintMode = false,
+  templateOpen = false,
+  setTemplateOpen,
+  templateLocked = true,
+  setTemplateLocked,
+  customTemplate = null,
+  setCustomTemplate,
 }) {
   const promptRef = useRef(null);
   function insertPreset(text) {
@@ -30,8 +42,31 @@ export default function PromptPanel({
       ta.setSelectionRange((before + text).length, (before + text).length);
     });
   }
+  const defaultTemplate = outpaintMode
+    ? FALLBACK_TEMPLATE_OUTPAINT
+    : FALLBACK_TEMPLATE_INPAINT;
+  const modified = customTemplate != null && customTemplate !== defaultTemplate;
   return (
-    <div className="me-panel-body">
+    <div className="me-panel-body" data-testid="me-prompt-panel">
+      <MaskMethodBar
+        method={maskMethod}
+        expanded={templateOpen}
+        onToggle={() => setTemplateOpen?.(!templateOpen)}
+      />
+      {maskMethod === "fallback" && templateOpen && (
+        <FallbackTemplateBlock
+          value={customTemplate}
+          defaultValue={defaultTemplate}
+          locked={templateLocked}
+          modified={modified}
+          onChange={(v) => setCustomTemplate?.(v)}
+          onUnlock={() => setTemplateLocked?.(false)}
+          onLock={() => setTemplateLocked?.(true)}
+          onReset={() => {
+            setCustomTemplate?.(null);
+          }}
+        />
+      )}
       <Field label="prompt" extra={`${prompt.length} / 32000`}>
         <textarea
           ref={promptRef}
@@ -60,22 +95,6 @@ export default function PromptPanel({
           ))}
         </div>
       </div>
-
-      <details style={{ marginBottom: 14 }}>
-        <summary
-          className="me-field-label__name"
-          style={{ cursor: "pointer", marginBottom: 6 }}
-        >
-          ▸ avoid (negative)
-        </summary>
-        <textarea
-          className="inp"
-          rows={2}
-          value={negative}
-          onChange={(e) => setNegative(e.target.value)}
-          style={{ resize: "none", marginTop: 6, lineHeight: 1.5 }}
-        />
-      </details>
 
       <div style={{ borderTop: "1px solid var(--rule)", margin: "16px -16px 12px", padding: "12px 16px 0" }}>
         <FieldLabel extra={`${refs.length + 1} / 16`}>references</FieldLabel>

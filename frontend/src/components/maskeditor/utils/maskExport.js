@@ -72,3 +72,43 @@ export function maskPaintedRatio(maskCanvas) {
   if (!total) return 0;
   return countMaskPaintedPixels(maskCanvas) / total;
 }
+
+// Export a black-and-white mask PNG for the *fallback* path (model
+// doesn't have a native mask channel, so we feed the mask as a second
+// reference image).
+//
+// Convention matches backend/app/domain/test_cases.py — white pixels
+// mark the EDIT region, black pixels mark the PRESERVE region. We
+// binarize the same way ``exportMaskPng`` does so any unsupported
+// model sees the same shape as the native path.
+export async function exportFallbackMaskPng(maskCanvas) {
+  const w = maskCanvas.width;
+  const h = maskCanvas.height;
+  const off = document.createElement("canvas");
+  off.width = w;
+  off.height = h;
+  const ctx = off.getContext("2d");
+  // Start black (preserve everywhere).
+  ctx.fillStyle = "rgb(0,0,0)";
+  ctx.fillRect(0, 0, w, h);
+
+  const sourceCtx = maskCanvas.getContext("2d");
+  const src = sourceCtx.getImageData(0, 0, w, h);
+  const out = ctx.getImageData(0, 0, w, h);
+  for (let i = 0; i < src.data.length; i += 4) {
+    const edit = src.data[i + 3] > PAINT_THRESHOLD;
+    const v = edit ? 255 : 0;
+    out.data[i] = v;
+    out.data[i + 1] = v;
+    out.data[i + 2] = v;
+    out.data[i + 3] = 255;
+  }
+  ctx.putImageData(out, 0, 0);
+
+  return await new Promise((resolve, reject) => {
+    off.toBlob(
+      (blob) => (blob ? resolve(blob) : reject(new Error("toBlob failed"))),
+      "image/png"
+    );
+  });
+}

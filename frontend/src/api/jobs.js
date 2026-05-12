@@ -118,3 +118,65 @@ export function deleteJob(hashId) {
     method: "DELETE",
   });
 }
+
+/**
+ * POST /api/jobs/<hash>/replace_image (multipart).
+ *
+ * Composite a mask-only edit result back into the source image and
+ * upload the merged PNG. Used by the compare-mode "accept changes"
+ * flow when the user picks the ``mask-only`` preservation strategy.
+ *
+ * Backend backs up the original to ``01_*.original.png`` and updates
+ * ``meta.json`` with ``images[0].composite = "mask_only_overlay"``.
+ * The call is one-shot: a second attempt returns 409.
+ */
+export async function replaceJobImage(hashId, composite, strategy = "mask_only_overlay") {
+  const body = new FormData();
+  body.append("composite", composite, composite.name || "composite.png");
+  body.append("strategy", strategy);
+
+  const url = `${getApiBase().replace(/\/+$/, "")}/api/jobs/${encodeURIComponent(hashId)}/replace_image`;
+  const headers = { Accept: "application/json" };
+  const token = getToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+
+  let res;
+  try {
+    res = await fetch(url, { method: "POST", body, headers });
+  } catch (e) {
+    throw new Error(`network error: ${e.message || e}`);
+  }
+
+  let data = null;
+  const text = await res.text();
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+  if (!res.ok) {
+    const detail =
+      (data && typeof data === "object" && data.detail) ||
+      res.statusText ||
+      `HTTP ${res.status}`;
+    let backendMessage;
+    let code = null;
+    if (typeof detail === "string") {
+      backendMessage = detail;
+    } else if (detail && typeof detail === "object") {
+      backendMessage =
+        typeof detail.message === "string" ? detail.message : JSON.stringify(detail);
+      code = typeof detail.code === "string" ? detail.code : null;
+    } else {
+      backendMessage = String(detail);
+    }
+    const err = new Error(backendMessage);
+    err.status = res.status;
+    err.code = code;
+    err.data = data;
+    throw err;
+  }
+  return data;
+}
