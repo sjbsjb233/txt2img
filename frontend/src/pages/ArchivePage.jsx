@@ -92,16 +92,22 @@ function fullTimestamp(iso) {
   )}:${pad(t.getMinutes())}:${pad(t.getSeconds())}`;
 }
 
-// Best-effort estimate of how many image cells a SET member is expected
-// to produce. Used so a RUNNING / FAILED member still occupies the right
-// number of slots in the contact-sheet layout. Falls back to 1 when the
-// row has neither image_count nor params.n nor any images yet.
+// Number of image slots a SET member should occupy in the contact sheet.
+// Takes the max of the user-requested ``n`` and the count we actually
+// received — so a SUCCEEDED member whose upstream returned fewer images
+// than requested still shows all ``n`` slots (the extras render as
+// partial-fail placeholders, matching how RUNNING shows ``n`` running
+// slots). Falls back to images.length, then 1.
 function expectedImagesForMember(row) {
-  if (row?.image_count && row.image_count > 0) return row.image_count;
-  if (Array.isArray(row?.images) && row.images.length > 0) return row.images.length;
-  const n = row?.params?.n ?? row?.params?.batch_size ?? row?.batch_size;
-  if (typeof n === "number" && n > 0) return n;
-  return 1;
+  const stored = Array.isArray(row?.images) ? row.images.length : 0;
+  const declared =
+    (row?.image_count && row.image_count > 0 ? row.image_count : null) ??
+    row?.params?.n ??
+    row?.params?.batch_size ??
+    row?.batch_size;
+  const declaredN =
+    typeof declared === "number" && declared > 0 ? declared : 0;
+  return Math.max(stored, declaredN, 1);
 }
 
 function formatSeconds(s) {
@@ -883,6 +889,18 @@ export default function ArchivePage() {
           state: blob ? "done" : "loading",
         });
       }
+      // Upstream returned fewer images than requested (relay quirk on some
+      // gpt-image-2 providers). Surface the gap as "missing" slots so the
+      // SET tile still matches ``params.n`` — otherwise the badge would
+      // silently halve after generation finishes.
+      for (let k = imgs.length; k < expected; k++) {
+        detailPanels.push({
+          ownerRow: member,
+          ownerImage: null,
+          title: `#${member.seq_no}`,
+          state: "fail",
+        });
+      }
     }
     const firstRow = setItem.members[0];
     const drawerPanel =
@@ -1315,6 +1333,12 @@ function PageSection({ page, totalPages, items, drawerHash, blobByUrl, onItemCli
                     ? { src: blob, state: "done" }
                     : { state: "loading" }
                 );
+              }
+              // Mirror the set-detail loop: when fewer images came back
+              // than ``params.n`` requested, the missing slots render as
+              // partial-fail so the SET badge keeps the requested total.
+              for (let k = imgs.length; k < expected; k++) {
+                cells.push({ state: "fail" });
               }
             }
             const stillRunning = item.members.some(
