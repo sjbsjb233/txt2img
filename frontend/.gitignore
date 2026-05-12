@@ -6,3 +6,8 @@ dist
 .env
 .env.local
 .env.*.local
+
+# Scratchpad for Playwright specs — ignored so ad-hoc experiments don't
+# leak into git history. To commit a spec intentionally, use
+# `git add -f tests/foo.spec.js`.
+tests/
