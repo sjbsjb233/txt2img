@@ -17,7 +17,7 @@
 //     right edge; ``below`` flips to ``above`` if there's no room below.
 //   - Clamps the orthogonal axis to keep the card inside the viewport.
 
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 const VIEWPORT_PADDING = 4;
@@ -93,16 +93,30 @@ export default function HoverPortal({
         prev && prev.left === left && prev.top === top ? prev : { left, top }
       );
     }
+    // ``scroll`` fires once per frame (or more) during a kinetic / trackpad
+    // gesture, and each call reads layout via ``getBoundingClientRect`` and
+    // may trigger a ``setState``. Coalesce all events into one rAF tick so
+    // we do at most one measure-and-position per frame.
+    let frame = null;
+    function schedule() {
+      if (frame != null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        compute();
+      });
+    }
     // Two passes: first paint with the card hidden to measure, then
     // re-measure once children have rendered (e.g. an <img> loaded).
     compute();
-    const raf = requestAnimationFrame(compute);
-    window.addEventListener("resize", compute);
-    window.addEventListener("scroll", compute, true);
+    const initialFrame = requestAnimationFrame(compute);
+    const scrollListenerOpts = { capture: true, passive: true };
+    window.addEventListener("resize", schedule, { passive: true });
+    window.addEventListener("scroll", schedule, scrollListenerOpts);
     return () => {
-      cancelAnimationFrame(raf);
-      window.removeEventListener("resize", compute);
-      window.removeEventListener("scroll", compute, true);
+      cancelAnimationFrame(initialFrame);
+      if (frame != null) cancelAnimationFrame(frame);
+      window.removeEventListener("resize", schedule);
+      window.removeEventListener("scroll", schedule, scrollListenerOpts);
     };
   }, [open, anchorRef, preferredSide, align, offset]);
 
