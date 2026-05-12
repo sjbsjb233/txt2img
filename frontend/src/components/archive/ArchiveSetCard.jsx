@@ -71,6 +71,7 @@ export default function ArchiveSetCard({
   metaRight,
   onClick,
   className,
+  sourceBadge = null,
 }) {
   const total = totalCount ?? images.length;
   const n = Math.min(images.length, 4);
@@ -92,6 +93,7 @@ export default function ArchiveSetCard({
       metaRight={right}
       onClick={onClick}
       className={className}
+      sourceBadge={sourceBadge}
     >
       {/* 顶部 SET 徽章 — 一直保持在左上角 */}
       <span className="arch-set-badge">

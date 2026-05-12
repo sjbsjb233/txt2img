@@ -129,6 +129,7 @@ class JobsRepository:
         session_id: str | None = None,
         parent_hash_id: str | None = None,
         derivation_kind: str | None = None,
+        parent_order: int | None = None,
         batch_id: str | None = None,
         session: AsyncSession,
     ) -> CreatedJob:
@@ -168,6 +169,7 @@ class JobsRepository:
             cost_cny=0.0,
             parent_hash_id=parent_hash_id,
             derivation_kind=derivation_kind,
+            parent_order=parent_order,
             cost_dollars=None,
             usage_input_tokens=None,
             usage_output_tokens=None,

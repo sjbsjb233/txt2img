@@ -1,9 +1,9 @@
 import BrushPanel from "./BrushPanel.jsx";
 import SelectPanel from "./SelectPanel.jsx";
 import PromptPanel from "./PromptPanel.jsx";
-import HistoryPanel from "./HistoryPanel.jsx";
 import MaskOpsRow from "./MaskOpsRow.jsx";
-import OutpaintRightPanel from "./OutpaintRightPanel.jsx";
+import OutpaintToolPanel from "./OutpaintToolPanel.jsx";
+import LineageGraphPanel from "../lineage/LineageGraphPanel.jsx";
 import { SectionHeader } from "./atoms.jsx";
 
 const TOOL_LABEL = {
@@ -31,8 +31,6 @@ export default function RightPanel({
   onRemoveRef,
   advanced,
   setAdvanced,
-  history,
-  onJumpHistory,
   onOp,
   lastOp,
   sourceThumbUrl,
@@ -41,35 +39,35 @@ export default function RightPanel({
   setOutpaint,
   imageW,
   imageH,
+  sourceHashId,
+  sourceOrder,
 }) {
-  if (outpaintMode) {
-    return (
-      <div className="me-right-panel" data-testid="me-right-panel">
-        <OutpaintRightPanel
-          outpaint={outpaint}
-          setOutpaint={setOutpaint}
-          imageW={imageW}
-          imageH={imageH}
-          prompt={prompt}
-          setPrompt={setPrompt}
-        />
-        <MaskOpsRow onOp={onOp} lastOp={lastOp} />
-      </div>
-    );
-  }
+  // Tabs differ between inpaint and outpaint modes (PRD §5.8).
+  const tabs = outpaintMode
+    ? [
+        { id: "outpaint", label: "outpaint" },
+        { id: "prompt", label: "prompt" },
+        { id: "history", label: "history" },
+      ]
+    : [
+        { id: "tool", label: "tool" },
+        { id: "prompt", label: "prompt" },
+        { id: "history", label: "history" },
+      ];
 
-  const tabs = [
-    { id: "tool", label: "tool" },
-    { id: "prompt", label: "prompt" },
-    { id: "history", label: "history" },
-  ];
+  // Resolve a valid active tab for the current mode — switching mode
+  // shouldn't leave the active id pointing at a tab that no longer
+  // exists for that mode.
+  const validIds = new Set(tabs.map((t) => t.id));
+  const activeTab = validIds.has(tab) ? tab : tabs[0].id;
+
   return (
     <div className="me-right-panel" data-testid="me-right-panel">
       <div className="me-tabs">
         {tabs.map((t) => (
           <button
             key={t.id}
-            className={`me-tab ${tab === t.id ? "me-tab--active" : ""}`}
+            className={`me-tab ${activeTab === t.id ? "me-tab--active" : ""}`}
             onClick={() => setTab(t.id)}
             data-testid={`me-tab-${t.id}`}
           >
@@ -78,7 +76,7 @@ export default function RightPanel({
         ))}
       </div>
       <div className="me-tab-content">
-        {tab === "tool" && (
+        {activeTab === "tool" && !outpaintMode && (
           <>
             <SectionHeader action={tool}>{TOOL_LABEL[tool] || tool}</SectionHeader>
             {tool === "brush" || tool === "eraser" ? (
@@ -92,7 +90,18 @@ export default function RightPanel({
             )}
           </>
         )}
-        {tab === "prompt" && (
+        {activeTab === "outpaint" && outpaintMode && (
+          <>
+            <SectionHeader>outpaint</SectionHeader>
+            <OutpaintToolPanel
+              outpaint={outpaint}
+              setOutpaint={setOutpaint}
+              imageW={imageW}
+              imageH={imageH}
+            />
+          </>
+        )}
+        {activeTab === "prompt" && (
           <>
             <SectionHeader>prompt &amp; references</SectionHeader>
             <PromptPanel
@@ -109,16 +118,14 @@ export default function RightPanel({
             />
           </>
         )}
-        {tab === "history" && (
-          <>
-            <SectionHeader action={`${history.length} / 50 steps`}>
-              history
-            </SectionHeader>
-            <HistoryPanel items={history} onJump={onJumpHistory} />
-          </>
+        {activeTab === "history" && (
+          <LineageGraphPanel
+            currentHashId={sourceHashId}
+            currentOrder={sourceOrder || 1}
+          />
         )}
       </div>
-      <MaskOpsRow onOp={onOp} lastOp={lastOp} />
+      {!outpaintMode && <MaskOpsRow onOp={onOp} lastOp={lastOp} />}
     </div>
   );
 }

@@ -40,6 +40,7 @@ export default function ArchiveCard({
   onClick,
   className = "",
   thumbClassName = "",
+  sourceBadge = null,
   children,
 }) {
   const sizeClass =
@@ -57,7 +58,10 @@ export default function ArchiveCard({
       onClick={onClick}
       style={onClick ? { cursor: "pointer" } : undefined}
     >
-      <div className={`arch-thumb ${thumbClassName}`.trim()}>{children}</div>
+      <div className={`arch-thumb ${thumbClassName}`.trim()}>
+        {children}
+        {sourceBadge}
+      </div>
       {(metaLeft != null || metaRight != null) && (
         <div className={`arch-meta ${metaToneClass}`.trim()}>
           <span><span className="arch-meta-track">{metaLeft}</span></span>

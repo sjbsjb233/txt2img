@@ -44,7 +44,7 @@ from typing import Any
 from fastapi import APIRouter, Form, Request
 from starlette.datastructures import UploadFile
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from app.db.engine import get_session
 from app.db.jobs_repository import (
@@ -52,7 +52,7 @@ from app.db.jobs_repository import (
     get_jobs_repository,
     serialise_params,
 )
-from app.db.models import Batch, Job, Session as SessionRow, SessionJob
+from app.db.models import Batch, Image, Job, Session as SessionRow, SessionJob
 from app.deps import CurrentUser
 from app.domain.access_policy import AccessDecision, get_access_policy
 from app.domain.job_lifecycle import (
@@ -396,6 +396,7 @@ async def create_job(
                     if body.derivation_kind is not None
                     else None
                 ),
+                parent_order=body.parent_order,
                 batch_id=body.batch_id,
                 session=session,
             )
@@ -508,6 +509,7 @@ async def create_job(
         set_id=set_id,
         client_request_id=body.client_request_id,
         parent_hash_id=body.parent_hash_id,
+        parent_order=body.parent_order,
         derivation_kind=(
             body.derivation_kind.value
             if body.derivation_kind is not None
@@ -915,40 +917,57 @@ async def _validate_parent_for_derivation(
     """
     parent_hash_id = body.parent_hash_id
     assert parent_hash_id is not None  # caller guard
+    # Single session for the parent lookup + (optional) parent_order
+    # bounds check. Keeping both reads in one transaction avoids the
+    # extra connection round-trip and rules out the (tiny) possibility
+    # of seeing the parent row but a different image count snapshot.
     async with get_session() as session:
         row = (
             await session.execute(
                 select(Job).where(Job.hash_id == parent_hash_id)
             )
         ).scalar_one_or_none()
-    if row is None:
-        raise api_error(
-            404,
-            "PARENT_JOB_NOT_FOUND",
-            f"parent job {parent_hash_id} not found",
-            field="parent_hash_id",
-        )
-    if row.user_id != user_id:
-        raise api_error(
-            403,
-            "PARENT_JOB_NOT_OWNED",
-            "parent job belongs to another user",
-            field="parent_hash_id",
-        )
-    if row.status != "SUCCEEDED":
-        raise api_error(
-            409,
-            "PARENT_JOB_NOT_TERMINAL",
-            f"parent job status={row.status} cannot be derived from",
-            field="parent_hash_id",
-        )
-    if body.model != row.model:
-        raise api_error(
-            422,
-            "INVALID_PARAMETER",
-            f"derivation must use same model as parent ({row.model})",
-            field="model",
-        )
+        if row is None:
+            raise api_error(
+                404,
+                "PARENT_JOB_NOT_FOUND",
+                f"parent job {parent_hash_id} not found",
+                field="parent_hash_id",
+            )
+        if row.user_id != user_id:
+            raise api_error(
+                403,
+                "PARENT_JOB_NOT_OWNED",
+                "parent job belongs to another user",
+                field="parent_hash_id",
+            )
+        if row.status != "SUCCEEDED":
+            raise api_error(
+                409,
+                "PARENT_JOB_NOT_TERMINAL",
+                f"parent job status={row.status} cannot be derived from",
+                field="parent_hash_id",
+            )
+        if body.model != row.model:
+            raise api_error(
+                422,
+                "INVALID_PARAMETER",
+                f"derivation must use same model as parent ({row.model})",
+                field="model",
+            )
+        if body.parent_order is not None:
+            count = (
+                await session.execute(
+                    select(func.count(Image.id)).where(Image.job_id == row.id)
+                )
+            ).scalar_one()
+            if int(count or 0) < int(body.parent_order):
+                raise api_error(
+                    422,
+                    "INVALID_PARAMETER",
+                    f"parent_order={body.parent_order} exceeds parent image count {int(count or 0)}",
+                    field="parent_order",
+                )
     return row
 
 

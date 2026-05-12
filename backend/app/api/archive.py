@@ -149,6 +149,7 @@ async def get_jobs_index(
                 Job.updated_at,
                 Job.parent_hash_id,
                 Job.derivation_kind,
+                Job.parent_order,
                 Job.model,
             )
             .where(
@@ -191,9 +192,10 @@ async def get_jobs_index(
             updated_at=_aware_utc(updated_at),
             parent_hash_id=parent_hash_id,
             derivation_kind=derivation_kind,
+            parent_order=parent_order,
             model=model,
         )
-        for hash_id, set_id, seq_no, status, updated_at, parent_hash_id, derivation_kind, model in page
+        for hash_id, set_id, seq_no, status, updated_at, parent_hash_id, derivation_kind, parent_order, model in page
     ]
     next_cursor = items[-1].hash_id if has_more and items else None
     return JobIndexResponse(items=items, next_cursor=next_cursor)
@@ -378,6 +380,7 @@ async def get_derived_jobs(
                 Job.updated_at,
                 Job.parent_hash_id,
                 Job.derivation_kind,
+                Job.parent_order,
                 Job.model,
             )
             .where(
@@ -412,9 +415,10 @@ async def get_derived_jobs(
             updated_at=_aware_utc(ua),
             parent_hash_id=ph,
             derivation_kind=dk,
+            parent_order=po,
             model=m,
         )
-        for h, sid, seq, st, ua, ph, dk, m in page
+        for h, sid, seq, st, ua, ph, dk, po, m in page
     ]
     next_cursor = items[-1].hash_id if has_more and items else None
     return DerivedJobsResponse(items=items, next_cursor=next_cursor)
@@ -1036,6 +1040,7 @@ def _project_detail(
         error=job.status_reason if job.status == "FAILED" else None,
         flags=flags,
         parent_hash_id=job.parent_hash_id,
+        parent_order=job.parent_order,
         derivation_kind=job.derivation_kind,
         derived_count=derived_count,
         cost=cost,

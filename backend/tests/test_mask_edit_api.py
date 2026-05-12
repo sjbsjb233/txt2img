@@ -446,3 +446,202 @@ def test_outpaint_synth_canvas_size() -> None:
     # Mask: pixel inside original area opaque (=255), outside =0
     assert mask_img.getpixel((0, 0))[3] == 255  # original area
     assert mask_img.getpixel((383, 383))[3] == 0  # extended area
+
+
+# ---------------------------------------------------------------------------
+# parent_order plumbing (PRD §6.1)
+# ---------------------------------------------------------------------------
+
+
+async def _make_succeeded_parent(
+    client: httpx.AsyncClient,
+    token: str,
+    *,
+    image_count: int = 1,
+) -> str:
+    """Create a parent job, mark SUCCEEDED, and seed N images on it.
+
+    Returns the parent's hash_id. The synthesised image rows are the only
+    thing parent_order validation reads.
+    """
+    resp = await client.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[("payload", (None, _job_payload(n=image_count), "application/json"))],
+    )
+    assert resp.status_code == 200, resp.text
+    parent_hash = resp.json()["hash_id"]
+
+    from app.db.engine import get_session
+    from app.db.models import Image as ImageRow, Job
+    from sqlalchemy import select, update
+
+    async with get_session() as session:
+        await session.execute(
+            update(Job).where(Job.hash_id == parent_hash).values(status="SUCCEEDED")
+        )
+        parent_row = (
+            await session.execute(select(Job).where(Job.hash_id == parent_hash))
+        ).scalar_one()
+        for order in range(1, image_count + 1):
+            session.add(
+                ImageRow(
+                    id=f"img_{parent_row.id[:6]}_{order}",
+                    job_id=parent_row.id,
+                    img_order=order,
+                    original_path=f"data/jobs/{parent_hash}/{order:02d}.png",
+                    thumb_path=f"data/jobs/{parent_hash}/{order:02d}_thumb.webp",
+                    width=64,
+                    height=64,
+                    format="png",
+                    file_size_bytes=128,
+                )
+            )
+        await session.commit()
+    return parent_hash
+
+
+@pytest.mark.asyncio
+async def test_create_derived_job_carries_parent_order(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """A mask edit derived from order=3 of a create-set persists parent_order=3
+    and surfaces it on both create response and JobDetail."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="po_happy")
+    parent_hash = await _make_succeeded_parent(seeded_app, token, image_count=4)
+
+    resp = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (
+                    None,
+                    _job_payload(
+                        parent_hash_id=parent_hash,
+                        parent_order=3,
+                        derivation_kind="mask_edit",
+                    ),
+                    "application/json",
+                ),
+            ),
+            ("ref_0", ("source.png", _ref_png(64, 64), "image/png")),
+            ("mask", ("mask.png", _mask_png(64, 64), "image/png")),
+        ],
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["parent_hash_id"] == parent_hash
+    assert body["parent_order"] == 3
+    assert body["derivation_kind"] == "mask_edit"
+
+    # JobDetail should mirror the field too.
+    detail = await seeded_app.get(
+        f"/api/jobs/{body['hash_id']}", headers=_auth(token)
+    )
+    assert detail.status_code == 200, detail.text
+    dbody = detail.json()
+    assert dbody["parent_order"] == 3
+
+
+@pytest.mark.asyncio
+async def test_create_derived_rejects_out_of_range_parent_order(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """parent_order beyond the parent's image count is a 422."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="po_bounds")
+    parent_hash = await _make_succeeded_parent(seeded_app, token, image_count=2)
+
+    resp = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (
+                    None,
+                    _job_payload(
+                        parent_hash_id=parent_hash,
+                        parent_order=5,  # parent only has 2 images
+                        derivation_kind="mask_edit",
+                    ),
+                    "application/json",
+                ),
+            ),
+            ("ref_0", ("source.png", _ref_png(64, 64), "image/png")),
+            ("mask", ("mask.png", _mask_png(64, 64), "image/png")),
+        ],
+    )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["detail"]["code"] == "INVALID_PARAMETER"
+    assert "parent_order" in body["detail"].get("field", "")
+
+
+@pytest.mark.asyncio
+async def test_parent_order_without_parent_hash_id_is_422(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """parent_order alone (no parent_hash_id) is a schema violation."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="po_orphan")
+    resp = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (
+                    None,
+                    _job_payload(parent_order=1),
+                    "application/json",
+                ),
+            ),
+        ],
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"]["code"] == "INVALID_PARAMETER"
+
+
+@pytest.mark.asyncio
+async def test_jobs_index_includes_parent_order(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """The /api/jobs/index entries expose parent_order so the lineage
+    selector can resolve which image of a create-set the child came from."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="po_index")
+    parent_hash = await _make_succeeded_parent(seeded_app, token, image_count=4)
+
+    resp = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (
+                    None,
+                    _job_payload(
+                        parent_hash_id=parent_hash,
+                        parent_order=2,
+                        derivation_kind="mask_edit",
+                    ),
+                    "application/json",
+                ),
+            ),
+            ("ref_0", ("source.png", _ref_png(64, 64), "image/png")),
+            ("mask", ("mask.png", _mask_png(64, 64), "image/png")),
+        ],
+    )
+    assert resp.status_code == 200, resp.text
+    derived_hash = resp.json()["hash_id"]
+
+    idx = await seeded_app.get("/api/jobs/index", headers=_auth(token))
+    assert idx.status_code == 200, idx.text
+    items = idx.json()["items"]
+    derived_entry = next(it for it in items if it["hash_id"] == derived_hash)
+    assert derived_entry["parent_order"] == 2
+    assert derived_entry["derivation_kind"] == "mask_edit"
