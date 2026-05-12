@@ -7,7 +7,9 @@
 // "go back up". The kind chip (filled / hollow square) carries the
 // derivation kind (mask edit / outpaint).
 
-import { useState } from "react";
+import { useRef, useState } from "react";
+
+import HoverPortal from "../HoverPortal.jsx";
 
 export default function SourceBadge({
   parentSeqNo,
@@ -18,6 +20,7 @@ export default function SourceBadge({
   unknownOrder,
 }) {
   const [hover, setHover] = useState(false);
+  const wrapRef = useRef(null);
   if (parentSeqNo == null) return null;
   const labelTag = parentOrder
     ? `#${parentSeqNo}-${parentOrder}`
@@ -36,6 +39,7 @@ export default function SourceBadge({
   return (
     <div
       className="arch-source-badge-wrap"
+      ref={wrapRef}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
     >
@@ -58,7 +62,12 @@ export default function SourceBadge({
         <span className="arch-source-badge__glyph" aria-hidden="true">▶</span>
         <span className="arch-source-badge__label">{labelTag}</span>
       </button>
-      {hover && (
+      <HoverPortal
+        anchorRef={wrapRef}
+        open={hover}
+        preferredSide="below"
+        align="end"
+      >
         <div className="arch-source-badge-hover" role="tooltip">
           <div className="arch-source-badge-hover__row">
             <span className="arch-source-badge-hover__key">source</span>
@@ -76,7 +85,7 @@ export default function SourceBadge({
           )}
           <div className="arch-source-badge-hover__hint">click → open parent</div>
         </div>
-      )}
+      </HoverPortal>
     </div>
   );
 }

@@ -19,6 +19,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import AuthorizedImage from "../../AuthorizedImage.jsx";
+import HoverPortal from "../../HoverPortal.jsx";
 
 const HOVER_DELAY_MS = 350;
 
@@ -112,7 +113,9 @@ export default function LineageNode({
           NOW
         </span>
       )}
-      {hover && <NodeHoverCard node={node} label={label} />}
+      <HoverPortal anchorRef={ref} open={hover} preferredSide="right" align="start">
+        <NodeHoverCard node={node} label={label} />
+      </HoverPortal>
     </div>
   );
 }

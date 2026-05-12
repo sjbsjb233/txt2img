@@ -1352,15 +1352,11 @@
   border-radius: 2px;
 }
 .arch-source-badge-popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
   background: var(--paper);
   border: 1px solid var(--ink);
   font-family: var(--font-mono);
   font-size: 11px;
   width: 220px;
-  z-index: 6;
   box-shadow: 4px 4px 0 var(--ink);
   max-height: 320px;
   overflow-y: auto;
@@ -1411,11 +1407,9 @@
   }
 }
 
-/* Hover detail card — appears next to the badge after a short dwell. */
+/* Hover detail card — positioning is owned by HoverPortal, so this rule
+ * only declares the card's visual identity. */
 .arch-source-badge-hover {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
   width: 220px;
   background: var(--paper);
   border: 1px solid var(--ink);
@@ -1424,7 +1418,6 @@
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--ink);
-  z-index: 7;
   display: flex;
   flex-direction: column;
   gap: 4px;

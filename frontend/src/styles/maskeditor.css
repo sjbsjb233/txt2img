@@ -365,6 +365,11 @@
   flex: 1;
   overflow: auto;
   min-height: 0;
+  /* Flex column so lineage panel's flex:1 actually stretches and its
+   * footer (``click · ⏎ to open  /  go to root ↑``) hugs the bottom of
+   * the area instead of floating mid-panel with empty space below. */
+  display: flex;
+  flex-direction: column;
 }
 .me-panel-body { padding: 16px; }
 
@@ -1214,12 +1219,9 @@
   pointer-events: none;
 }
 
-/* Hover preview card — appears to the right of the node, ~350 ms after
- * the cursor lands so it doesn't flash during quick scans. */
+/* Hover preview card — rendered into a body-level portal by HoverPortal,
+ * which handles viewport-aware positioning. Layout/look only here. */
 .me-lineage-node__hover {
-  position: absolute;
-  top: -4px;
-  left: calc(100% + 12px);
   width: 200px;
   background: var(--paper);
   border: 1px solid var(--ink);
@@ -1227,7 +1229,6 @@
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--ink);
-  z-index: 12;
   display: flex;
   flex-direction: column;
 }
