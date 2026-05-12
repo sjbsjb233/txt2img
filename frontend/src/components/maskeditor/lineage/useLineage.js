@@ -10,7 +10,13 @@ import { computeLineage } from "./computeLineage.js";
 
 export function useLineage(currentHashId, currentOrder = 1) {
   const [tick, setTick] = useState(0);
-  useEffect(() => archiveStore.subscribe(() => setTick((n) => n + 1)), []);
+  useEffect(() => {
+    // ``archiveStore.subscribe`` returns its unsubscribe — propagate it
+    // so React invokes it on unmount and we don't leak listeners that
+    // ``setTick`` after the component is gone.
+    const off = archiveStore.subscribe(() => setTick((n) => n + 1));
+    return off;
+  }, []);
 
   const lineage = useMemo(() => {
     if (!currentHashId) return null;

@@ -500,33 +500,39 @@ export default function MaskEditPage() {
   // Promote the freshly-rendered result job to be the new editing source.
   // Used by both "continue editing this result" and the auto-promotion
   // path when the user dismisses the compare view (PRD §5.7).
+  //
+  // Gated on a successful image decode: if we can't read the result
+  // image, we keep the compare view intact rather than half-promote
+  // (which would leave the URL pointing at a job whose pixels the
+  // canvas hasn't loaded).
   async function promoteResultToSource() {
     if (!resultJob) return;
-    // Snapshot the result before we clear it; ``resultJob`` becomes the
-    // new source so the next mask edit chains correctly.
     const next = resultJob;
+    const firstImg = (next.images || [])[0];
+    if (!firstImg) return;
+
+    let blob;
+    let bmp;
     try {
-      const firstImg = (next.images || [])[0];
-      if (firstImg) {
-        const blob = await fetchImageBlob(
-          imageOriginalUrl(next.hash_id, firstImg.order)
-        );
-        if (blob) {
-          const bmp = await createImageBitmap(blob);
-          // Replace source first, then drop the result so the canvas
-          // stage doesn't briefly render against the old bitmap.
-          setSourceJob(next);
-          setSourceImage(bmp);
-          setImageW(bmp.width);
-          setImageH(bmp.height);
-          // Revoke old URL once we have a fresh one in hand.
-          if (sourceImageUrl) URL.revokeObjectURL(sourceImageUrl);
-          setSourceImageUrl(URL.createObjectURL(blob));
-        }
-      }
+      blob = await fetchImageBlob(imageOriginalUrl(next.hash_id, firstImg.order));
+      if (!blob) throw new Error("result image is empty");
+      bmp = await createImageBitmap(blob);
     } catch (e) {
       console.warn("promoteResultToSource: failed to decode result", e);
+      // Keep compare view + result job alive so the user can retry
+      // (e.g. via "continue editing this result").
+      return;
     }
+
+    // Source swap atomically — replace job + bitmap + URL together so
+    // the canvas never renders against a stale pair.
+    setSourceJob(next);
+    setSourceImage(bmp);
+    setImageW(bmp.width);
+    setImageH(bmp.height);
+    if (sourceImageUrl) URL.revokeObjectURL(sourceImageUrl);
+    setSourceImageUrl(URL.createObjectURL(blob));
+
     // Reset mask history so subsequent ⌘Z doesn't jump to the previous
     // job's painted state.
     historyStackRef.current = null;
@@ -537,7 +543,6 @@ export default function MaskEditPage() {
     if (resultUrl) URL.revokeObjectURL(resultUrl);
     setResultUrl(null);
     setDerivedVersions([]);
-    // Sync URL so refresh keeps us on the new source.
     navigate(`/edit/${next.hash_id}/1`, { replace: true });
   }
 

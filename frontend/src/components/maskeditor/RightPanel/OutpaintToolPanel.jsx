@@ -167,13 +167,18 @@ function DirBtn({ label, active, onClick }) {
 
 function parseAmount(amount, w, h) {
   if (!amount) return { x: 0, y: 0 };
+  // Guard parseInt against invalid input like "abcpx" / "%%" that would
+  // otherwise propagate NaN into newW/newH and the preview text.
   if (amount.endsWith("%")) {
-    const p = parseInt(amount.slice(0, -1), 10) / 100;
+    const raw = parseInt(amount.slice(0, -1), 10);
+    if (!Number.isFinite(raw)) return { x: 0, y: 0 };
+    const p = raw / 100;
     return { x: Math.round(w * p), y: Math.round(h * p) };
   }
   if (amount.endsWith("px")) {
-    const p = parseInt(amount.slice(0, -2), 10);
-    return { x: p, y: p };
+    const raw = parseInt(amount.slice(0, -2), 10);
+    if (!Number.isFinite(raw)) return { x: 0, y: 0 };
+    return { x: raw, y: raw };
   }
   return { x: 0, y: 0 };
 }

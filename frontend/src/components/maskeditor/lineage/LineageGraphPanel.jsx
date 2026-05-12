@@ -16,13 +16,12 @@ import { useLineage } from "./useLineage.js";
 import LineageNode from "./LineageNode.jsx";
 import LineageSetGroup from "./LineageSetGroup.jsx";
 import PathBreadcrumb from "./PathBreadcrumb.jsx";
-import { formatNodeLabel } from "./computeLineage.js";
+import { formatNodeLabel, MAX_LANES } from "./computeLineage.js";
 
 const NODE_W = 56;
 const NODE_H = 56;
 const ROW_GAP = 56; // vertical between depths
 const COL_GAP = 24; // horizontal between lane slots
-const MAX_LANES = 5;
 
 export default function LineageGraphPanel({ currentHashId, currentOrder = 1 }) {
   const navigate = useNavigate();
@@ -169,7 +168,7 @@ export default function LineageGraphPanel({ currentHashId, currentOrder = 1 }) {
           {totalNodes} {totalNodes === 1 ? "node" : "nodes"}
           {lineage.groups.length > 0
             ? ` · ${lineage.groups.length} ${
-                lineage.groups.length === 1 ? "lane" : "lanes"
+                lineage.groups.length === 1 ? "set" : "sets"
               }`
             : ""}
         </span>

@@ -164,7 +164,8 @@ class JobCreatePayload(BaseModel):
         le=64,
         description="When ``parent_hash_id`` points at a create-set parent "
         "(one job with N images), this is the 1-based image order that "
-        "was used as the source. Must be empty when ``parent_hash_id`` is.",
+        "was used as the source. Must be unset when ``parent_hash_id`` "
+        "is unset.",
     )
     derivation_kind: DerivationKind | None = None
     outpaint_directions: list[OutpaintDirection] | None = Field(

@@ -112,24 +112,38 @@ export function computeLineage(rows, currentHashId, options = {}) {
   const setIndex = indexBySetId(rows);
   const ghostNodes = new Set();
 
+  // Pre-index children by ``parent_hash_id`` so the BFS below is O(N)
+  // total instead of O(N*M) (scanning all rows for every queued node).
+  // Important when ``rows`` grows large — the selector reruns on every
+  // archiveStore notify.
+  const childrenByParent = new Map();
+  for (const row of rows.values()) {
+    const p = row?.parent_hash_id;
+    if (!p) continue;
+    if (!childrenByParent.has(p)) childrenByParent.set(p, []);
+    childrenByParent.get(p).push(row.hash_id);
+  }
+
   const rootHashId = findRoot(rows, currentHashId);
 
-  // BFS from root to collect reachable hashIds (capped at MAX_NODES).
+  // BFS from root to collect reachable hashIds. Hard cap at MAX_NODES —
+  // once we'd cross the cap we stop enqueuing and mark truncated.
   const reachable = new Set([rootHashId]);
   const queue = [rootHashId];
   let truncated = false;
   while (queue.length > 0) {
     const cur = queue.shift();
-    if (reachable.size > MAX_NODES) {
-      truncated = true;
-      break;
-    }
-    for (const row of rows.values()) {
-      if (row.parent_hash_id === cur && !reachable.has(row.hash_id)) {
-        reachable.add(row.hash_id);
-        queue.push(row.hash_id);
+    const childHashes = childrenByParent.get(cur) || [];
+    for (const childHash of childHashes) {
+      if (reachable.has(childHash)) continue;
+      if (reachable.size >= MAX_NODES) {
+        truncated = true;
+        break;
       }
+      reachable.add(childHash);
+      queue.push(childHash);
     }
+    if (truncated) break;
   }
 
   // Expand each reachable row into virtual members.

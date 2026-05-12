@@ -326,20 +326,23 @@ export function computeSourceBadge(item, rowsByHashId) {
     const nonNull = parentList.filter((p) => p);
     if (nonNull.length === 0) return null; // pure-original batch
     const distinct = new Set(nonNull);
-    const allSame = distinct.size === 1 && parentList.every((p) => p);
-    if (allSame) {
-      const parent = rowsByHashId.get(nonNull[0]);
-      const row = members.find((m) => m.parent_hash_id === nonNull[0]);
+    // "Mixed" only makes sense when there are >1 distinct non-null
+    // sources. If all non-null members share one parent (even when some
+    // siblings are originals), render the single-source badge — the
+    // mixed pill is reserved for the "members truly diverged" case.
+    if (distinct.size === 1) {
+      const parentHash = nonNull[0];
+      const parent = rowsByHashId.get(parentHash);
+      const row = members.find((m) => m.parent_hash_id === parentHash);
       return {
         kind: "single",
         parentSeqNo: parent?.seq_no ?? null,
         parentOrder: row?.parent_order || null,
-        parentHashId: nonNull[0],
+        parentHashId: parentHash,
         derivationKind: row?.derivation_kind || null,
         unknownOrder: !row?.parent_order,
       };
     }
-    // Mixed.
     const mixedMembers = members.map((m) => {
       const parent = m.parent_hash_id ? rowsByHashId.get(m.parent_hash_id) : null;
       return {
