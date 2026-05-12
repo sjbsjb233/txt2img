@@ -28,8 +28,6 @@ import {
   FALLBACK_TEMPLATE_INPAINT,
   FALLBACK_TEMPLATE_OUTPAINT,
   pickPreservationStrategy,
-  SAFE_PRESERVE_PCT,
-  ALARM_PRESERVE_PCT,
 } from "../config/maskEdit.js";
 import { analyzeMaskEdit } from "../components/maskeditor/utils/diffAnalysis.js";
 import { createHistoryStack } from "../components/maskeditor/history/HistoryStack.js";
@@ -114,13 +112,14 @@ export default function MaskEditPage() {
   // loading state in the meantime so we don't accidentally route a
   // fallback model down the native path (or vice versa).
   const [maskMethod, setMaskMethod] = useState(null); // "native" | "fallback" | null
-  const [modelCaps, setModelCaps] = useState(null);
 
   // Fallback template state — only meaningful when maskMethod === "fallback".
   // We render the base template by default but let pro users unlock + edit.
-  // Modified copy is held in draft autosave so it survives a tab close,
-  // but never goes to the server as a separate field — the resolved
-  // prompt at submit time is what the backend sees.
+  // ``customTemplate`` is wired into useMaskDraftAutosave below so a tab
+  // close / reload restores the user's edits. The lock + open toggles are
+  // intentionally ephemeral — every fresh session opens locked + collapsed
+  // so the user doesn't trip over their own past edits without realising.
+  // Resolved prompt at submit time is the only thing the backend ever sees.
   const [templateOpen, setTemplateOpen] = useState(false);
   const [templateLocked, setTemplateLocked] = useState(true);
   const [customTemplate, setCustomTemplate] = useState(null); // null = use default
@@ -187,7 +186,6 @@ export default function MaskEditPage() {
           navigate("/archive");
           return;
         }
-        setModelCaps(caps);
         setMaskMethod(method);
         setSourceJob(job);
         if (job.prompt) setPrompt(job.prompt);
@@ -316,6 +314,11 @@ export default function MaskEditPage() {
       }
       if (record.active_tool) setTool(record.active_tool);
       if (record.active_tab) setTab(record.active_tab);
+      // Fallback template (v2+ schema). Older records omit the field;
+      // a string means the user customized it, null means use default.
+      if (typeof record.custom_template === "string") {
+        setCustomTemplate(record.custom_template);
+      }
       // The canvas may not be mounted yet — stash the record so
       // onCanvasReady can paint the mask blob.
       if (!modelChanged && record.has_paint && record.mask_blob) {
@@ -361,6 +364,7 @@ export default function MaskEditPage() {
     status,
     imageW,
     imageH,
+    customTemplate,
     onRestore: onRestoreDraft,
   });
 
@@ -553,9 +557,10 @@ export default function MaskEditPage() {
             // and the freshly-decoded result bitmap; mask canvas is
             // still in hand for the painted region.
             if (!outpaintMode && maskCanvasRef && sourceImage) {
+              let resBmp = null;
               try {
                 setAnalyzing(true);
-                const resBmp = await createImageBitmap(blob);
+                resBmp = await createImageBitmap(blob);
                 const ar = await analyzeMaskEdit({
                   source: sourceImage,
                   result: resBmp,
@@ -573,6 +578,9 @@ export default function MaskEditPage() {
               } catch (e) {
                 console.warn("diff analysis failed:", e);
               } finally {
+                // Release GPU memory for the decoded result bitmap.
+                // Without close(), repeated edit/regen sessions stack up.
+                resBmp?.close?.();
                 setAnalyzing(false);
               }
             }
@@ -655,6 +663,16 @@ export default function MaskEditPage() {
     if (!sourceImage || !resultUrl || !maskCanvasRef) return null;
     const resBlob = await (await fetch(resultUrl)).blob();
     const resBmp = await createImageBitmap(resBlob);
+    try {
+      return await composeMaskOnlyOverlayInner(resBmp);
+    } finally {
+      // Free the decoded bitmap. Long edit sessions accept/regenerate
+      // many times; without close() each accumulates ImageBitmap GPU memory.
+      resBmp.close?.();
+    }
+  }
+
+  async function composeMaskOnlyOverlayInner(resBmp) {
     const w = sourceImage.width;
     const h = sourceImage.height;
     const off = document.createElement("canvas");

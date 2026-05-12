@@ -92,6 +92,11 @@ export function useMaskDraftAutosave({
   status,
   imageW,
   imageH,
+  // Custom fallback template the user unlocked + edited. ``null`` means
+  // "use the built-in default for the current mode" — we don't persist
+  // the default in records to keep them small and so a template change
+  // ships to existing drafts automatically.
+  customTemplate,
   onRestore,
 }) {
   const draftId = useMemo(
@@ -132,6 +137,7 @@ export function useMaskDraftAutosave({
     sourceJob,
     imageW,
     imageH,
+    customTemplate,
   });
   useEffect(() => {
     liveRef.current = {
@@ -147,6 +153,7 @@ export function useMaskDraftAutosave({
       sourceJob,
       imageW,
       imageH,
+      customTemplate,
     };
   }, [
     prompt,
@@ -161,6 +168,7 @@ export function useMaskDraftAutosave({
     sourceJob,
     imageW,
     imageH,
+    customTemplate,
   ]);
 
   const onRestoreRef = useRef(onRestore);
@@ -284,6 +292,8 @@ export function useMaskDraftAutosave({
       outpaint: { ...(live.outpaint || {}) },
       active_tool: live.activeTool || null,
       active_tab: live.activeTab || null,
+      custom_template:
+        typeof live.customTemplate === "string" ? live.customTemplate : null,
     };
   }, [draftId, hashId, order, mode]);
 
@@ -365,6 +375,8 @@ export function useMaskDraftAutosave({
       outpaint: { ...(live.outpaint || {}) },
       active_tool: live.activeTool || null,
       active_tab: live.activeTab || null,
+      custom_template:
+        typeof live.customTemplate === "string" ? live.customTemplate : null,
     };
     maskDraftDB.putDraft(userId, record).catch(() => {});
   }, [userId, draftId, hashId, order, mode]);
@@ -455,6 +467,7 @@ export function useMaskDraftAutosave({
     outpaintMode,
     activeTool,
     activeTab,
+    customTemplate,
     showToast,
     writeDraftNow,
   ]);

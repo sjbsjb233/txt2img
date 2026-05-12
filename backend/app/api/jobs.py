@@ -565,13 +565,22 @@ async def replace_image(
     Used by the mask-edit compare flow's ``accept changes`` button when
     the user picks the "mask-only" preservation strategy: the frontend
     builds ``source ⊕ result`` in canvas, then uploads the merged PNG
-    here. We back up the original and update ``meta.json``.
+    here.
+
+    Disk operations are atomic: composite lands in a sibling temp file,
+    the backup hardlink (``01_*.png.original``) is created via
+    ``os.link`` (which doubles as the one-shot sentinel — concurrent
+    callers see FileExistsError and get 409), then ``os.replace``
+    swaps the original. A crash at any point leaves either the
+    original or the composite in place, never a half-written file.
+
+    ``images.file_size_bytes`` is updated to match the new PNG so
+    archive / admin listings stay consistent. Sha is intentionally not
+    touched — existing lineage / archive links keep working, and
+    ``meta.json.images[0].composite`` carries the audit trail.
 
     Single-shot per image — a second call returns 409 so users can't
-    accidentally double-composite. The DB row is *not* touched (sha /
-    size live in ``images`` but we keep the row stable so existing
-    links in lineage / archive don't break). The visible file changes;
-    meta.json carries the audit trail.
+    accidentally double-composite.
     """
     if strategy not in _REPLACE_STRATEGIES:
         raise api_error(
@@ -656,25 +665,67 @@ async def replace_image(
 
     # Perform the swap on the filesystem + meta.json. Done in a thread
     # so we don't block the event loop on the rename + writes.
+    #
+    # Concurrency model:
+    #   1. Write the new bytes to a sibling temp file first. If we crash
+    #      after this, no state on disk is observable yet.
+    #   2. Claim the backup atomically via ``os.link``: if it succeeds
+    #      we own the swap exclusively (concurrent requests will see
+    #      ``FileExistsError`` and return 409). ``os.link`` is atomic on
+    #      POSIX filesystems we deploy on.
+    #   3. ``os.replace`` the temp file over the original — atomic per
+    #      POSIX. After this the user-visible file is the composite.
+    #
+    # Possible failure points are all reversible:
+    #   - step 1 fails → no on-disk changes
+    #   - step 2 raises FileExistsError → another request won; we
+    #     translate to 409 below and clean up the temp file
+    #   - step 3 fails → original is still in place, backup hardlink
+    #     is harmless (it'll get reused on the user's retry)
     def _apply_swap() -> dict[str, Any]:
-        from pathlib import Path
+        import os
         data_root = image_io._data_root()
         orig_abs = (data_root / first_img.original_path).resolve()
         if not orig_abs.is_relative_to(data_root):
             raise RuntimeError("image path escapes data root")
         if not orig_abs.exists():
+            # Either job dir was cleaned, or another request already
+            # replaced + the backup hardlink was lost externally. Either
+            # way we can't safely do a swap.
             raise FileNotFoundError(f"original image missing: {orig_abs}")
         backup = orig_abs.with_suffix(orig_abs.suffix + ".original")
-        # Sentinel for one-shot: if the backup already exists we've
-        # composited once before.
-        already = backup.exists()
-        if already:
+        tmp = orig_abs.with_suffix(orig_abs.suffix + ".composite.tmp")
+        # Step 1: stage composite into a sibling temp file.
+        try:
+            tmp.write_bytes(composite_bytes)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
+
+        # Step 2: try to claim the backup as our sentinel. ``os.link``
+        # raises FileExistsError if the backup already exists — that's
+        # our one-shot guarantee under concurrent requests.
+        try:
+            os.link(orig_abs, backup)
+        except FileExistsError:
+            tmp.unlink(missing_ok=True)
             return {"already": True}
-        # Save backup first, then overwrite. orig_abs.rename keeps
-        # permissions/owner; the rewrite uses write_bytes for clarity.
-        orig_abs.rename(backup)
-        orig_abs.write_bytes(composite_bytes)
-        # Update meta.json so debug viewers see the audit trail.
+        except FileNotFoundError:
+            # orig_abs disappeared between our ``exists()`` check and
+            # the link — treat as already-replaced rather than 500.
+            tmp.unlink(missing_ok=True)
+            return {"already": True}
+
+        # Step 3: atomic overwrite of the original. If this fails the
+        # backup hardlink + temp file are leftover but the user-visible
+        # file is unchanged; the retry will reuse the existing backup.
+        try:
+            os.replace(tmp, orig_abs)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
+
+        # Step 4: meta.json audit trail.
         meta_path = image_io.path_for_meta_json(hash_id)
         meta: dict[str, Any] = {}
         if meta_path.exists():
@@ -685,7 +736,6 @@ async def replace_image(
         images_meta = meta.get("images")
         if not isinstance(images_meta, list):
             images_meta = []
-        # ensure first slot
         while len(images_meta) < 1:
             images_meta.append({})
         if not isinstance(images_meta[0], dict):
@@ -693,7 +743,7 @@ async def replace_image(
         images_meta[0]["composite"] = strategy
         meta["images"] = images_meta
         image_io.write_meta_json(hash_id, meta)
-        return {"already": False}
+        return {"already": False, "new_size": len(composite_bytes)}
 
     try:
         swap_result = await asyncio.to_thread(_apply_swap)
@@ -708,6 +758,30 @@ async def replace_image(
             "IMAGE_ALREADY_REPLACED",
             "this image was already composited; refusing to overwrite again",
         )
+
+    # Keep ``images.file_size_bytes`` honest — admin / archive listings
+    # surface it directly from the DB row. Sha is intentionally not
+    # updated: existing lineage links keep pointing at the same image
+    # row, and ``composite`` in meta.json is the audit trail. We
+    # silently ignore the failure path here because the file swap has
+    # already succeeded — the metric drift is benign next to losing the
+    # composite.
+    new_size = swap_result.get("new_size")
+    if new_size is not None:
+        try:
+            async with get_session() as session:
+                await session.execute(
+                    update(Image)
+                    .where(Image.id == first_img.id)
+                    .values(file_size_bytes=int(new_size))
+                )
+                await session.commit()
+        except Exception:
+            logger.warning(
+                "replace_image: file size DB update failed for %s",
+                hash_id,
+                exc_info=True,
+            )
 
     return {
         "hash_id": hash_id,
@@ -1086,6 +1160,21 @@ def _validate_mask_consistency(
                     "fallback mask path requires source + black-and-white mask "
                     "as references (got "
                     f"{len(attachments.references)})",
+                    field="references",
+                )
+            # source and bw mask must agree on size — otherwise the
+            # provider may decode them on different grids and silently
+            # apply the mask offset (or rescale weirdly). We catch this
+            # at the boundary because the executor + adapter assume the
+            # invariant downstream.
+            src_size = _peek_image_size(attachments.references[0]["bytes"])
+            mask_size = _peek_image_size(attachments.references[1]["bytes"])
+            if src_size != mask_size:
+                raise api_error(
+                    422,
+                    "INVALID_MASK_DIMS",
+                    f"fallback bw-mask ref {mask_size[0]}x{mask_size[1]} "
+                    f"must match source ref {src_size[0]}x{src_size[1]}",
                     field="references",
                 )
         return

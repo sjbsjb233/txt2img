@@ -959,6 +959,120 @@ async def test_replace_image_rejects_unknown_strategy(
 
 
 @pytest.mark.asyncio
+async def test_create_mask_edit_fallback_rejects_dimension_mismatch(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Fallback path: source (ref_0) and bw mask (ref_1) must agree on
+    dimensions. Without this the provider may decode them on different
+    grids and silently misapply the mask. Mirrors the native-path
+    INVALID_MASK_DIMS check."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="fallback_mismatch")
+    parent_hash = await _make_succeeded_parent(seeded_app, token, image_count=1)
+    resp = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (
+                    None,
+                    _job_payload(
+                        parent_hash_id=parent_hash,
+                        parent_order=1,
+                        derivation_kind="mask_edit",
+                    ),
+                    "application/json",
+                ),
+            ),
+            ("ref_0", ("source.png", _ref_png(64, 64), "image/png")),
+            ("ref_1", ("bw_mask.png", _ref_png(32, 32), "image/png")),
+        ],
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"]["code"] == "INVALID_MASK_DIMS"
+
+
+@pytest.mark.asyncio
+async def test_replace_image_updates_file_size_bytes(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """After a successful composite swap the ``Image.file_size_bytes``
+    DB column reflects the new PNG byte length — otherwise archive /
+    admin listings show stale numbers."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="replace_size")
+    derived_hash, _ = await _make_succeeded_mask_edit_with_image(seeded_app, token)
+
+    # Build a slightly different PNG (same dims) so the byte length
+    # provably differs from the seeded original.
+    bigger = io.BytesIO()
+    Image.new("RGBA", (64, 64), color=(10, 20, 30, 255)).save(
+        bigger, format="PNG", compress_level=0
+    )
+    composite_bytes = bigger.getvalue()
+
+    resp = await seeded_app.post(
+        f"/api/jobs/{derived_hash}/replace_image",
+        headers=_auth(token),
+        files=[("composite", ("composite.png", composite_bytes, "image/png"))],
+        data={"strategy": "mask_only_overlay"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    # Re-read the Image row and confirm file_size_bytes matches.
+    from app.db.engine import get_session
+    from app.db.models import Image as ImageRow, Job
+    from sqlalchemy import select
+
+    async with get_session() as session:
+        job_row = (
+            await session.execute(select(Job).where(Job.hash_id == derived_hash))
+        ).scalar_one()
+        img_row = (
+            await session.execute(
+                select(ImageRow).where(ImageRow.job_id == job_row.id).limit(1)
+            )
+        ).scalar_one()
+    assert img_row.file_size_bytes == len(composite_bytes)
+
+
+@pytest.mark.asyncio
+async def test_replace_image_concurrent_double_call_returns_409(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Two concurrent replace_image calls on the same image: exactly
+    one wins with 200, the other must lose with 409 (not 404). This
+    exercises the os.link atomic-claim sentinel — the old non-atomic
+    rename → write_bytes path could race into a 404."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="replace_concurrent")
+    derived_hash, _ = await _make_succeeded_mask_edit_with_image(seeded_app, token)
+
+    composite = _ref_png(64, 64)
+    files = [("composite", ("composite.png", composite, "image/png"))]
+    data = {"strategy": "mask_only_overlay"}
+
+    import asyncio as _asyncio
+    r1, r2 = await _asyncio.gather(
+        seeded_app.post(
+            f"/api/jobs/{derived_hash}/replace_image",
+            headers=_auth(token),
+            files=files,
+            data=data,
+        ),
+        seeded_app.post(
+            f"/api/jobs/{derived_hash}/replace_image",
+            headers=_auth(token),
+            files=[("composite", ("composite.png", composite, "image/png"))],
+            data=data,
+        ),
+    )
+    statuses = sorted([r1.status_code, r2.status_code])
+    assert statuses == [200, 409], (r1.status_code, r2.status_code, r1.text, r2.text)
+
+
+@pytest.mark.asyncio
 async def test_jobs_index_includes_parent_order(
     seeded_app: httpx.AsyncClient,
 ) -> None:

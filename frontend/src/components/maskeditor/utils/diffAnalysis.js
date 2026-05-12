@@ -1,20 +1,30 @@
 // Browser-side diff/heatmap analysis for mask-edit compare mode.
 //
-// Mirrors the algorithm in backend ``provider_test_runner._inpaint_metrics``
-// so the indicators users see in the compare panel are produced by the
-// same logic that drives admin's mask sub-verdict. Three numbers:
+// Inspired by backend ``provider_test_runner._inpaint_metrics``: same
+// intent (split source-vs-result diff into preserve vs edit regions,
+// report a per-region indicator + ratio) and the same DIFF_THRESHOLD
+// noise floor, but a *different statistic* — backend reports the
+// region's mean diff magnitude normalised to 0..1 (``preserve_score``
+// / ``edit_score``) and gates on 0.05 / 0.08; we report % of pixels
+// above the noise floor (``preserve_change_pct`` / ``edit_change_pct``)
+// and gate on 5% / 15%. The two are well-correlated in practice but
+// not interchangeable, so don't compare admin sub-verdicts against
+// these numbers byte-for-byte — they're a UX guide for users, not a
+// re-implementation of the admin metric.
 //
+// Three numbers, all 0..100:
 //   - preserve_change_pct  — fraction of preserve-region pixels whose
-//     L1 difference between source and result is over the visible
-//     threshold (DIFF_THRESHOLD). Lower is better; this is the spill.
-//   - edit_change_pct      — same metric, computed inside the edit
-//     region. Higher is better; tells the user the model actually did
-//     something.
+//     L1 difference between source and result is over DIFF_THRESHOLD.
+//     Lower is better; this is the spill.
+//   - edit_change_pct      — same metric, in the edit region. Higher
+//     is better; tells the user the model actually did something.
 //   - ratio                — edit / preserve. Higher is cleaner.
 //
 // Plus a heatmap PNG blob (RGBA) you can ``URL.createObjectURL`` into
 // an <img>; it overlays the compare surface with mix-blend-mode:
-// multiply.
+// multiply. Pixels below DIFF_THRESHOLD are fully transparent so the
+// overlay reads as "where did the model actually change things",
+// matching the backend ``_make_diff_heatmap`` semantics.
 
 const DIFF_THRESHOLD = 13;  // 0..255; ~5% per-channel grey change
 
@@ -111,16 +121,18 @@ export async function analyzeMaskEdit({ source, result, mask, size = 512 }) {
       preserveTotal += 1;
       if (d > DIFF_THRESHOLD) preserveChanged += 1;
     }
-    // Heatmap ramp — blue (low) → cyan → green → yellow → red (high).
-    // Scale 0..255 → 0..1 and pick the right stop.
-    const t = Math.min(1, d / 96);
-    if (t < 0.001) {
-      heat[i] = 255;
-      heat[i + 1] = 255;
-      heat[i + 2] = 255;
-      heat[i + 3] = 0; // transparent on no diff
+    // Heatmap: transparent below DIFF_THRESHOLD (matches backend
+    // ``_make_diff_heatmap`` so admin diagnostics and user-facing
+    // overlay highlight the same pixels), then ramp blue → cyan →
+    // green → yellow → red over the visible range.
+    if (d < DIFF_THRESHOLD) {
+      heat[i + 3] = 0;
     } else {
-      // smooth ramp through {blue, cyan, green, yellow, red}
+      // 0..1 over the visible range [DIFF_THRESHOLD, DIFF_THRESHOLD + 96].
+      // We cap at +96 (≈37% per-channel grey) rather than 255 so a
+      // visible-but-modest change already saturates to red — admin's
+      // 0..255 ramp washes out for typical inpaint deltas.
+      const t = Math.min(1, (d - DIFF_THRESHOLD) / 96);
       let r, g, b;
       if (t < 0.25) {
         const k = t / 0.25;
