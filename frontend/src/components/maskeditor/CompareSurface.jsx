@@ -1,7 +1,15 @@
 import { useRef, useState } from "react";
 import MEIcon from "./MEIcon.jsx";
 
-export default function CompareSurface({ beforeUrl, afterUrl, parentLabel, derivationKind, derivedLabel }) {
+export default function CompareSurface({
+  beforeUrl,
+  afterUrl,
+  parentLabel,
+  derivationKind,
+  derivedLabel,
+  heatmapUrl,
+  showHeatmap,
+}) {
   // The frame is the inner box that holds both images; divider, grip and
   // clipPath all live in the frame's coordinate system so the visual seam
   // stays glued to the grip handle. Pointer math measures the frame, not
@@ -60,6 +68,16 @@ export default function CompareSurface({ beforeUrl, afterUrl, parentLabel, deriv
           />
         )}
 
+        {/* Heatmap overlay — full image, mix-blend multiply */}
+        {showHeatmap && heatmapUrl && (
+          <img
+            src={heatmapUrl}
+            alt="diff heatmap"
+            className="me-compare-img me-cmp-heatmap"
+            data-testid="me-cmp-heatmap"
+          />
+        )}
+
         {/* Divider line */}
         <div
           className="me-compare-divider"
@@ -80,6 +98,13 @@ export default function CompareSurface({ beforeUrl, afterUrl, parentLabel, deriv
         >
           ↔
         </div>
+        {showHeatmap && heatmapUrl && (
+          <div className="me-cmp-heatmap-legend">
+            <span className="me-cmp-heatmap-legend__cap">diff intensity</span>
+            <div className="me-cmp-heatmap-legend__bar" />
+            <span className="me-cmp-heatmap-legend__cap">low → high</span>
+          </div>
+        )}
       </div>
     </div>
   );

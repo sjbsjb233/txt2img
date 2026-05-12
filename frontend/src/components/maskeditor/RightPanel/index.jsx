@@ -24,8 +24,6 @@ export default function RightPanel({
   setBrushOpts,
   prompt,
   setPrompt,
-  negative,
-  setNegative,
   refs,
   onAddRef,
   onRemoveRef,
@@ -41,6 +39,13 @@ export default function RightPanel({
   imageH,
   sourceHashId,
   sourceOrder,
+  maskMethod = "native",
+  templateOpen = false,
+  setTemplateOpen,
+  templateLocked = true,
+  setTemplateLocked,
+  customTemplate = null,
+  setCustomTemplate,
 }) {
   // Tabs differ between inpaint and outpaint modes (PRD §5.8).
   const tabs = outpaintMode
@@ -107,14 +112,20 @@ export default function RightPanel({
             <PromptPanel
               prompt={prompt}
               setPrompt={setPrompt}
-              negative={negative}
-              setNegative={setNegative}
               refs={refs}
               onAddRef={onAddRef}
               onRemoveRef={onRemoveRef}
               advanced={advanced}
               setAdvanced={setAdvanced}
               sourceThumbUrl={sourceThumbUrl}
+              maskMethod={maskMethod}
+              outpaintMode={outpaintMode}
+              templateOpen={templateOpen}
+              setTemplateOpen={setTemplateOpen}
+              templateLocked={templateLocked}
+              setTemplateLocked={setTemplateLocked}
+              customTemplate={customTemplate}
+              setCustomTemplate={setCustomTemplate}
             />
           </>
         )}

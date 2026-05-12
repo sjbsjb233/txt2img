@@ -249,7 +249,14 @@ async def create_job(
         body.derivation_kind is None
         or body.derivation_kind.value != "outpaint"
     ):
-        _validate_mask_consistency(attachments)
+        _validate_mask_consistency(
+            attachments,
+            derivation_kind=(
+                body.derivation_kind.value
+                if body.derivation_kind is not None
+                else None
+            ),
+        )
     else:
         # Outpaint mode: synthesise the extended canvas + matching mask
         # *here*, before the executor / adapter can see the request. The
@@ -360,6 +367,16 @@ async def create_job(
             ).decode("ascii"),
             "filename": attachments.mask["filename"],
         }
+
+    # For mask_edit jobs, record which routing the frontend used so
+    # archive details / metrics dashboards can distinguish a real
+    # masked edit (gpt-image-2) from a prompt-described one (gemini).
+    # ``mask_method`` is not consumed by the executor — the path is
+    # already determined by whether ``params["mask"]`` is present.
+    if body.derivation_kind and body.derivation_kind.value == "mask_edit":
+        params["mask_method"] = (
+            "native" if attachments.mask is not None else "fallback"
+        )
 
     # Outpaint geometry travels in flags so the executor (and the
     # outpaint synthesizer) can read it without re-parsing params.
@@ -524,6 +541,254 @@ async def create_job(
         asyncio.create_task(_emit_batch_progress_after_bind(body.batch_id))
 
     return response
+
+
+# ---------------------------------------------------------------------------
+# /api/jobs/<hash>/replace_image — mask-only composite upload
+# ---------------------------------------------------------------------------
+
+
+# Allowed values for the ``strategy`` form field. We keep this an enum
+# rather than a free-form string so audit logs can pivot on it.
+_REPLACE_STRATEGIES = frozenset({"mask_only_overlay"})
+
+
+@router.post("/{hash_id}/replace_image")
+async def replace_image(
+    hash_id: str,
+    request: Request,
+    user: CurrentUser,
+    strategy: str = Form(...),
+) -> dict[str, Any]:
+    """Replace the first output PNG with a user-composited overlay.
+
+    Used by the mask-edit compare flow's ``accept changes`` button when
+    the user picks the "mask-only" preservation strategy: the frontend
+    builds ``source ⊕ result`` in canvas, then uploads the merged PNG
+    here.
+
+    Disk operations are atomic: composite lands in a sibling temp file,
+    the backup hardlink (``01_*.png.original``) is created via
+    ``os.link`` (which doubles as the one-shot sentinel — concurrent
+    callers see FileExistsError and get 409), then ``os.replace``
+    swaps the original. A crash at any point leaves either the
+    original or the composite in place, never a half-written file.
+
+    ``images.file_size_bytes`` is updated to match the new PNG so
+    archive / admin listings stay consistent. Sha is intentionally not
+    touched — existing lineage / archive links keep working, and
+    ``meta.json.images[0].composite`` carries the audit trail.
+
+    Single-shot per image — a second call returns 409 so users can't
+    accidentally double-composite.
+    """
+    if strategy not in _REPLACE_STRATEGIES:
+        raise api_error(
+            422,
+            "INVALID_COMPOSITE",
+            f"unknown strategy {strategy!r}",
+            field="strategy",
+        )
+
+    job_row = await _load_owned_job(hash_id, user.id)
+
+    if job_row.status != "SUCCEEDED":
+        raise api_error(
+            422,
+            "JOB_NOT_TERMINAL",
+            f"job in status {job_row.status} cannot accept a composite",
+        )
+    if job_row.derivation_kind not in ("mask_edit", "outpaint"):
+        raise api_error(
+            422,
+            "INVALID_COMPOSITE",
+            "only mask_edit / outpaint jobs accept a composite overlay",
+        )
+
+    # Walk multipart for the composite upload.
+    form = await request.form()
+    composite_upload = form.get("composite")
+    if not isinstance(composite_upload, UploadFile):
+        raise api_error(
+            422, "INVALID_COMPOSITE", "missing composite file", field="composite"
+        )
+    if (composite_upload.content_type or "").lower() not in {"image/png"}:
+        raise api_error(
+            422,
+            "INVALID_COMPOSITE",
+            "composite must be PNG",
+            field="composite",
+        )
+    composite_bytes = await composite_upload.read()
+    if not composite_bytes:
+        raise api_error(
+            422, "INVALID_COMPOSITE", "composite is empty", field="composite"
+        )
+    if len(composite_bytes) > _MASK_MAX_BYTES:
+        raise api_error(
+            413,
+            "INVALID_COMPOSITE",
+            f"composite exceeds {_MASK_MAX_BYTES // (1024 * 1024)}MB",
+            field="composite",
+        )
+
+    # Find the first image record so we know which file to overwrite and
+    # what dimensions to enforce.
+    async with get_session() as session:
+        result = await session.execute(
+            select(Image)
+            .where(Image.job_id == job_row.id)
+            .order_by(Image.img_order)
+            .limit(1)
+        )
+        first_img = result.scalar_one_or_none()
+    if first_img is None:
+        raise api_error(
+            404,
+            "NOT_FOUND",
+            "job has no output images to replace",
+        )
+
+    # Dimension check — PNG must match.
+    try:
+        comp_w, comp_h = _peek_image_size(composite_bytes)
+    except Exception as exc:  # pragma: no cover — _peek_image_size raises api_error
+        raise exc
+    if (comp_w, comp_h) != (first_img.width, first_img.height):
+        raise api_error(
+            422,
+            "INVALID_COMPOSITE",
+            f"composite {comp_w}x{comp_h} must match image "
+            f"{first_img.width}x{first_img.height}",
+            field="composite",
+        )
+
+    # Perform the swap on the filesystem + meta.json. Done in a thread
+    # so we don't block the event loop on the rename + writes.
+    #
+    # Concurrency model:
+    #   1. Write the new bytes to a sibling temp file first. If we crash
+    #      after this, no state on disk is observable yet.
+    #   2. Claim the backup atomically via ``os.link``: if it succeeds
+    #      we own the swap exclusively (concurrent requests will see
+    #      ``FileExistsError`` and return 409). ``os.link`` is atomic on
+    #      POSIX filesystems we deploy on.
+    #   3. ``os.replace`` the temp file over the original — atomic per
+    #      POSIX. After this the user-visible file is the composite.
+    #
+    # Possible failure points are all reversible:
+    #   - step 1 fails → no on-disk changes
+    #   - step 2 raises FileExistsError → another request won; we
+    #     translate to 409 below and clean up the temp file
+    #   - step 3 fails → original is still in place, backup hardlink
+    #     is harmless (it'll get reused on the user's retry)
+    def _apply_swap() -> dict[str, Any]:
+        import os
+        data_root = image_io._data_root()
+        orig_abs = (data_root / first_img.original_path).resolve()
+        if not orig_abs.is_relative_to(data_root):
+            raise RuntimeError("image path escapes data root")
+        if not orig_abs.exists():
+            # Either job dir was cleaned, or another request already
+            # replaced + the backup hardlink was lost externally. Either
+            # way we can't safely do a swap.
+            raise FileNotFoundError(f"original image missing: {orig_abs}")
+        backup = orig_abs.with_suffix(orig_abs.suffix + ".original")
+        tmp = orig_abs.with_suffix(orig_abs.suffix + ".composite.tmp")
+        # Step 1: stage composite into a sibling temp file.
+        try:
+            tmp.write_bytes(composite_bytes)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
+
+        # Step 2: try to claim the backup as our sentinel. ``os.link``
+        # raises FileExistsError if the backup already exists — that's
+        # our one-shot guarantee under concurrent requests.
+        try:
+            os.link(orig_abs, backup)
+        except FileExistsError:
+            tmp.unlink(missing_ok=True)
+            return {"already": True}
+        except FileNotFoundError:
+            # orig_abs disappeared between our ``exists()`` check and
+            # the link — treat as already-replaced rather than 500.
+            tmp.unlink(missing_ok=True)
+            return {"already": True}
+
+        # Step 3: atomic overwrite of the original. If this fails the
+        # backup hardlink + temp file are leftover but the user-visible
+        # file is unchanged; the retry will reuse the existing backup.
+        try:
+            os.replace(tmp, orig_abs)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
+
+        # Step 4: meta.json audit trail.
+        meta_path = image_io.path_for_meta_json(hash_id)
+        meta: dict[str, Any] = {}
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                meta = {}
+        images_meta = meta.get("images")
+        if not isinstance(images_meta, list):
+            images_meta = []
+        while len(images_meta) < 1:
+            images_meta.append({})
+        if not isinstance(images_meta[0], dict):
+            images_meta[0] = {}
+        images_meta[0]["composite"] = strategy
+        meta["images"] = images_meta
+        image_io.write_meta_json(hash_id, meta)
+        return {"already": False, "new_size": len(composite_bytes)}
+
+    try:
+        swap_result = await asyncio.to_thread(_apply_swap)
+    except FileNotFoundError as exc:
+        raise api_error(404, "NOT_FOUND", str(exc)) from exc
+    except OSError as exc:
+        raise api_error(500, "INTERNAL_ERROR", f"file swap failed: {exc}") from exc
+
+    if swap_result.get("already"):
+        raise api_error(
+            409,
+            "IMAGE_ALREADY_REPLACED",
+            "this image was already composited; refusing to overwrite again",
+        )
+
+    # Keep ``images.file_size_bytes`` honest — admin / archive listings
+    # surface it directly from the DB row. Sha is intentionally not
+    # updated: existing lineage links keep pointing at the same image
+    # row, and ``composite`` in meta.json is the audit trail. We
+    # silently ignore the failure path here because the file swap has
+    # already succeeded — the metric drift is benign next to losing the
+    # composite.
+    new_size = swap_result.get("new_size")
+    if new_size is not None:
+        try:
+            async with get_session() as session:
+                await session.execute(
+                    update(Image)
+                    .where(Image.id == first_img.id)
+                    .values(file_size_bytes=int(new_size))
+                )
+                await session.commit()
+        except Exception:
+            logger.warning(
+                "replace_image: file size DB update failed for %s",
+                hash_id,
+                exc_info=True,
+            )
+
+    return {
+        "hash_id": hash_id,
+        "order": first_img.img_order,
+        "replaced": True,
+        "composite": strategy,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -863,14 +1128,55 @@ def _peek_image_size(data: bytes) -> tuple[int, int]:
         ) from exc
 
 
-def _validate_mask_consistency(attachments: JobAttachments) -> None:
-    """Ensure mask + first reference agree on dimensions.
+def _validate_mask_consistency(
+    attachments: JobAttachments,
+    *,
+    derivation_kind: str | None = None,
+) -> None:
+    """Ensure the mask edit request has either a real mask or a fallback.
 
-    OpenAI's images.edits requires the mask and the first image to be
-    the same WxH. We check this once at the boundary so a bad pair
-    never reaches the executor.
+    Two valid shapes for ``derivation_kind == "mask_edit"``:
+
+    1. **Native** — ``attachments.mask`` is set; the first reference is
+       the source image and must share dimensions with the mask. This
+       is the path gpt-image-2 and friends take.
+    2. **Fallback** — no ``attachments.mask``; instead, the second
+       reference is a black-and-white image describing the edit
+       region. Used by models that don't have a native mask channel
+       (e.g. Gemini). We require at least two references (source +
+       bw mask) so the request can't silently degrade into a plain
+       multi-ref edit with no masking signal at all.
+
+    Non-mask-edit requests (plain create, plain derivations) pass
+    through untouched.
     """
+    is_mask_edit = derivation_kind == "mask_edit"
     if attachments.mask is None:
+        if is_mask_edit:
+            if len(attachments.references) < 2:
+                raise api_error(
+                    422,
+                    "MASK_FALLBACK_REQUIRES_TWO_REFS",
+                    "fallback mask path requires source + black-and-white mask "
+                    "as references (got "
+                    f"{len(attachments.references)})",
+                    field="references",
+                )
+            # source and bw mask must agree on size — otherwise the
+            # provider may decode them on different grids and silently
+            # apply the mask offset (or rescale weirdly). We catch this
+            # at the boundary because the executor + adapter assume the
+            # invariant downstream.
+            src_size = _peek_image_size(attachments.references[0]["bytes"])
+            mask_size = _peek_image_size(attachments.references[1]["bytes"])
+            if src_size != mask_size:
+                raise api_error(
+                    422,
+                    "INVALID_MASK_DIMS",
+                    f"fallback bw-mask ref {mask_size[0]}x{mask_size[1]} "
+                    f"must match source ref {src_size[0]}x{src_size[1]}",
+                    field="references",
+                )
         return
     if not attachments.references:
         raise api_error(

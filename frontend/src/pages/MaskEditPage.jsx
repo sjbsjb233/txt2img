@@ -18,15 +18,29 @@ import CompareRightPanel from "../components/maskeditor/CompareRightPanel.jsx";
 import HudToast from "../components/maskeditor/HudToast.jsx";
 
 import { getJob, imageOriginalUrl, fetchImageBlob } from "../api/archive.js";
-import { createJob } from "../api/jobs.js";
+import { createJob, replaceJobImage } from "../api/jobs.js";
 import { getDerivedJobs } from "../api/derived.js";
-import { supportsMaskEdit, markMaskEditUsed } from "../config/maskEdit.js";
+import { getModels } from "../api/models.js";
+import {
+  markMaskEditUsed,
+  pickMaskMethod,
+  resolveFallbackTemplate,
+  FALLBACK_TEMPLATE_INPAINT,
+  FALLBACK_TEMPLATE_OUTPAINT,
+  pickPreservationStrategy,
+} from "../config/maskEdit.js";
+import { analyzeMaskEdit } from "../components/maskeditor/utils/diffAnalysis.js";
 import { createHistoryStack } from "../components/maskeditor/history/HistoryStack.js";
 import {
   applyAll, applyClear, applyInvert, applyFeather, applyExpand,
   applyContract, applySmooth,
 } from "../components/maskeditor/ops/maskOps.js";
-import { exportMaskPng, countMaskPaintedPixels, maskPaintedRatio } from "../components/maskeditor/utils/maskExport.js";
+import {
+  exportMaskPng,
+  exportFallbackMaskPng,
+  countMaskPaintedPixels,
+  maskPaintedRatio,
+} from "../components/maskeditor/utils/maskExport.js";
 import { useAuth } from "../store/auth.js";
 import { useMaskDraftAutosave } from "../hooks/useMaskDraftAutosave.js";
 import * as maskDraftDB from "../storage/maskDraftDB.js";
@@ -70,7 +84,6 @@ export default function MaskEditPage() {
   const [tab, setTab] = useState("tool");
   const [brushOpts, setBrushOpts] = useState(DEFAULT_BRUSH);
   const [prompt, setPrompt] = useState("");
-  const [negative, setNegative] = useState("no people, no text, no logos");
   const [refs, setRefs] = useState([]);
   const [advanced, setAdvanced] = useState(DEFAULT_ADVANCED);
   const [history, setHistory] = useState([]);
@@ -93,6 +106,31 @@ export default function MaskEditPage() {
   const [derivedVersions, setDerivedVersions] = useState([]);
   const [streaming, setStreaming] = useState(null);
   const [hud, setHud] = useState(null);
+
+  // Mask method is decided once, on load, from the model's capabilities
+  // surfaced via /api/models. ``null`` until we know — we render a
+  // loading state in the meantime so we don't accidentally route a
+  // fallback model down the native path (or vice versa).
+  const [maskMethod, setMaskMethod] = useState(null); // "native" | "fallback" | null
+
+  // Fallback template state — only meaningful when maskMethod === "fallback".
+  // We render the base template by default but let pro users unlock + edit.
+  // ``customTemplate`` is wired into useMaskDraftAutosave below so a tab
+  // close / reload restores the user's edits. The lock + open toggles are
+  // intentionally ephemeral — every fresh session opens locked + collapsed
+  // so the user doesn't trip over their own past edits without realising.
+  // Resolved prompt at submit time is the only thing the backend ever sees.
+  const [templateOpen, setTemplateOpen] = useState(false);
+  const [templateLocked, setTemplateLocked] = useState(true);
+  const [customTemplate, setCustomTemplate] = useState(null); // null = use default
+
+  // Compare-mode state.
+  const [strategy, setStrategy] = useState(null); // "mask" | "full"
+  const [autoStrategy, setAutoStrategy] = useState(null); // baseline before override
+  const [diffResult, setDiffResult] = useState(null); // {metrics, heatmapUrl, tier}
+  const [analyzing, setAnalyzing] = useState(false);
+  const [showHeatmap, setShowHeatmap] = useState(false);
+  const [accepting, setAccepting] = useState(false);
 
   const historyStackRef = useRef(null);
   const canvasStageRef = useRef(null);
@@ -124,18 +162,31 @@ export default function MaskEditPage() {
     void archiveStore.mount(userId);
   }, [userId]);
 
-  // Load the source job + image bitmap.
+  // Load the source job + image bitmap, AND decide the mask method
+  // (native vs fallback) from the model's capabilities. We commit to
+  // one path for the whole editor session — switching halfway would
+  // require a different multipart shape and surprise the user.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const job = await getJob(hashId);
         if (cancelled) return;
-        if (!supportsMaskEdit(job.model)) {
+        let caps = null;
+        try {
+          const resp = await getModels();
+          const row = (resp.models || []).find((m) => m.model === job.model);
+          caps = row?.capabilities || null;
+        } catch (e) {
+          console.warn("getModels failed; assuming unsupported", e);
+        }
+        const method = pickMaskMethod(caps);
+        if (method === "unsupported") {
           alert("This model doesn't support mask editing.");
           navigate("/archive");
           return;
         }
+        setMaskMethod(method);
         setSourceJob(job);
         if (job.prompt) setPrompt(job.prompt);
         const requestedOrder = parseInt(order, 10) || 1;
@@ -242,7 +293,6 @@ export default function MaskEditPage() {
         setRestoreNote("source model changed — restored prompt + settings only");
       }
       if (typeof record.prompt === "string") setPrompt(record.prompt);
-      if (typeof record.negative === "string") setNegative(record.negative);
       if (record.brush_opts && typeof record.brush_opts === "object") {
         setBrushOpts((b) => ({ ...b, ...record.brush_opts }));
       }
@@ -264,6 +314,11 @@ export default function MaskEditPage() {
       }
       if (record.active_tool) setTool(record.active_tool);
       if (record.active_tab) setTab(record.active_tab);
+      // Fallback template (v2+ schema). Older records omit the field;
+      // a string means the user customized it, null means use default.
+      if (typeof record.custom_template === "string") {
+        setCustomTemplate(record.custom_template);
+      }
       // The canvas may not be mounted yet — stash the record so
       // onCanvasReady can paint the mask blob.
       if (!modelChanged && record.has_paint && record.mask_blob) {
@@ -297,7 +352,6 @@ export default function MaskEditPage() {
     mode: draftMode,
     enabled: !!sourceImage && !!userId,
     prompt,
-    negative,
     refs,
     brushOpts,
     advanced,
@@ -310,6 +364,7 @@ export default function MaskEditPage() {
     status,
     imageW,
     imageH,
+    customTemplate,
     onRestore: onRestoreDraft,
   });
 
@@ -405,9 +460,6 @@ export default function MaskEditPage() {
     setErrorState(null);
     setStatusHint("submitting…");
     try {
-      const fullPrompt = negative.trim()
-        ? `${prompt}\n\nAvoid: ${negative}`
-        : prompt;
       const sizeMap = {
         sq: "1024x1024",
         land: "1536x1024",
@@ -420,9 +472,21 @@ export default function MaskEditPage() {
       // expose, even if the value is something innocuous like
       // ``thinking="off"`` (which semantically means "I didn't pick one").
       const orderNum = Math.max(1, parseInt(order, 10) || 1);
+      // For the fallback path we prepend a system-prompt template so
+      // the model knows what the second reference (the bw mask) means.
+      // The resolved prompt is what hits the wire — backend has no
+      // awareness of the template, by design.
+      let finalPrompt = prompt;
+      if (maskMethod === "fallback" && !outpaintMode) {
+        const tpl = customTemplate ?? FALLBACK_TEMPLATE_INPAINT;
+        finalPrompt = resolveFallbackTemplate(tpl, prompt);
+      } else if (maskMethod === "fallback" && outpaintMode) {
+        const tpl = customTemplate ?? FALLBACK_TEMPLATE_OUTPAINT;
+        finalPrompt = resolveFallbackTemplate(tpl, prompt);
+      }
       const payload = {
         model: sourceJob.model,
-        prompt: fullPrompt,
+        prompt: finalPrompt,
         n: 1,
         parent_hash_id: sourceJob.hash_id,
         parent_order: orderNum,
@@ -442,13 +506,26 @@ export default function MaskEditPage() {
         payload.outpaint_amount = outpaint.amount;
       }
 
-      // Build references: source image first, then user-added refs.
+      // Build references + mask depending on routing.
+      //   native   → references = [source, ...userRefs]; mask = alpha PNG
+      //   fallback → references = [source, bw_mask, ...userRefs]; mask = null
+      // ⚠ For fallback the bw mask MUST come right after source; otherwise
+      // the model may grab a user-supplied ref as the masking signal.
+      // Outpaint is always native-shaped (backend synthesizes a mask).
       const sourceBlob = await (await fetch(sourceImageUrl)).blob();
       const sourceFile = new File([sourceBlob], "source.png", { type: "image/png" });
-      const refFiles = [sourceFile, ...refs.map((r) => r.file)];
 
+      let refFiles;
       let maskBlob = null;
-      if (!outpaintMode) {
+      if (outpaintMode) {
+        refFiles = [sourceFile, ...refs.map((r) => r.file)];
+      } else if (maskMethod === "fallback") {
+        const bwMask = await exportFallbackMaskPng(maskCanvasRef);
+        const bwMaskFile = new File([bwMask], "fallback_mask.png", { type: "image/png" });
+        refFiles = [sourceFile, bwMaskFile, ...refs.map((r) => r.file)];
+        maskBlob = null;
+      } else {
+        refFiles = [sourceFile, ...refs.map((r) => r.file)];
         maskBlob = await exportMaskPng(maskCanvasRef);
       }
 
@@ -474,7 +551,40 @@ export default function MaskEditPage() {
         const firstImg = (done.images || [])[0];
         if (firstImg) {
           const blob = await fetchImageBlob(imageOriginalUrl(done.hash_id, firstImg.order));
-          if (blob) setResultUrl(URL.createObjectURL(blob));
+          if (blob) {
+            setResultUrl(URL.createObjectURL(blob));
+            // Kick off diff analysis. Use the cached source bitmap
+            // and the freshly-decoded result bitmap; mask canvas is
+            // still in hand for the painted region.
+            if (!outpaintMode && maskCanvasRef && sourceImage) {
+              let resBmp = null;
+              try {
+                setAnalyzing(true);
+                resBmp = await createImageBitmap(blob);
+                const ar = await analyzeMaskEdit({
+                  source: sourceImage,
+                  result: resBmp,
+                  mask: maskCanvasRef,
+                });
+                const heatUrl = URL.createObjectURL(ar.heatmapBlob);
+                const picked = pickPreservationStrategy(ar.metrics.preserve_change_pct);
+                setDiffResult({
+                  metrics: ar.metrics,
+                  tier: ar.tier,
+                  heatmapUrl: heatUrl,
+                });
+                setAutoStrategy(picked);
+                setStrategy(picked);
+              } catch (e) {
+                console.warn("diff analysis failed:", e);
+              } finally {
+                // Release GPU memory for the decoded result bitmap.
+                // Without close(), repeated edit/regen sessions stack up.
+                resBmp?.close?.();
+                setAnalyzing(false);
+              }
+            }
+          }
         }
         // Fetch derived siblings of the parent.
         try {
@@ -544,6 +654,134 @@ export default function MaskEditPage() {
     setResultUrl(null);
     setDerivedVersions([]);
     navigate(`/edit/${next.hash_id}/1`, { replace: true });
+  }
+
+  // Compose the source + result through the painted mask, producing
+  // a single PNG: edit-region pixels come from the result, preserve-
+  // region pixels come from the source. Used by accept (mask-only).
+  async function composeMaskOnlyOverlay() {
+    if (!sourceImage || !resultUrl || !maskCanvasRef) return null;
+    const resBlob = await (await fetch(resultUrl)).blob();
+    const resBmp = await createImageBitmap(resBlob);
+    try {
+      return await composeMaskOnlyOverlayInner(resBmp);
+    } finally {
+      // Free the decoded bitmap. Long edit sessions accept/regenerate
+      // many times; without close() each accumulates ImageBitmap GPU memory.
+      resBmp.close?.();
+    }
+  }
+
+  async function composeMaskOnlyOverlayInner(resBmp) {
+    const w = sourceImage.width;
+    const h = sourceImage.height;
+    const off = document.createElement("canvas");
+    off.width = w;
+    off.height = h;
+    const ctx = off.getContext("2d");
+    // Start with the source.
+    ctx.drawImage(sourceImage, 0, 0, w, h);
+    // Build an alpha-only mask matching the painted edit region (where
+    // the user wants the result). Use a temp canvas: paint a fully
+    // opaque white wherever mask alpha > threshold.
+    const tmp = document.createElement("canvas");
+    tmp.width = w;
+    tmp.height = h;
+    const tctx = tmp.getContext("2d");
+    const srcMask = maskCanvasRef.getContext("2d").getImageData(0, 0, maskCanvasRef.width, maskCanvasRef.height);
+    const outMask = tctx.createImageData(maskCanvasRef.width, maskCanvasRef.height);
+    for (let i = 0; i < srcMask.data.length; i += 4) {
+      const on = srcMask.data[i + 3] > 16 ? 255 : 0;
+      outMask.data[i] = 255;
+      outMask.data[i + 1] = 255;
+      outMask.data[i + 2] = 255;
+      outMask.data[i + 3] = on;
+    }
+    tctx.putImageData(outMask, 0, 0);
+    // Place the result over the source clipped to the mask:
+    //   result_visible_in_mask = result × mask_alpha
+    //   final = source where mask=0; result where mask=1
+    const resCanvas = document.createElement("canvas");
+    resCanvas.width = w;
+    resCanvas.height = h;
+    const rctx = resCanvas.getContext("2d");
+    rctx.drawImage(resBmp, 0, 0, w, h);
+    rctx.globalCompositeOperation = "destination-in";
+    rctx.drawImage(tmp, 0, 0, w, h);
+    rctx.globalCompositeOperation = "source-over";
+    // Paint over the source.
+    ctx.drawImage(resCanvas, 0, 0);
+    return await new Promise((resolve, reject) => {
+      off.toBlob((b) => (b ? resolve(b) : reject(new Error("composite toBlob failed"))), "image/png");
+    });
+  }
+
+  async function onAcceptChanges() {
+    if (!resultJob || accepting) return;
+    setAccepting(true);
+    try {
+      if (strategy === "mask" && !outpaintMode) {
+        try {
+          const blob = await composeMaskOnlyOverlay();
+          if (blob) {
+            const file = new File([blob], "composite.png", { type: "image/png" });
+            await replaceJobImage(resultJob.hash_id, file, "mask_only_overlay");
+            showHud("composited · saved");
+          }
+        } catch (e) {
+          // 409 means it was already composited — that's fine, fall
+          // through to promote so we don't get stuck.
+          if (e?.status !== 409) {
+            console.warn("replace_image failed:", e);
+            alert(`Failed to save composite: ${e.message || e}`);
+            setAccepting(false);
+            return;
+          }
+        }
+      }
+      // Cleanup compare state, promote result, stay in editor.
+      if (diffResult?.heatmapUrl) URL.revokeObjectURL(diffResult.heatmapUrl);
+      setDiffResult(null);
+      setStrategy(null);
+      setAutoStrategy(null);
+      setShowHeatmap(false);
+      await promoteResultToSource();
+    } finally {
+      setAccepting(false);
+    }
+  }
+
+  function onDiscardChanges() {
+    // No confirm, no API. The result job remains in archive / lineage /
+    // versions; this is purely "don't continue editing on top of it".
+    if (resultUrl) URL.revokeObjectURL(resultUrl);
+    if (diffResult?.heatmapUrl) URL.revokeObjectURL(diffResult.heatmapUrl);
+    setResultJob(null);
+    setResultUrl(null);
+    setDiffResult(null);
+    setStrategy(null);
+    setAutoStrategy(null);
+    setShowHeatmap(false);
+    setStatus("idle");
+    setStatusHint("paint a mask area before submitting (≥ 100 px)");
+    showHud("discarded · result kept in versions");
+  }
+
+  function onRegenerateSameParams() {
+    // The current compare result stays in derivedVersions; we just
+    // submit a brand-new job with the same prompt/mask/refs.
+    if (resultUrl) URL.revokeObjectURL(resultUrl);
+    if (diffResult?.heatmapUrl) URL.revokeObjectURL(diffResult.heatmapUrl);
+    setResultJob(null);
+    setResultUrl(null);
+    setDiffResult(null);
+    setStrategy(null);
+    setAutoStrategy(null);
+    setShowHeatmap(false);
+    setStatus("idle");
+    // onSubmit reads the live state, which is unchanged — so this
+    // produces a sibling job derived from the same source.
+    setTimeout(() => { void onSubmit(); }, 0);
   }
 
   async function pollUntilTerminal(targetHash, maxAttempts = 120, intervalMs = 1500) {
@@ -706,6 +944,8 @@ export default function MaskEditPage() {
             parentLabel={`#${sourceJob.seq_no}`}
             derivedLabel={`#${resultJob.seq_no}`}
             derivationKind={outpaintMode ? "outpaint" : "mask edit"}
+            heatmapUrl={diffResult?.heatmapUrl || null}
+            showHeatmap={showHeatmap}
           />
         ) : (
           <CanvasStage
@@ -749,7 +989,19 @@ export default function MaskEditPage() {
             result={resultJob}
             parent={sourceJob}
             derivedVersions={derivedVersions}
+            metrics={diffResult?.metrics}
+            tier={diffResult?.tier}
+            strategy={strategy}
+            autoStrategy={autoStrategy}
+            onStrategyChange={setStrategy}
+            showHeatmap={showHeatmap}
+            onToggleHeatmap={setShowHeatmap}
+            onAccept={() => { void onAcceptChanges(); }}
+            onDiscard={onDiscardChanges}
+            onRegenerate={onRegenerateSameParams}
             onVersionPick={(v) => navigate(`/edit/${v.hash_id}/1`)}
+            accepting={accepting}
+            analyzing={analyzing}
           />
         ) : (
           <RightPanel
@@ -760,8 +1012,6 @@ export default function MaskEditPage() {
             setBrushOpts={setBrushOpts}
             prompt={prompt}
             setPrompt={setPrompt}
-            negative={negative}
-            setNegative={setNegative}
             refs={refs}
             onAddRef={onAddRef}
             onRemoveRef={onRemoveRef}
@@ -777,6 +1027,13 @@ export default function MaskEditPage() {
             imageH={imageH}
             sourceHashId={sourceJob?.hash_id}
             sourceOrder={Math.max(1, parseInt(order, 10) || 1)}
+            maskMethod={maskMethod || "native"}
+            templateOpen={templateOpen}
+            setTemplateOpen={setTemplateOpen}
+            templateLocked={templateLocked}
+            setTemplateLocked={setTemplateLocked}
+            customTemplate={customTemplate}
+            setCustomTemplate={setCustomTemplate}
           />
         )}
       </div>
@@ -806,57 +1063,6 @@ export default function MaskEditPage() {
       )}
       {hud && <HudToast text={hud} />}
       {showCheat && <CheatSheetOverlay onClose={() => setShowCheat(false)} />}
-      {showingCompare && (
-        <div className="me-compare-actions">
-          <button
-            className="btn shadowed primary"
-            style={{ height: 42 }}
-            onClick={() => navigate("/archive")}
-            data-testid="me-compare-save-back"
-          >
-            save &amp; back to archive
-          </button>
-          <button
-            className="btn shadowed"
-            style={{ height: 42 }}
-            onClick={() => { void promoteResultToSource(); }}
-            data-testid="me-compare-continue"
-          >
-            continue editing this result
-          </button>
-          <a
-            className="btn"
-            style={{ height: 42, textDecoration: "none" }}
-            href={resultUrl || "#"}
-            download={`${resultJob?.hash_id || "result"}.png`}
-            data-testid="me-compare-download"
-          >
-            download
-          </a>
-          <button
-            className="btn"
-            style={{ height: 42 }}
-            onClick={() => {
-              const firstImg = resultJob?.images?.[0];
-              if (firstImg) {
-                // optimistic — uses existing archive star endpoint
-                window.dispatchEvent(new CustomEvent("me:pick", { detail: { hash_id: resultJob.hash_id, order: firstImg.order } }));
-              }
-            }}
-            data-testid="me-compare-pick"
-          >
-            ★ pick
-          </button>
-          <button
-            className="btn ghost"
-            style={{ height: 42 }}
-            onClick={() => alert("show mask: not yet wired in v1")}
-            data-testid="me-compare-show-mask"
-          >
-            show mask
-          </button>
-        </div>
-      )}
     </div>
   );
 }

@@ -606,6 +606,472 @@ async def test_parent_order_without_parent_hash_id_is_422(
     assert resp.json()["detail"]["code"] == "INVALID_PARAMETER"
 
 
+# ---------------------------------------------------------------------------
+# Fallback mask-edit shape (no mask blob; bw mask comes as second ref)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_mask_edit_fallback_succeeds_with_two_refs(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Fallback path: no mask blob, but a source + bw-mask reference pair
+    is accepted. ``params.mask_method`` should land as ``"fallback"``."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="fallback_ok")
+    parent_hash = await _make_succeeded_parent(seeded_app, token, image_count=1)
+
+    resp = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (
+                    None,
+                    _job_payload(
+                        parent_hash_id=parent_hash,
+                        parent_order=1,
+                        derivation_kind="mask_edit",
+                    ),
+                    "application/json",
+                ),
+            ),
+            ("ref_0", ("source.png", _ref_png(64, 64), "image/png")),
+            ("ref_1", ("bw_mask.png", _ref_png(64, 64), "image/png")),
+        ],
+    )
+    assert resp.status_code == 200, resp.text
+    derived_hash = resp.json()["hash_id"]
+
+    from app.db.engine import get_session
+    from app.db.models import Job
+    from sqlalchemy import select
+
+    async with get_session() as session:
+        row = (
+            await session.execute(select(Job).where(Job.hash_id == derived_hash))
+        ).scalar_one()
+        params = json.loads(row.params_json)
+        assert params.get("mask_method") == "fallback"
+        assert "mask" not in params  # no native mask carried
+
+
+@pytest.mark.asyncio
+async def test_create_mask_edit_native_records_method(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Native path: mask blob attached → ``params.mask_method == "native"``."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="native_ok")
+    parent_hash = await _make_succeeded_parent(seeded_app, token, image_count=1)
+
+    resp = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (
+                    None,
+                    _job_payload(
+                        parent_hash_id=parent_hash,
+                        parent_order=1,
+                        derivation_kind="mask_edit",
+                    ),
+                    "application/json",
+                ),
+            ),
+            ("ref_0", ("source.png", _ref_png(64, 64), "image/png")),
+            ("mask", ("mask.png", _mask_png(64, 64), "image/png")),
+        ],
+    )
+    assert resp.status_code == 200, resp.text
+    derived_hash = resp.json()["hash_id"]
+
+    from app.db.engine import get_session
+    from app.db.models import Job
+    from sqlalchemy import select
+
+    async with get_session() as session:
+        row = (
+            await session.execute(select(Job).where(Job.hash_id == derived_hash))
+        ).scalar_one()
+        params = json.loads(row.params_json)
+        assert params.get("mask_method") == "native"
+        assert "mask" in params
+
+
+@pytest.mark.asyncio
+async def test_create_mask_edit_fallback_requires_two_refs(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Fallback with a single ref must be rejected — without the bw mask
+    reference the request silently degrades into a plain i2i edit, which
+    would burn upstream credit on a malformed pair."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="fallback_one_ref")
+    parent_hash = await _make_succeeded_parent(seeded_app, token, image_count=1)
+
+    resp = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (
+                    None,
+                    _job_payload(
+                        parent_hash_id=parent_hash,
+                        parent_order=1,
+                        derivation_kind="mask_edit",
+                    ),
+                    "application/json",
+                ),
+            ),
+            ("ref_0", ("source.png", _ref_png(64, 64), "image/png")),
+        ],
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"]["code"] == "MASK_FALLBACK_REQUIRES_TWO_REFS"
+
+
+# ---------------------------------------------------------------------------
+# POST /api/jobs/<hash>/replace_image
+# ---------------------------------------------------------------------------
+
+
+async def _make_succeeded_mask_edit_with_image(
+    client: httpx.AsyncClient,
+    token: str,
+    *,
+    width: int = 64,
+    height: int = 64,
+) -> tuple[str, str]:
+    """Create a parent + a mask_edit derived job, mark derived SUCCEEDED,
+    write a real PNG to disk for img_order=1 so replace_image has a file
+    to swap. Returns ``(derived_hash, original_rel_path)``."""
+    parent_hash = await _make_succeeded_parent(client, token, image_count=1)
+    resp = await client.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (
+                    None,
+                    _job_payload(
+                        parent_hash_id=parent_hash,
+                        parent_order=1,
+                        derivation_kind="mask_edit",
+                    ),
+                    "application/json",
+                ),
+            ),
+            ("ref_0", ("source.png", _ref_png(width, height), "image/png")),
+            ("mask", ("mask.png", _mask_png(width, height), "image/png")),
+        ],
+    )
+    assert resp.status_code == 200, resp.text
+    derived_hash = resp.json()["hash_id"]
+
+    from app.db.engine import get_session
+    from app.db.models import Image as ImageRow, Job
+    from sqlalchemy import select, update
+    from app.services import image_io as _io
+    from pathlib import Path
+
+    job_dir = _io.path_for_job(derived_hash)
+    outputs = job_dir / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    img_path = outputs / "01_original.png"
+    img_path.write_bytes(_ref_png(width, height))
+    rel_path = str(img_path.relative_to(_io._data_root()))
+    async with get_session() as session:
+        await session.execute(
+            update(Job).where(Job.hash_id == derived_hash).values(status="SUCCEEDED")
+        )
+        derived_row = (
+            await session.execute(select(Job).where(Job.hash_id == derived_hash))
+        ).scalar_one()
+        session.add(
+            ImageRow(
+                id=f"img_{derived_row.id[:6]}_1",
+                job_id=derived_row.id,
+                img_order=1,
+                original_path=rel_path,
+                thumb_path=rel_path,
+                width=width,
+                height=height,
+                format="png",
+                file_size_bytes=len(_ref_png(width, height)),
+            )
+        )
+        await session.commit()
+    return derived_hash, rel_path
+
+
+@pytest.mark.asyncio
+async def test_replace_image_happy_path(seeded_app: httpx.AsyncClient) -> None:
+    """Upload composite → original is backed up, file is overwritten,
+    meta.json carries the composite sentinel."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="replace_ok")
+    derived_hash, rel_path = await _make_succeeded_mask_edit_with_image(
+        seeded_app, token
+    )
+
+    composite = _ref_png(64, 64)
+    resp = await seeded_app.post(
+        f"/api/jobs/{derived_hash}/replace_image",
+        headers=_auth(token),
+        files=[
+            ("composite", ("composite.png", composite, "image/png")),
+        ],
+        data={"strategy": "mask_only_overlay"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["replaced"] is True
+    assert body["composite"] == "mask_only_overlay"
+
+    from app.services import image_io as _io
+    from pathlib import Path
+    abs_path = _io._data_root() / rel_path
+    backup = abs_path.with_suffix(abs_path.suffix + ".original")
+    assert backup.exists(), "expected .original backup to be created"
+    # meta.json should carry the composite marker.
+    meta_path = _io.path_for_meta_json(derived_hash)
+    meta = json.loads(meta_path.read_text())
+    assert meta["images"][0]["composite"] == "mask_only_overlay"
+
+
+@pytest.mark.asyncio
+async def test_replace_image_idempotency_returns_409(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """A second call on the same image returns 409 with IMAGE_ALREADY_REPLACED."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="replace_dup")
+    derived_hash, _ = await _make_succeeded_mask_edit_with_image(seeded_app, token)
+
+    composite = _ref_png(64, 64)
+    files = [("composite", ("composite.png", composite, "image/png"))]
+    data = {"strategy": "mask_only_overlay"}
+    first = await seeded_app.post(
+        f"/api/jobs/{derived_hash}/replace_image",
+        headers=_auth(token),
+        files=files,
+        data=data,
+    )
+    assert first.status_code == 200
+    second = await seeded_app.post(
+        f"/api/jobs/{derived_hash}/replace_image",
+        headers=_auth(token),
+        files=[("composite", ("composite.png", composite, "image/png"))],
+        data=data,
+    )
+    assert second.status_code == 409, second.text
+    assert second.json()["detail"]["code"] == "IMAGE_ALREADY_REPLACED"
+
+
+@pytest.mark.asyncio
+async def test_replace_image_rejects_dimension_mismatch(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """A composite that doesn't match the image dims returns 422
+    INVALID_COMPOSITE so we don't silently desync sha/size from pixels."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="replace_dim")
+    derived_hash, _ = await _make_succeeded_mask_edit_with_image(
+        seeded_app, token, width=64, height=64
+    )
+
+    wrong = _ref_png(32, 32)
+    resp = await seeded_app.post(
+        f"/api/jobs/{derived_hash}/replace_image",
+        headers=_auth(token),
+        files=[("composite", ("composite.png", wrong, "image/png"))],
+        data={"strategy": "mask_only_overlay"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["code"] == "INVALID_COMPOSITE"
+
+
+@pytest.mark.asyncio
+async def test_replace_image_rejects_running_job(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """A QUEUED / RUNNING job can't be composited — only SUCCEEDED."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="replace_running")
+    parent_hash = await _make_succeeded_parent(seeded_app, token, image_count=1)
+    resp = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (
+                    None,
+                    _job_payload(
+                        parent_hash_id=parent_hash,
+                        parent_order=1,
+                        derivation_kind="mask_edit",
+                    ),
+                    "application/json",
+                ),
+            ),
+            ("ref_0", ("source.png", _ref_png(64, 64), "image/png")),
+            ("mask", ("mask.png", _mask_png(64, 64), "image/png")),
+        ],
+    )
+    derived_hash = resp.json()["hash_id"]
+    composite = _ref_png(64, 64)
+    res = await seeded_app.post(
+        f"/api/jobs/{derived_hash}/replace_image",
+        headers=_auth(token),
+        files=[("composite", ("composite.png", composite, "image/png"))],
+        data={"strategy": "mask_only_overlay"},
+    )
+    assert res.status_code == 422
+    assert res.json()["detail"]["code"] == "JOB_NOT_TERMINAL"
+
+
+@pytest.mark.asyncio
+async def test_replace_image_rejects_unknown_strategy(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Unknown strategy → 422 INVALID_COMPOSITE up-front (before file read)."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="replace_strategy")
+    derived_hash, _ = await _make_succeeded_mask_edit_with_image(seeded_app, token)
+
+    composite = _ref_png(64, 64)
+    resp = await seeded_app.post(
+        f"/api/jobs/{derived_hash}/replace_image",
+        headers=_auth(token),
+        files=[("composite", ("composite.png", composite, "image/png"))],
+        data={"strategy": "garbage"},
+    )
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["code"] == "INVALID_COMPOSITE"
+
+
+@pytest.mark.asyncio
+async def test_create_mask_edit_fallback_rejects_dimension_mismatch(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Fallback path: source (ref_0) and bw mask (ref_1) must agree on
+    dimensions. Without this the provider may decode them on different
+    grids and silently misapply the mask. Mirrors the native-path
+    INVALID_MASK_DIMS check."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="fallback_mismatch")
+    parent_hash = await _make_succeeded_parent(seeded_app, token, image_count=1)
+    resp = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (
+                    None,
+                    _job_payload(
+                        parent_hash_id=parent_hash,
+                        parent_order=1,
+                        derivation_kind="mask_edit",
+                    ),
+                    "application/json",
+                ),
+            ),
+            ("ref_0", ("source.png", _ref_png(64, 64), "image/png")),
+            ("ref_1", ("bw_mask.png", _ref_png(32, 32), "image/png")),
+        ],
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"]["code"] == "INVALID_MASK_DIMS"
+
+
+@pytest.mark.asyncio
+async def test_replace_image_updates_file_size_bytes(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """After a successful composite swap the ``Image.file_size_bytes``
+    DB column reflects the new PNG byte length — otherwise archive /
+    admin listings show stale numbers."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="replace_size")
+    derived_hash, _ = await _make_succeeded_mask_edit_with_image(seeded_app, token)
+
+    # Build a slightly different PNG (same dims) so the byte length
+    # provably differs from the seeded original.
+    bigger = io.BytesIO()
+    Image.new("RGBA", (64, 64), color=(10, 20, 30, 255)).save(
+        bigger, format="PNG", compress_level=0
+    )
+    composite_bytes = bigger.getvalue()
+
+    resp = await seeded_app.post(
+        f"/api/jobs/{derived_hash}/replace_image",
+        headers=_auth(token),
+        files=[("composite", ("composite.png", composite_bytes, "image/png"))],
+        data={"strategy": "mask_only_overlay"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    # Re-read the Image row and confirm file_size_bytes matches.
+    from app.db.engine import get_session
+    from app.db.models import Image as ImageRow, Job
+    from sqlalchemy import select
+
+    async with get_session() as session:
+        job_row = (
+            await session.execute(select(Job).where(Job.hash_id == derived_hash))
+        ).scalar_one()
+        img_row = (
+            await session.execute(
+                select(ImageRow).where(ImageRow.job_id == job_row.id).limit(1)
+            )
+        ).scalar_one()
+    assert img_row.file_size_bytes == len(composite_bytes)
+
+
+@pytest.mark.asyncio
+async def test_replace_image_concurrent_double_call_returns_409(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Two concurrent replace_image calls on the same image: exactly
+    one wins with 200, the other must lose with 409 (not 404). This
+    exercises the os.link atomic-claim sentinel — the old non-atomic
+    rename → write_bytes path could race into a 404."""
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="replace_concurrent")
+    derived_hash, _ = await _make_succeeded_mask_edit_with_image(seeded_app, token)
+
+    composite = _ref_png(64, 64)
+    files = [("composite", ("composite.png", composite, "image/png"))]
+    data = {"strategy": "mask_only_overlay"}
+
+    import asyncio as _asyncio
+    r1, r2 = await _asyncio.gather(
+        seeded_app.post(
+            f"/api/jobs/{derived_hash}/replace_image",
+            headers=_auth(token),
+            files=files,
+            data=data,
+        ),
+        seeded_app.post(
+            f"/api/jobs/{derived_hash}/replace_image",
+            headers=_auth(token),
+            files=[("composite", ("composite.png", composite, "image/png"))],
+            data=data,
+        ),
+    )
+    statuses = sorted([r1.status_code, r2.status_code])
+    assert statuses == [200, 409], (r1.status_code, r2.status_code, r1.text, r2.text)
+
+
 @pytest.mark.asyncio
 async def test_jobs_index_includes_parent_order(
     seeded_app: httpx.AsyncClient,
