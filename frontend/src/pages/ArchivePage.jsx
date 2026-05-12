@@ -895,7 +895,10 @@ export default function ArchivePage() {
         detailPanels.push({
           ownerRow: member,
           ownerImage: img,
-          title: `#${member.seq_no}`,
+          title:
+            imgs.length > 1
+              ? `#${member.seq_no}-${img.order}`
+              : `#${member.seq_no}`,
           starred: !!img.starred,
           src: blob || apiUrl,
           state: blob ? "done" : "loading",
