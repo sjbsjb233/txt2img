@@ -653,9 +653,16 @@ def _capabilities_match(caps: Mapping[str, Any], request: NormalizedRequest) -> 
                 continue
             return False
 
-    # 2. n_max
-    n_max = caps.get("n_max")
-    if isinstance(n_max, int) and request.n > n_max:
+    # 2. n_max — compare against the *upstream* ceiling, the only
+    # number that matters when picking which provider can actually
+    # service a single HTTP call. ``n_max`` (no "_upstream") is the
+    # user-facing slider cap; if it differs the frontend has already
+    # fanned the original request out into n=1 sub-requests, so by the
+    # time a provider gets picked ``request.n`` is the per-call value.
+    n_cap = caps.get("n_max_upstream")
+    if n_cap is None:
+        n_cap = caps.get("n_max")
+    if isinstance(n_cap, int) and request.n > n_cap:
         return False
 
     # 3. Reference image cap.

@@ -1368,17 +1368,24 @@ function PageSection({
             const cells = [];
             for (const member of item.members) {
               const expected = expectedImagesForMember(member);
+              const memberMeta = {
+                seq_no: member.seq_no,
+                hash_id: member.hash_id,
+              };
               if (member.status === "FAILED" || member.status === "CANCELLED") {
-                for (let k = 0; k < expected; k++) cells.push({ state: "fail" });
+                for (let k = 0; k < expected; k++)
+                  cells.push({ state: "fail", ...memberMeta });
                 continue;
               }
               if (member.status === "QUEUED" || member.status === "RUNNING") {
-                for (let k = 0; k < expected; k++) cells.push({ state: "running" });
+                for (let k = 0; k < expected; k++)
+                  cells.push({ state: "running", ...memberMeta });
                 continue;
               }
               const imgs = member.images || [];
               if (imgs.length === 0) {
-                for (let k = 0; k < expected; k++) cells.push({ state: "loading" });
+                for (let k = 0; k < expected; k++)
+                  cells.push({ state: "loading", ...memberMeta });
                 continue;
               }
               for (const img of imgs) {
@@ -1386,15 +1393,15 @@ function PageSection({
                 const blob = blobByUrl[apiUrl];
                 cells.push(
                   blob
-                    ? { src: blob, state: "done" }
-                    : { state: "loading" }
+                    ? { src: blob, state: "done", ...memberMeta }
+                    : { state: "loading", ...memberMeta }
                 );
               }
               // Mirror the set-detail loop: when fewer images came back
               // than ``params.n`` requested, the missing slots render as
               // partial-fail so the SET badge keeps the requested total.
               for (let k = imgs.length; k < expected; k++) {
-                cells.push({ state: "fail" });
+                cells.push({ state: "fail", ...memberMeta });
               }
             }
             const stillRunning = item.members.some(

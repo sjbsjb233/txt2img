@@ -163,9 +163,11 @@ def test_gemini_v1beta_3_1_flash_has_full_field_set() -> None:
     )
 
 
-def test_gemini_v1beta_n_max_locked_to_one() -> None:
-    """Gemini hard-codes n=1 — panel still renders the ticker
-    so the field slot is stable across model switches."""
+def test_gemini_v1beta_n_max_exposes_fanout_presets() -> None:
+    """Gemini upstream returns 1 image/call, but the Create page exposes
+    a 1/2/4 ticker so the user can pick multi-image generation; the
+    frontend fans n>1 out into parallel n=1 POSTs sharing one set_id.
+    """
     for model_id in (
         "gemini-3-pro-image-preview",
         "gemini-3.1-flash-image-preview",
@@ -174,8 +176,10 @@ def test_gemini_v1beta_n_max_locked_to_one() -> None:
         schema = GeminiV1BetaAdapter().ui_schema(model_id)
         n_max = next(f for f in schema if f.k == "n_max")
         assert n_max.control == "number"
-        assert n_max.max == 1
-        assert n_max.presets == [1]
+        assert n_max.value_key == "n"
+        assert n_max.max >= 4
+        assert 1 in (n_max.presets or [])
+        assert 4 in (n_max.presets or [])
 
 
 def test_gemini_v1beta_unsupported_model_raises() -> None:

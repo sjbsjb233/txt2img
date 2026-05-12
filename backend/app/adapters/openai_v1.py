@@ -150,6 +150,19 @@ class OpenAIV1Adapter(BaseAdapter):
                 ),
             ),
             CapabilityFieldInt(k="n_max", min=1, max=10),
+            CapabilityFieldInt(
+                k="n_max_upstream",
+                min=1,
+                max=10,
+                help=(
+                    "Maximum n a single upstream call returns. Leave at "
+                    "n_max for native multi-image providers (gpt-image-2 "
+                    "natively returns n=4). Set strictly below n_max only "
+                    "on providers/models that single-shot one image per "
+                    "request; the Create page will fan a user pick of "
+                    "n=K out into K parallel n=1 calls."
+                ),
+            ),
             CapabilityFieldInt(k="partial_images_max", min=0, max=3),
             CapabilityFieldInt(k="max_reference_images", min=0, max=16),
             CapabilityFieldInt(

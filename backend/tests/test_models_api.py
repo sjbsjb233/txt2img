@@ -170,6 +170,45 @@ async def test_models_surface_capabilities_from_provider(
 
 
 @pytest.mark.asyncio
+async def test_models_surface_n_max_upstream_for_fanout(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """A Gemini provider exposing ``n_max=4 / n_max_upstream=1`` surfaces
+    both values to the frontend so the Create page can render a 4-step
+    slider and fan out into n=1 calls at submit time.
+    """
+    token = await _login_admin(seeded_app)
+    payload = _gemini_provider_payload()
+    payload["supported_models"] = [
+        {
+            "model_id": "gemini-3.1-flash-image-preview",
+            "capabilities": {
+                "n_max": 4,
+                "n_max_upstream": 1,
+                "image_size": ["1K"],
+                "aspect_ratio": ["1:1"],
+                "max_reference_images": 14,
+            },
+        }
+    ]
+    create = await seeded_app.post(
+        "/api/admin/providers", headers=_auth(token), json=payload
+    )
+    assert create.status_code == 201, create.text
+
+    resp = await seeded_app.get("/api/models", headers=_auth(token))
+    body = resp.json()
+    flash = next(
+        m
+        for m in body["models"]
+        if m["model_id"] == "gemini-3.1-flash-image-preview"
+    )
+    caps = flash["capabilities"]
+    assert caps["n_max"] == 4
+    assert caps["n_max_upstream"] == 1
+
+
+@pytest.mark.asyncio
 async def test_models_unions_capabilities_across_providers(
     seeded_app: httpx.AsyncClient,
 ) -> None:

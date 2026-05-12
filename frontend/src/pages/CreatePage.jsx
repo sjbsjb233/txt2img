@@ -157,6 +157,22 @@ const SUBMISSION_GLUE_KEYS = new Set([
   "captcha_token",
 ]);
 
+// 10-char alphanumeric id with a prefix — same shape BatchPage uses for
+// its slot/set ids so backend `nano()` consumers don't have to special-case
+// per-page.
+function nanoId(prefix) {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let out = "";
+  for (let i = 0; i < 10; i += 1) {
+    out += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return `${prefix}_${out}`;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function paramKey(field) {
   return field.value_key || field.k;
 }
@@ -387,6 +403,10 @@ export default function CreatePage() {
   const [showTurnstile, setShowTurnstile] = useState(false);
   const [turnstileSiteKey, setTurnstileSiteKey] = useState(null);
   const [showSizeCustom, setShowSizeCustom] = useState(false);
+  // Fan-out progress for models where the upstream returns 1 image per
+  // call and the user picked n>1. ``total === 0`` means "not fanning
+  // out" — single-shot submit hides the progress indicator entirely.
+  const [submitProgress, setSubmitProgress] = useState({ done: 0, total: 0 });
   const pendingSubmitRef = useRef(null); // payload waiting for cf token
   const lastFetchAtRef = useRef(0);
   const clientRequestIdRef = useRef(null);
@@ -534,7 +554,10 @@ export default function CreatePage() {
     return cleaned;
   }, [selectedModel, params, prompt, sessionId]);
 
-  const submit = useCallback(
+  // Submit one job that the upstream provider can satisfy in a single
+  // POST. The existing single-shot path; unchanged behaviour for models
+  // where ``n_max_upstream`` matches (or exceeds) the picked ``n``.
+  const submitSingle = useCallback(
     async (captchaToken) => {
       if (!selectedModel) return;
       const payload = buildPayload();
@@ -582,6 +605,153 @@ export default function CreatePage() {
       }
     },
     [buildPayload, clearDraft, navigate, refs, selectedModel]
+  );
+
+  // Submit N independent ``n=1`` jobs that share one ``set_id``. Used
+  // when the user picked ``n > n_max_upstream`` on a model whose
+  // upstream returns a single image per call (Gemini today). The shape
+  // of the resulting data is identical to a Batch slot with
+  // ``image_count = N`` except that ``batch_id`` stays null.
+  //
+  // Worker-pool concurrency mirrors BatchPage's fan-out path so we
+  // reuse the same SSE-bus pacing and partial-submit semantics.
+  const submitFanout = useCallback(
+    async (captchaToken, targetN) => {
+      if (!selectedModel) return;
+      const basePayload = buildPayload();
+      if (!basePayload) return;
+      // We hand-allocate per-call ids below; reset the page-level one so
+      // a follow-up single-shot submit doesn't reuse a fan-out slot id.
+      clientRequestIdRef.current = null;
+
+      const setId = nanoId("set");
+      const baseReqId = nanoId("req");
+      const tasks = Array.from({ length: targetN }, (_, i) => ({
+        ordinal: i + 1,
+        client_request_id: `${baseReqId}_${i + 1}`,
+      }));
+
+      // Turnstile tokens are single-use: putting the same one on every
+      // sub-POST would let the backend accept the 1st and reject the
+      // 2nd-Nth as "token already consumed". We park the token in a
+      // ref so exactly one worker can claim it — the first one to
+      // reach the consumer wins, the rest go through without one. The
+      // captcha is required because the user crossed a rolling
+      // anti-abuse threshold; one successful submission resets that
+      // counter for the next short window, so a single redemption
+      // covers the burst in practice. If the backend signals
+      // CAPTCHA_REQUIRED again mid-flight on a later worker we don't
+      // try to re-prompt (the user already saw one modal this round);
+      // we just count it as a partial-submit failure and surface the
+      // error if every sub-POST loses.
+      const captchaTokenRef = { current: captchaToken || null };
+
+      setSubmitting(true);
+      setSubmitError(null);
+      setSubmitProgress({ done: 0, total: targetN });
+
+      const concurrencyMax = catalog?.meta?.batch_concurrency_max || 4;
+      const concurrency = Math.max(1, Math.min(concurrencyMax, targetN));
+      const queue = [...tasks];
+      let done = 0;
+      let succeeded = 0;
+      let firstError = null;
+
+      const work = async () => {
+        while (queue.length) {
+          const t = queue.shift();
+          if (!t) break;
+          // n=1 per call — matches what the upstream actually returns.
+          // ``batch_id`` is intentionally omitted so this set isn't
+          // confused with a Batch-page submission.
+          const subPayload = {
+            ...basePayload,
+            n: 1,
+            set_id: setId,
+            client_request_id: t.client_request_id,
+          };
+          // Claim the single-use captcha token (atomic at the JS
+          // event-loop level: we only have one tokenRef and one
+          // consumer at a time on this microtask hop).
+          if (captchaTokenRef.current) {
+            subPayload.captcha_token = captchaTokenRef.current;
+            captchaTokenRef.current = null;
+          }
+          try {
+            const response = await createJob({
+              payload: subPayload,
+              references: refs,
+            });
+            await archiveStore.insertOptimistic(response);
+            succeeded += 1;
+          } catch (err) {
+            if (!firstError) firstError = err;
+            // Don't abort the rest of the pool — mirror Batch's
+            // "partial submit" semantics so the user keeps whatever
+            // images did make it through.
+            // eslint-disable-next-line no-console
+            console.warn("create fan-out job failed", err);
+          }
+          done += 1;
+          setSubmitProgress({ done, total: targetN });
+          // SSE bus pacing — same stagger BatchPage uses.
+          await sleep(20);
+        }
+      };
+
+      try {
+        await Promise.all(
+          Array.from({ length: concurrency }, () => work())
+        );
+      } finally {
+        setSubmitting(false);
+      }
+
+      setSubmitProgress({ done: 0, total: 0 });
+
+      // F-5.5 / F-5.6: if every single POST failed there's nothing to
+      // see on the archive — surface the first error and stay on the
+      // page so the user can fix prompt / retry. Any partial success
+      // proceeds to /archive so the user can watch the survivors.
+      if (succeeded === 0) {
+        if (firstError) setSubmitError(firstError);
+        return;
+      }
+      clearDraft({ silent: true });
+      navigate("/archive");
+    },
+    [
+      buildPayload,
+      catalog?.meta?.batch_concurrency_max,
+      clearDraft,
+      navigate,
+      refs,
+      selectedModel,
+    ]
+  );
+
+  // Route to single vs fan-out based on capabilities. When
+  // ``n_max_upstream`` is missing (older capability rows), it falls back
+  // to ``n_max`` and the comparison is identical to v1 behaviour, so
+  // existing models are unaffected.
+  const submit = useCallback(
+    async (captchaToken) => {
+      if (!selectedModel) return;
+      const caps = selectedModel.capabilities || {};
+      const upstream =
+        typeof caps.n_max_upstream === "number"
+          ? caps.n_max_upstream
+          : typeof caps.n_max === "number"
+          ? caps.n_max
+          : 1;
+      const requested = typeof params.n === "number" ? params.n : 1;
+      if (requested > upstream && requested > 1) {
+        await submitFanout(captchaToken, requested);
+      } else {
+        await submitSingle(captchaToken);
+      }
+    },
+    [selectedModel, params.n, submitSingle, submitFanout]
   );
 
   const handleGenerate = useCallback(async () => {
@@ -694,6 +864,13 @@ export default function CreatePage() {
 
   const caps = selectedModel?.capabilities || {};
   const maxN = typeof caps.n_max === "number" ? caps.n_max : 1;
+  // Upstream per-call ceiling — falls back to ``n_max`` when older
+  // capability rows haven't been migrated yet (keeps v1 behaviour for
+  // legacy providers).
+  const nMaxUpstream =
+    typeof caps.n_max_upstream === "number"
+      ? caps.n_max_upstream
+      : maxN;
   const promptCharCap =
     typeof caps.max_prompt_chars === "number" ? caps.max_prompt_chars : 32_000;
 
@@ -707,6 +884,12 @@ export default function CreatePage() {
     const n = params.n || 1;
     return n > maxN ? maxN : n;
   }, [maxN, params.n]);
+
+  // The Create page fans out into n=1 sub-requests whenever the user
+  // picks n > n_max_upstream. We surface a small hint near the slider
+  // so the user knows the multi-image request is N parallel calls, not
+  // one upstream call.
+  const willFanOut = generateCount > nMaxUpstream && generateCount > 1;
 
   const errorMessage = submitError
     ? submitError.message || "Generation failed."
@@ -1372,6 +1555,23 @@ export default function CreatePage() {
               advancedOpen={advancedOpen === true}
               onToggleAdvanced={(next) => setAdvancedOpen(!!next)}
             />
+            {willFanOut ? (
+              <div
+                data-testid="create-fanout-hint"
+                className="mono"
+                style={{
+                  marginTop: 10,
+                  fontSize: 10,
+                  lineHeight: 1.4,
+                  color: "var(--ink-3)",
+                  background: "#fffdf7",
+                  border: "1px dashed var(--ink-3)",
+                  padding: "6px 8px",
+                }}
+              >
+                This model returns 1 image per upstream call. We&apos;ll fan out into {generateCount} parallel background requests.
+              </div>
+            ) : null}
           </div>
 
           <div
@@ -1397,7 +1597,55 @@ export default function CreatePage() {
                 {errorMessage}
               </div>
             ) : null}
+            {submitProgress.total > 0 ? (
+              <div
+                data-testid="create-submit-progress"
+                className="mono"
+                style={{
+                  marginBottom: 10,
+                  fontSize: 11,
+                  color: "var(--ink-2)",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 4,
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>Submitting…</span>
+                  <span data-testid="create-submit-progress-text">
+                    {submitProgress.done}/{submitProgress.total}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    height: 4,
+                    background: "var(--paper-3)",
+                    border: "1px solid var(--ink)",
+                    position: "relative",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      position: "absolute",
+                      inset: 0,
+                      right: `${
+                        100 -
+                        Math.min(
+                          100,
+                          Math.round(
+                            (submitProgress.done / submitProgress.total) * 100
+                          )
+                        )
+                      }%`,
+                      background: "var(--banana)",
+                    }}
+                  />
+                </div>
+              </div>
+            ) : null}
             <button
+              data-testid="create-generate-button"
               onClick={handleGenerate}
               disabled={submitting || !selectedModel?.available}
               className="btn primary shadowed lg"
@@ -1413,7 +1661,9 @@ export default function CreatePage() {
             >
               <Icon name="bolt" size={14} />{" "}
               {submitting
-                ? "Submitting…"
+                ? submitProgress.total > 0
+                  ? `Submitting ${submitProgress.done}/${submitProgress.total}…`
+                  : "Submitting…"
                 : `Generate ×${generateCount}`}
               <span
                 className="kbd"
@@ -1680,6 +1930,9 @@ function NumberPresets({
   const presetList = presets && presets.length ? presets : [1, 2, 4, 8];
   return (
     <div
+      data-testid="create-output-count-slider"
+      data-value={display}
+      data-max={typeof max === "number" ? max : ""}
       title={fieldDisabled ? disabledReason || undefined : undefined}
       style={{ opacity: fieldDisabled ? 0.55 : 1 }}
     >
@@ -1711,6 +1964,7 @@ function NumberPresets({
             {hint || ""}
           </span>
           <div
+            data-testid="create-output-count-value"
             className="ticker"
             style={{ fontSize: 24, fontWeight: 900, letterSpacing: "-0.03em" }}
           >
@@ -1725,6 +1979,8 @@ function NumberPresets({
             return (
               <button
                 key={n}
+                data-testid={`create-output-count-preset-${n}`}
+                data-allowed={allowed}
                 onClick={() => allowed && onChange(n)}
                 disabled={!allowed}
                 title={

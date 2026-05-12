@@ -54,12 +54,20 @@ def validate_against_capabilities(
     Order of checks roughly follows the design doc §5.1 table so a user
     reading the doc finds the same ordering they'd see in tests.
     """
-    # 1. n_max.
-    if caps.n_max is not None and payload.n > caps.n_max:
+    # 1. n_max. We compare ``payload.n`` to the *upstream* ceiling
+    # (``n_max_upstream``) when present — that's the real per-call cap.
+    # ``n_max`` (without "_upstream") is the user-facing slider ceiling
+    # the Create page renders, which may legally exceed the upstream
+    # cap; in that case the frontend fans out into N parallel ``n=1``
+    # POSTs and each one of them still has to clear this check. When
+    # ``n_max_upstream`` is unset (older capability rows), fall back to
+    # ``n_max`` so behaviour is identical to before.
+    effective_n_max = caps.n_max_upstream if caps.n_max_upstream is not None else caps.n_max
+    if effective_n_max is not None and payload.n > effective_n_max:
         return ValidationFailure(
             field="n",
             message=(
-                f"n={payload.n} exceeds the maximum {caps.n_max} allowed "
+                f"n={payload.n} exceeds the maximum {effective_n_max} allowed "
                 f"for model {payload.model!r}."
             ),
         )

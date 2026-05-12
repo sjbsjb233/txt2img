@@ -52,6 +52,11 @@ class ModelCapabilities(BaseModel):
 
     # Numeric upper bounds.
     n_max: int | None = None
+    # Per-call upstream ceiling — what one provider HTTP request returns.
+    # ``n_max`` above remains the Create-page slider ceiling; when this
+    # is strictly less, the frontend fans n>n_max_upstream into n=1
+    # parallel POSTs sharing one ``set_id``.
+    n_max_upstream: int | None = None
     partial_images_max: int | None = None
     max_reference_images: int | None = None
     max_prompt_chars: int | None = None
