@@ -116,7 +116,12 @@ export default function ArchiveSetCard({
           const showMore = isLast && overflow > 0;
           const cellState = img?.state || "done";
 
-          // 单 cell 仍在生成 / 缩略图未就绪 — 同视觉，语义保留区分
+          // 单 cell 仍在生成 / 缩略图未就绪 — 同视觉，语义保留区分.
+          // We still thread ``seq_no`` / ``hash_id`` onto the running
+          // panel so e2e tests can pin panel identity through the
+          // RUNNING → SUCCEEDED transition without race-y reattaches,
+          // and so a future hover/click handler can route by hash even
+          // before the blob is ready.
           if (cellState === "running" || cellState === "loading") {
             return (
               <div
@@ -125,12 +130,28 @@ export default function ArchiveSetCard({
                 data-testid="archive-set-panel"
                 data-panel-index={i}
                 data-panel-status={cellState}
+                data-panel-seq-no={img?.seq_no ?? ""}
+                data-panel-hash-id={img?.hash_id ?? ""}
               >
                 <span
                   data-testid="archive-set-panel-status"
                   data-status={cellState}
                   className="arch-spin"
                 />
+                {img?.seq_no != null ? (
+                  <span
+                    data-testid="archive-set-panel-seq-no"
+                    style={{
+                      position: "absolute",
+                      width: 1,
+                      height: 1,
+                      overflow: "hidden",
+                      opacity: 0,
+                    }}
+                  >
+                    {img.seq_no}
+                  </span>
+                ) : null}
               </div>
             );
           }

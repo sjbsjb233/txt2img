@@ -620,7 +620,6 @@ export default function CreatePage() {
       if (!selectedModel) return;
       const basePayload = buildPayload();
       if (!basePayload) return;
-      if (captchaToken) basePayload.captcha_token = captchaToken;
       // We hand-allocate per-call ids below; reset the page-level one so
       // a follow-up single-shot submit doesn't reuse a fan-out slot id.
       clientRequestIdRef.current = null;
@@ -631,6 +630,21 @@ export default function CreatePage() {
         ordinal: i + 1,
         client_request_id: `${baseReqId}_${i + 1}`,
       }));
+
+      // Turnstile tokens are single-use: putting the same one on every
+      // sub-POST would let the backend accept the 1st and reject the
+      // 2nd-Nth as "token already consumed". We park the token in a
+      // ref so exactly one worker can claim it — the first one to
+      // reach the consumer wins, the rest go through without one. The
+      // captcha is required because the user crossed a rolling
+      // anti-abuse threshold; one successful submission resets that
+      // counter for the next short window, so a single redemption
+      // covers the burst in practice. If the backend signals
+      // CAPTCHA_REQUIRED again mid-flight on a later worker we don't
+      // try to re-prompt (the user already saw one modal this round);
+      // we just count it as a partial-submit failure and surface the
+      // error if every sub-POST loses.
+      const captchaTokenRef = { current: captchaToken || null };
 
       setSubmitting(true);
       setSubmitError(null);
@@ -656,6 +670,13 @@ export default function CreatePage() {
             set_id: setId,
             client_request_id: t.client_request_id,
           };
+          // Claim the single-use captcha token (atomic at the JS
+          // event-loop level: we only have one tokenRef and one
+          // consumer at a time on this microtask hop).
+          if (captchaTokenRef.current) {
+            subPayload.captcha_token = captchaTokenRef.current;
+            captchaTokenRef.current = null;
+          }
           try {
             const response = await createJob({
               payload: subPayload,
