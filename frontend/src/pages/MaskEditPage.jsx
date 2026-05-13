@@ -175,7 +175,7 @@ export default function MaskEditPage() {
         let caps = null;
         try {
           const resp = await getModels();
-          const row = (resp.models || []).find((m) => m.model === job.model);
+          const row = (resp.models || []).find((m) => m.model_id === job.model);
           caps = row?.capabilities || null;
         } catch (e) {
           console.warn("getModels failed; assuming unsupported", e);
