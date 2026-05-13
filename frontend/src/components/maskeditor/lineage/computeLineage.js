@@ -11,7 +11,7 @@
 //     bounded. ``truncated: true`` signals the panel to show a banner.
 
 export const MAX_NODES = 200;
-export const MAX_LANES = 5;
+export const MAX_LANES = 24;
 export const MAX_CREATE_SET_SIZE_FOR_EXPANSION = 8;
 
 const _SETID_BATCH_MAP = new WeakMap();
@@ -380,11 +380,12 @@ export function computeLineage(rows, currentHashId, options = {}) {
       const g = groups[i];
       const span = Math.min(g.members.length, MAX_LANES);
       const preferred = hint.get(i) || 0;
-      const start = findFreeRange(used, preferred, span);
+      let start = findFreeRange(used, preferred, span);
       if (start === -1) {
-        // No room — mark this group as hidden overflow.
-        for (const m of g.members) m.hidden_overflow = true;
-        continue;
+        // No free contiguous range — instead of dropping the group
+        // (which silently hides nodes), pin it to the rightmost lane
+        // so it still renders in the now-pannable canvas.
+        start = Math.max(0, MAX_LANES - span);
       }
       for (let k = 0; k < span; k++) used[start + k] = true;
       for (let k = 0; k < g.members.length; k++) {
