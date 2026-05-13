@@ -11,11 +11,17 @@
 
 import { test, expect } from "@playwright/test";
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const HASH = "testhash01";
 const ORDER = 1;
 
-const SOURCE_PNG_PATH = "/tmp/mask-test-source.png";
+// Committed fixture so CI / clean checkouts work without a setup step.
+// Generated once with Pillow (RGB 512x384) and stored alongside the
+// spec — small enough that the regression-guard remains self-contained.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const SOURCE_PNG_PATH = path.join(__dirname, "fixtures", "mask-test-source.png");
 const SOURCE_PNG_BYTES = fs.readFileSync(SOURCE_PNG_PATH);
 
 // Mimics the production /api/models payload (extracted from the
@@ -175,6 +181,20 @@ async function stubRoutes(page) {
       body: JSON.stringify({ items: [], next_cursor: null }),
     })
   );
+
+  // App.jsx opens the long-poll SSE connection on mount when the user
+  // is authenticated. Without a stub the fetch-based reader retries
+  // forever, keeping the network never-idle and starving any
+  // ``networkidle``-waiting caller. Respond 401 so the client stops
+  // reconnecting (see frontend/src/api/sse.js — auth failure is a
+  // terminal state for the reader).
+  await page.route("**/api/sse", (route) =>
+    route.fulfill({
+      status: 401,
+      contentType: "application/json",
+      body: JSON.stringify({ detail: "sse disabled in test" }),
+    })
+  );
 }
 
 test("mask editor opens for gpt-image-2 without 'unsupported' alert", async ({
@@ -184,8 +204,14 @@ test("mask editor opens for gpt-image-2 without 'unsupported' alert", async ({
   await stubRoutes(page);
 
   await page.goto(`/edit/${HASH}/${ORDER}`);
-  await page.waitForLoadState("networkidle");
-  await page.waitForTimeout(1500);
+
+  // Wait for the deterministic UI signal that the editor finished
+  // mounting (the loaded shell carries data-testid="me-root"; the
+  // pre-mount loading state uses "me-loading"). If the bug were back,
+  // the page would never reach me-root because the
+  // ``pickMaskMethod === "unsupported"`` branch redirects to /archive
+  // before either shell renders.
+  await expect(page.getByTestId("me-root")).toBeVisible({ timeout: 10000 });
 
   const alerts = await page.evaluate(() => window.__alerts || []);
   const url = page.url();
