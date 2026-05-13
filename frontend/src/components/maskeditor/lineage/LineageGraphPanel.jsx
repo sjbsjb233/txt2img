@@ -51,7 +51,7 @@ export default function LineageGraphPanel({ currentHashId, currentOrder = 1 }) {
       target.scrollIntoView({
         block: "center",
         inline: "center",
-        behavior: "smooth",
+        behavior: scrollBehavior(),
       });
     }
   }, [lineage?.current_hash_id, lineage?.current_order, lineage?.nodes?.length]);
@@ -343,7 +343,11 @@ export default function LineageGraphPanel({ currentHashId, currentOrder = 1 }) {
           type="button"
           onClick={() => {
             const cur = scrollerRef.current?.querySelector('[data-current="1"]');
-            cur?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
+            cur?.scrollIntoView({
+              block: "center",
+              inline: "center",
+              behavior: scrollBehavior(),
+            });
           }}
           data-testid="me-lineage-back-to-current"
         >
@@ -365,6 +369,16 @@ export default function LineageGraphPanel({ currentHashId, currentOrder = 1 }) {
       </div>
     </div>
   );
+}
+
+// Respect the user's reduced-motion preference: animated centring
+// can be disorienting for motion-sensitive users, so fall back to
+// instant scrolling when the OS reports ``prefers-reduced-motion``.
+function scrollBehavior() {
+  if (typeof window === "undefined" || !window.matchMedia) return "smooth";
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ? "auto"
+    : "smooth";
 }
 
 function pickNeighbor(nodes, current, dir, axis) {

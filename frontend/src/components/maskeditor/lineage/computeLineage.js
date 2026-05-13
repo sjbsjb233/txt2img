@@ -384,10 +384,8 @@ export function computeLineage(rows, currentHashId, options = {}) {
       if (start === -1) {
         // No free contiguous range — instead of dropping the group
         // (which silently hides nodes), pin it to the rightmost lane
-        // so it still renders in the now-pannable canvas. Members are
-        // tagged so the panel can apply a subtle overflow style later.
+        // so it still renders in the now-pannable canvas.
         start = Math.max(0, MAX_LANES - span);
-        for (const m of g.members) m.lane_overflowed = true;
       }
       for (let k = 0; k < span; k++) used[start + k] = true;
       for (let k = 0; k < g.members.length; k++) {
