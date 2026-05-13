@@ -1415,6 +1415,9 @@ function PageSection({
             return (
               <div
                 data-testid={`card-set-${item.set_id}`}
+                data-set-id={item.set_id}
+                data-set-total={expectedTotal}
+                data-set-member-count={item.members.length}
                 key={item.set_id}
               >
                 <ArchiveSetCard
