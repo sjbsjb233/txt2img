@@ -37,7 +37,9 @@ export default function LineageGraphPanel({ currentHashId, currentOrder = 1 }) {
     if (cur) setFocusKey(`${cur.hash_id}#${cur.img_order}`);
   }, [lineage?.current_hash_id, lineage?.current_order, lineage?.nodes?.length]);
 
-  // Auto-centre the current node.
+  // Auto-centre the current node on both axes. Depending on
+  // ``nodes.length`` ensures late-arriving siblings (SSE-pushed)
+  // re-centre after the canvas re-lays out.
   useEffect(() => {
     if (!lineage || !scrollerRef.current) return;
     const cur = lineage.nodes.find((n) => n.is_current);
@@ -46,14 +48,21 @@ export default function LineageGraphPanel({ currentHashId, currentOrder = 1 }) {
       `[data-node-key="${cur.hash_id}#${cur.img_order}"]`
     );
     if (target && typeof target.scrollIntoView === "function") {
-      target.scrollIntoView({ block: "center", behavior: "smooth" });
+      target.scrollIntoView({
+        block: "center",
+        inline: "center",
+        behavior: "smooth",
+      });
     }
-  }, [lineage?.current_hash_id, lineage?.current_order]);
+  }, [lineage?.current_hash_id, lineage?.current_order, lineage?.nodes?.length]);
 
-  // Manual scroll → show the "back to current" pill + up/down scroll
-  // hints when there is offscreen content in either direction.
+  // Manual scroll → show the "back to current" pill + scroll hints on
+  // all four edges when there's offscreen content. Also reruns on
+  // ResizeObserver so window/devtool resizes don't leave stale hints.
   const [hintAbove, setHintAbove] = useState(false);
   const [hintBelow, setHintBelow] = useState(false);
+  const [hintLeft, setHintLeft] = useState(false);
+  const [hintRight, setHintRight] = useState(false);
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
@@ -62,15 +71,26 @@ export default function LineageGraphPanel({ currentHashId, currentOrder = 1 }) {
       if (cur) {
         const elBox = el.getBoundingClientRect();
         const cBox = cur.getBoundingClientRect();
-        const visible = cBox.top >= elBox.top && cBox.bottom <= elBox.bottom;
-        setShowJumpBack(!visible);
+        const visibleY = cBox.top >= elBox.top && cBox.bottom <= elBox.bottom;
+        const visibleX = cBox.left >= elBox.left && cBox.right <= elBox.right;
+        setShowJumpBack(!(visibleX && visibleY));
       }
       setHintAbove(el.scrollTop > 4);
       setHintBelow(el.scrollHeight - el.scrollTop - el.clientHeight > 4);
+      setHintLeft(el.scrollLeft > 4);
+      setHintRight(el.scrollWidth - el.scrollLeft - el.clientWidth > 4);
     }
     refresh();
-    el.addEventListener("scroll", refresh);
-    return () => el.removeEventListener("scroll", refresh);
+    el.addEventListener("scroll", refresh, { passive: true });
+    let ro = null;
+    if (typeof ResizeObserver !== "undefined") {
+      ro = new ResizeObserver(refresh);
+      ro.observe(el);
+    }
+    return () => {
+      el.removeEventListener("scroll", refresh);
+      if (ro) ro.disconnect();
+    };
   }, [lineage?.nodes?.length]);
 
   // Geometry: depth → lane → node coordinates.
@@ -81,7 +101,15 @@ export default function LineageGraphPanel({ currentHashId, currentOrder = 1 }) {
     const depthList = Array.from(depths).sort((a, b) => a - b);
     const depthIndex = new Map(depthList.map((d, i) => [d, i]));
     const totalRows = depthList.length;
-    const totalCols = MAX_LANES;
+    // Size the canvas to the actual lane usage rather than the full
+    // MAX_LANES envelope — otherwise a one-node lineage with
+    // MAX_LANES = 24 paints 1920 px of empty white space and the
+    // horizontal hint stays stuck on. Cap defensively at MAX_LANES.
+    let maxLane = 0;
+    for (const node of lineage.nodes) {
+      if (node.lane > maxLane) maxLane = node.lane;
+    }
+    const totalCols = Math.min(maxLane + 1, MAX_LANES);
     const width = totalCols * (NODE_W + COL_GAP);
     const height = totalRows * (NODE_H + ROW_GAP) + 16;
     const nodeAt = (hashId, order) => {
@@ -180,6 +208,7 @@ export default function LineageGraphPanel({ currentHashId, currentOrder = 1 }) {
         />
       </div>
       <div className="me-lineage__rule" />
+      <div className="me-lineage__viewport">
       <div
         className="me-lineage__scroller"
         ref={scrollerRef}
@@ -285,13 +314,36 @@ export default function LineageGraphPanel({ currentHashId, currentOrder = 1 }) {
           <div className="me-lineage__hint" data-testid="me-lineage-hint-below">↓ scroll for newer</div>
         )}
       </div>
+      {/* Edge fades + chevrons live outside the scroller so they stay
+          pinned to the viewport edges instead of scrolling with the
+          canvas — otherwise pan-right hides the left-hand fade you
+          need to see most. */}
+      <div
+        className={`me-lineage__edge-fade ${hintLeft ? "is-active" : ""}`}
+        data-side="left"
+        data-testid="me-lineage-hint-left"
+        data-active={hintLeft ? "1" : "0"}
+      />
+      <div
+        className={`me-lineage__edge-fade ${hintRight ? "is-active" : ""}`}
+        data-side="right"
+        data-testid="me-lineage-hint-right"
+        data-active={hintRight ? "1" : "0"}
+      />
+      {hintLeft && (
+        <div className="me-lineage__edge-chevron" data-side="left" aria-hidden="true">‹</div>
+      )}
+      {hintRight && (
+        <div className="me-lineage__edge-chevron" data-side="right" aria-hidden="true">›</div>
+      )}
+      </div>
       {showJumpBack && (
         <button
           className="me-lineage__jumpback"
           type="button"
           onClick={() => {
             const cur = scrollerRef.current?.querySelector('[data-current="1"]');
-            cur?.scrollIntoView({ block: "center", behavior: "smooth" });
+            cur?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
           }}
           data-testid="me-lineage-back-to-current"
         >
