@@ -48,6 +48,10 @@ class JobScheduler:
     async def run_forever(self, executor: ExecutorLike | None = None) -> None:
         """Main scheduling loop. Runs until ``drain`` or cancellation."""
         worker = executor or get_job_executor()
+        logger.info(
+            "scheduler: starting global_max_workers=%d",
+            self._global_max_workers(),
+        )
         try:
             while not self._stop.is_set():
                 self._prune_done()
@@ -55,6 +59,14 @@ class JobScheduler:
                     job = await self._queue.pop_next()
                     if job is not None:
                         if not self._user_has_slot(job):
+                            logger.debug(
+                                "scheduler: user-slot full requeue user=%s "
+                                "tier=%s hash=%s running=%d",
+                                job.user_id,
+                                job.tier,
+                                job.hash_id,
+                                self._running_by_user.get(job.user_id, 0),
+                            )
                             await self._queue.requeue(job)
                             await asyncio.sleep(0.05)
                             continue
@@ -62,6 +74,7 @@ class JobScheduler:
                         continue
                 await asyncio.sleep(0.05)
         except asyncio.CancelledError:
+            logger.info("scheduler: cancelled")
             raise
         finally:
             await self._wait_for_tasks()
@@ -70,11 +83,23 @@ class JobScheduler:
         """Stop dispatching new jobs and wait for in-flight workers."""
         self._stop.set()
         self._queue.close()
+        logger.info(
+            "scheduler: drain begin in_flight=%d timeout=%.1fs",
+            len(self._tasks),
+            timeout,
+        )
         if not self._tasks:
             self._drained.set()
+            logger.info("scheduler: drain complete (no in-flight)")
             return
         with suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self._drained.wait(), timeout=timeout)
+        if self._tasks:
+            logger.warning(
+                "scheduler: drain timeout; in_flight=%d", len(self._tasks)
+            )
+        else:
+            logger.info("scheduler: drain complete")
 
     def reset_for_tests(self) -> None:
         self._stop = asyncio.Event()
@@ -96,6 +121,16 @@ class JobScheduler:
         self._tasks.add(task)
         self._task_users[task] = job.user_id
         task.add_done_callback(self._on_task_done)
+        logger.info(
+            "scheduler: dispatch hash_id=%s user=%s tier=%s model=%s "
+            "global_in_flight=%d user_in_flight=%d",
+            job.hash_id,
+            job.user_id,
+            job.tier,
+            job.model,
+            len(self._tasks),
+            self._running_by_user.get(job.user_id, 0),
+        )
 
     def _on_task_done(self, task: asyncio.Task[None]) -> None:
         self._tasks.discard(task)

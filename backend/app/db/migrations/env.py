@@ -30,7 +30,13 @@ from app.db.models import Base  # noqa: E402
 
 config = context.config
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # ``disable_existing_loggers=False`` keeps the project-wide logging
+    # stack configured by ``app.utils.logging_setup`` alive across the
+    # alembic bootstrap. Without this, every ``txt2img.*`` logger that
+    # was created before ``upgrade_to_head()`` runs ends up with
+    # ``disabled=True`` and silently drops records for the rest of the
+    # process lifetime.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

@@ -1,4 +1,18 @@
 import { isSilentErrorCode, messageForCode } from "../utils/errorCopy.js";
+// `logger.js` imports `getApiBase` from this module; ESM handles the
+// circular reference fine as long as we only *call* the imported
+// `log.*` functions after both modules have finished initializing
+// (which is the case — log.* is only invoked inside `apiFetch`).
+import { log as _log } from "../utils/logger.js";
+
+function _safeLog(level, msg, extra) {
+  try {
+    const fn = _log?.[level];
+    if (typeof fn === "function") fn(msg, extra);
+  } catch (_e) {
+    /* never let telemetry break the app */
+  }
+}
 
 const DEFAULT_BASE = "http://127.0.0.1:8000";
 const API_BASE_KEY = "api_base";
@@ -93,11 +107,23 @@ export async function apiFetch(path, { method = "GET", body, auth = true, header
   }
 
   let res;
+  const startedAt = (typeof performance !== "undefined" && performance.now)
+    ? performance.now()
+    : Date.now();
   try {
     res = await fetch(url, { method, headers: finalHeaders, body: payload });
   } catch (e) {
+    _safeLog("warn", "api network error", {
+      path,
+      method,
+      message: e?.message || String(e),
+    });
     throw new Error(`network error: ${e.message || e}`);
   }
+  const durationMs =
+    (typeof performance !== "undefined" && performance.now
+      ? performance.now()
+      : Date.now()) - startedAt;
 
   const text = await res.text();
   let data = null;
@@ -131,6 +157,21 @@ export async function apiFetch(path, { method = "GET", body, auth = true, header
     err.code = code;
     err.data = data;
     err.silent = isSilentErrorCode(code);
+
+    // Skip /api/client-logs to avoid an infinite feedback loop if the
+    // logging endpoint itself starts returning 4xx/5xx.
+    if (path !== "/api/client-logs") {
+      const level = res.status >= 500 ? "error" : "warn";
+      _safeLog(level, "api error", {
+        path,
+        method,
+        status: res.status,
+        code,
+        message,
+        duration_ms: Math.round(durationMs),
+        request_id: res.headers?.get?.("x-request-id") || null,
+      });
+    }
 
     // Auto-logout interceptor (FE-01 spec):
     //   - 401 on any authenticated request → token is bad

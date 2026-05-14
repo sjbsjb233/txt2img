@@ -430,7 +430,11 @@ class CircuitBreaker:
             st.cooldown_until = None
             st.current_cooldown_seconds = self._initial_cooldown()
             await self._persist_state(provider_id, HEALTHY, None)
-            logger.info("breaker: %s reset to HEALTHY", provider_id)
+            logger.info(
+                "breaker: state transition provider=%s to=%s reason=admin_reset",
+                provider_id,
+                HEALTHY,
+            )
             return HEALTHY
 
     async def admin_disable(self, provider_id: str) -> str:
@@ -475,9 +479,12 @@ class CircuitBreaker:
             OPEN,
             datetime.fromtimestamp(st.cooldown_until, tz=timezone.utc),
         )
-        logger.info(
-            "breaker: %s → OPEN cooldown=%ds (doubled=%s)",
+        logger.warning(
+            "breaker: state transition provider=%s from=%s to=%s "
+            "cooldown_s=%d doubled=%s",
             provider_id,
+            HALF_OPEN if doubled else HEALTHY,
+            OPEN,
             new_cd,
             doubled,
         )
@@ -491,7 +498,12 @@ class CircuitBreaker:
         st.cooldown_until = None
         st.current_cooldown_seconds = self._initial_cooldown()
         await self._persist_state(provider_id, HEALTHY, None)
-        logger.info("breaker: %s → HEALTHY", provider_id)
+        logger.info(
+            "breaker: state transition provider=%s from=%s to=%s",
+            provider_id,
+            HALF_OPEN,
+            HEALTHY,
+        )
         return HEALTHY
 
     async def _persist_state(

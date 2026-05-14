@@ -67,6 +67,42 @@ class Settings(BaseSettings):
     SSE_HEARTBEAT_SECONDS: int = Field(default=15, ge=1, le=300)
     SSE_MAX_CONNECTIONS_PER_USER: int = Field(default=4, ge=1, le=64)
 
+    # ===== Logging =====
+    # Root logger level. DEBUG / INFO / WARNING / ERROR.
+    LOG_LEVEL: str = "INFO"
+    # "json" for structured (grep-friendly) output, "text" for plain.
+    LOG_FORMAT: str = "json"
+    # Filesystem root where log files are written. Falls under the
+    # bind-mounted ``/app/data`` so logs persist across container restarts.
+    LOG_DIR: str = "/app/data/logs/backend"
+    # Whether to also stream to stdout — keep ``docker compose logs`` useful.
+    LOG_TO_STDOUT: bool = True
+    # Number of rotated backups to keep for the main app.log.
+    LOG_RETAIN_DAYS: int = 30
+    # Rotation cadence — passed straight to TimedRotatingFileHandler.
+    LOG_ROTATE_WHEN: str = "midnight"
+    # Comma-separated list of dict / kwarg field names that must be
+    # redacted before they reach disk.
+    LOG_REDACT_FIELDS: str = (
+        "password,api_key,token,authorization,captcha_token,jwt,secret,"
+        "refresh_token,access_token,client_secret"
+    )
+    # 0 ⇒ do not log request bodies. >0 ⇒ truncate to N bytes.
+    LOG_REQUEST_BODY_MAX_BYTES: int = 0
+    # Master switches per file.
+    LOG_ACCESS_ENABLED: bool = True
+    LOG_ADAPTER_ENABLED: bool = True
+    LOG_CLIENT_LOGS_ENABLED: bool = True
+    # /api/client-logs hard caps to keep the channel from being abused.
+    LOG_CLIENT_LOGS_RATE_LIMIT: int = 60       # per user, per minute
+    LOG_CLIENT_LOGS_RATE_LIMIT_ANON: int = 30  # per IP, per minute
+    LOG_CLIENT_LOGS_BATCH_MAX: int = 50
+    LOG_CLIENT_LOGS_ITEM_MAX_BYTES: int = 8 * 1024
+    # 0.0 ≤ x ≤ 1.0 — fraction of DEBUG records actually emitted.
+    LOG_SAMPLE_DEBUG: float = 0.0
+    # When True, the JSON formatter still pretty-prints exception tracebacks.
+    LOG_INCLUDE_TRACEBACK: bool = True
+
     # ===== Batch (frontend / backend doc v0.3) =====
     # Per-submit fan-out parallelism the frontend uses inside one batch.
     BATCH_CONCURRENCY_MAX: int = Field(default=4, ge=1, le=32)
@@ -91,6 +127,14 @@ class Settings(BaseSettings):
                 "generate with `python -c 'import secrets; print(secrets.token_urlsafe(48))'`."
             )
         return v
+
+    @property
+    def log_redact_fields_set(self) -> set[str]:
+        return {
+            s.strip().lower()
+            for s in self.LOG_REDACT_FIELDS.split(",")
+            if s.strip()
+        }
 
     @property
     def cors_origins_list(self) -> list[str]:

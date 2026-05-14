@@ -56,6 +56,7 @@ def fresh_env(tmp_db_path: Path, tmp_path: Path) -> Iterator[None]:
 @pytest_asyncio.fixture
 async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
     """Run migrations + open the engine for a single test."""
+    from app.api.client_logs import reset_rate_limit_for_tests
     from app.db import engine as db_engine
     from app.db.migrate import upgrade_to_head
     from app.domain.access_policy import reset_access_policy_for_tests
@@ -71,6 +72,7 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
     from app.domain.soft_penalty import reset_soft_penalty_for_tests
     from app.domain.sse_hub import reset_sse_hub_for_tests
     from app.domain.tier_config import reset_tier_config_for_tests
+    from app.utils.logging_setup import reset_logging_for_tests
 
     # Singletons persist at module level; tests with fresh DBs need a
     # clean slate or they'd see leftover cache from a previous test's DB.
@@ -87,6 +89,8 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
     reset_soft_penalty_for_tests()
     reset_sse_hub_for_tests()
     reset_batch_progress_emitter_for_tests()
+    reset_logging_for_tests()
+    reset_rate_limit_for_tests()
 
     upgrade_to_head()
     db_engine.init_engine()
@@ -107,6 +111,8 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
         reset_soft_penalty_for_tests()
         reset_sse_hub_for_tests()
         reset_batch_progress_emitter_for_tests()
+    reset_logging_for_tests()
+    reset_rate_limit_for_tests()
 
 
 @pytest_asyncio.fixture
@@ -126,6 +132,7 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
     data_root.mkdir(exist_ok=True)
     _set_env_for_tests(db_path, data_root)
 
+    from app.api.client_logs import reset_rate_limit_for_tests
     from app.config import get_settings
     from app.domain.access_policy import reset_access_policy_for_tests
     from app.domain.batch_service import reset_batch_progress_emitter_for_tests
@@ -140,6 +147,7 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
     from app.domain.soft_penalty import reset_soft_penalty_for_tests
     from app.domain.sse_hub import reset_sse_hub_for_tests
     from app.domain.tier_config import reset_tier_config_for_tests
+    from app.utils.logging_setup import reset_logging_for_tests
 
     get_settings.cache_clear()
     reset_config_center_for_tests()
@@ -155,6 +163,8 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
     reset_soft_penalty_for_tests()
     reset_sse_hub_for_tests()
     reset_batch_progress_emitter_for_tests()
+    reset_logging_for_tests()
+    reset_rate_limit_for_tests()
 
     # Import here so env vars are already in place before Settings is
     # instantiated by anything down the import graph.
@@ -183,3 +193,5 @@ async def seeded_app() -> AsyncIterator[httpx.AsyncClient]:
     reset_soft_penalty_for_tests()
     reset_sse_hub_for_tests()
     reset_batch_progress_emitter_for_tests()
+    reset_logging_for_tests()
+    reset_rate_limit_for_tests()

@@ -60,7 +60,7 @@ from uuid import uuid4
 
 from app.config import get_settings
 
-logger = logging.getLogger("txt2img.sse_hub")
+logger = logging.getLogger("txt2img.sse")
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +267,13 @@ class SSEHub:
                 # rather drop it than memory-bomb the server. The
                 # frontend will reconnect and replay from buffer.
                 evicted.append(client)
+        if evicted:
+            logger.warning(
+                "sse: drop event user=%s kind=%s clients_evicted=%d",
+                user_id,
+                ev.kind,
+                len(evicted),
+            )
         for client in evicted:
             await self._evict_client(client, reason="queue_full")
 
@@ -307,6 +314,15 @@ class SSEHub:
         )
 
         await self._register(client)
+        connected_at = time.monotonic()
+        logger.info(
+            "sse: connect user=%s client=%s conns=%d last_event_id=%s",
+            user_id,
+            client.client_id,
+            self.client_count_for_user(user_id),
+            last_event_id,
+        )
+        disconnect_reason = "client_close"
 
         try:
             yield _format_event(
@@ -352,6 +368,7 @@ class SSEHub:
                     # The hub asked us to wrap up. The eviction path
                     # has already enqueued a ``connection_warning``
                     # before this sentinel.
+                    disconnect_reason = "evicted"
                     break
                 yield _format_event(
                     event_id=ev.event_id,
@@ -361,9 +378,17 @@ class SSEHub:
         except asyncio.CancelledError:
             # Client disconnected; let the cleanup happen in finally
             # then re-raise so Starlette tears down the response.
+            disconnect_reason = "cancelled"
             raise
         finally:
             await self._unregister(client)
+            logger.info(
+                "sse: disconnect user=%s client=%s reason=%s duration_s=%.1f",
+                user_id,
+                client.client_id,
+                disconnect_reason,
+                time.monotonic() - connected_at,
+            )
 
     # ------------------------------------------------------------------
     # Registration / eviction
