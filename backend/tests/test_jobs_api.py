@@ -1040,6 +1040,72 @@ async def test_captcha_grace_covers_subsequent_fanout(
 
 
 @pytest.mark.asyncio
+async def test_precheck_honours_captcha_grace_window(
+    seeded_app: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Precheck must agree with the POST gate inside the grace window.
+
+    Otherwise the frontend would prompt Turnstile on the next
+    submission even though the POST handler would happily skip it,
+    annoying the user with redundant challenges.
+    """
+    monkeypatch.setattr("app.api.jobs.turnstile.verify", _mock_turnstile_ok())
+    await _seed_gpt_provider(seeded_app)
+    admin = await _login_admin(seeded_app)
+    await seeded_app.patch(
+        "/api/admin/tiers/vip",
+        headers=_auth(admin),
+        json={"burst_limit": 5},
+    )
+    token = await _login_user(seeded_app, username="grace_pre", tier="vip")
+
+    # Trip burst (5 rows in DB).
+    pre = await _post_n_jobs(seeded_app, token, 5)
+    assert all(r.status_code == 200 for r in pre)
+
+    # Precheck NOW reports captcha required, because grace hasn't opened.
+    before = await seeded_app.post(
+        "/api/jobs/precheck",
+        headers=_auth(token),
+        json={"model": "gpt-image-2"},
+    )
+    assert before.status_code == 200
+    assert before.json()["captcha_required"] is True
+    assert before.json()["reason"] == "rate_limit_pre_warn"
+
+    # Open grace by submitting with a token.
+    opened = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (
+                    None,
+                    _job_payload(
+                        client_request_id="open",
+                        captcha_token="cf-good",
+                    ),
+                    "application/json",
+                ),
+            )
+        ],
+    )
+    assert opened.status_code == 200
+
+    # Precheck flips to "no captcha needed" — same decision the POST
+    # gate would make for the very next submission.
+    after = await seeded_app.post(
+        "/api/jobs/precheck",
+        headers=_auth(token),
+        json={"model": "gpt-image-2"},
+    )
+    assert after.status_code == 200
+    assert after.json()["captcha_required"] is False
+
+
+@pytest.mark.asyncio
 async def test_captcha_grace_does_not_bypass_soft_quota(
     seeded_app: httpx.AsyncClient,
     monkeypatch: pytest.MonkeyPatch,

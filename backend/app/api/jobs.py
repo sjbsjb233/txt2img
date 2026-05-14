@@ -138,27 +138,56 @@ class JobAttachments:
 # ---------------------------------------------------------------------------
 
 
+async def _captcha_requirement_reason(
+    user, *, soft_quota_exceeded: bool | None = None
+) -> str | None:
+    """Single source of truth for "does this user need a Turnstile?"
+
+    Returns the reason string when a captcha is required, ``None``
+    when it isn't. Both ``/api/jobs/precheck`` and the POST gate in
+    ``_verify_captcha_if_needed`` consult this so a stale "not in
+    grace" answer from precheck can't lead the frontend to demand a
+    Turnstile that the POST handler would happily skip — or vice
+    versa.
+
+    ``soft_quota_exceeded`` is taken from the caller when the POST
+    gate has already computed the access decision; precheck passes
+    ``None`` and we query the quota guard ourselves. Splitting it
+    this way avoids a second DB query on the hot POST path.
+
+    Precedence mirrors the explicit-policy gates first (none of which
+    grace may bypass), then the burst gate (which grace does exempt
+    once a Turnstile has succeeded within the last 60 s).
+    """
+    settings = _settings()
+    if EmergencyConfig().force_captcha_global:
+        return "force_captcha_global"
+    if soft_quota_exceeded is None:
+        soft_quota_exceeded = await get_quota_guard().check_soft_quota_exceeded(user)
+    if soft_quota_exceeded:
+        return "soft_quota_exceeded"
+    if settings.FORCE_CAPTCHA:
+        return "force_captcha"
+    # Burst gate — the only branch the grace window exempts. Once
+    # the user has solved a Turnstile within the last 60 s, the
+    # rolling counter is silenced for the rest of that window.
+    if await get_captcha_grace().is_in_grace(user.id):
+        return None
+    if await _recent_burst(user):
+        return "rate_limit_pre_warn"
+    return None
+
+
 @router.post("/precheck", response_model=PrecheckResponse)
 async def precheck(body: PrecheckRequest, user: CurrentUser) -> PrecheckResponse:
     """Return whether the next ``POST /api/jobs`` will need a captcha.
 
-    Decision (design doc §6.3):
-
-    1. Force-on via emergency switch ``emergency.force_captcha_global``.
-    2. User is over the soft quota for today.
-    3. User has burst-submitted: ≥ 5 jobs in the last 60 seconds.
+    Mirrors the POST gate via :func:`_captcha_requirement_reason` so
+    a "no captcha" precheck can never disagree with the gate that
+    actually runs at submit time (and vice versa).
     """
     settings = _settings()
-    reason: str | None = None
-
-    if EmergencyConfig().force_captcha_global:
-        reason = "force_captcha_global"
-    elif await get_quota_guard().check_soft_quota_exceeded(user):
-        reason = "soft_quota_exceeded"
-    elif await _recent_burst(user):
-        reason = "rate_limit_pre_warn"
-    elif settings.FORCE_CAPTCHA:
-        reason = "force_captcha"
+    reason = await _captcha_requirement_reason(user)
 
     if reason is None:
         logger.debug("precheck: u=%s model=%s outcome=no_captcha", user.id, body.model)
@@ -1396,21 +1425,15 @@ async def _verify_captcha_if_needed(
     Returns True when captcha verification succeeded, False when no
     captcha was needed. Raises 412 ``CAPTCHA_REQUIRED`` /
     ``CAPTCHA_INVALID`` on failure.
+
+    Routes the gating decision through :func:`_captcha_requirement_reason`
+    so the answer here is identical to what ``/api/jobs/precheck``
+    just told the frontend — grace window included.
     """
-    settings = _settings()
-    grace = get_captcha_grace()
-    in_grace = await grace.is_in_grace(user.id)
-    # The grace window only exempts the rolling burst counter — the
-    # other gates (soft quota, force-captcha emergency switch, global
-    # FORCE_CAPTCHA env) reflect explicit policy and must not be
-    # bypassable by one successful Turnstile.
-    require = (
-        decision.soft_quota_exceeded
-        or settings.FORCE_CAPTCHA
-        or EmergencyConfig().force_captcha_global
-        or (not in_grace and await _recent_burst(user))
+    reason = await _captcha_requirement_reason(
+        user, soft_quota_exceeded=decision.soft_quota_exceeded
     )
-    if not require:
+    if reason is None:
         return False
 
     if not body.captcha_token:
@@ -1426,7 +1449,7 @@ async def _verify_captcha_if_needed(
     # Successful verification opens the 60 s grace window so the rest
     # of this user's fan-out doesn't re-trip the burst counter and
     # demand another captcha for every sub-request.
-    await grace.mark(user.id)
+    await get_captcha_grace().mark(user.id)
     return True
 
 

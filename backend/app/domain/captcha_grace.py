@@ -23,6 +23,13 @@ from datetime import datetime, timedelta, timezone
 
 
 _GRACE_SECONDS = 60
+# Cap on the number of stored entries before we proactively sweep the
+# whole dict. A user who solves Turnstile and never comes back leaves
+# one entry behind; lazy ``is_in_grace`` eviction only fires when that
+# same user is read again, so without a hard cap the dict can drift up
+# slowly under churn. 50k entries × ~150 B/entry ≈ 7 MB worst case,
+# well inside what a single backend pod can carry.
+_HARD_CAP_ENTRIES = 50_000
 
 
 @dataclass
@@ -39,8 +46,15 @@ class CaptchaGrace:
 
     async def mark(self, user_id: str) -> None:
         """Open a 60 s grace window for ``user_id`` starting now."""
-        expires = datetime.now(timezone.utc) + timedelta(seconds=_GRACE_SECONDS)
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(seconds=_GRACE_SECONDS)
         async with self._lock:
+            # Opportunistic sweep on write: cheap amortised cost, and
+            # the write path is where new entries arrive, so every
+            # ``mark`` gets a chance to garbage-collect entries that
+            # the read path never revisited (e.g. user solved a
+            # captcha then walked away).
+            self._sweep_locked(now)
             self._entries[user_id] = _Entry(expires_at=expires)
 
     async def is_in_grace(self, user_id: str) -> bool:
@@ -50,12 +64,34 @@ class CaptchaGrace:
             if entry is None:
                 return False
             if entry.expires_at <= datetime.now(timezone.utc):
-                # Lazy eviction — keeps the dict from growing unbounded
-                # without a sweeper goroutine. Active-user count stays
-                # bounded naturally.
+                # Lazy eviction on read complements the ``mark`` sweep
+                # so we never report ``True`` for a stale entry.
                 self._entries.pop(user_id, None)
                 return False
             return True
+
+    def _sweep_locked(self, now: datetime) -> None:
+        """Drop expired entries; must be called with ``self._lock`` held.
+
+        Two cleanup tactics:
+          1. Always strip any entry whose ``expires_at`` is in the past
+             — that's the cheap, correctness-driven part.
+          2. If we're still above the hard cap after #1 (which would
+             only happen if a flood of in-window entries piled up
+             faster than they expire), trim the oldest by expiry so
+             memory stays bounded under adversarial conditions.
+        """
+        expired = [uid for uid, e in self._entries.items() if e.expires_at <= now]
+        for uid in expired:
+            self._entries.pop(uid, None)
+        if len(self._entries) <= _HARD_CAP_ENTRIES:
+            return
+        overflow = len(self._entries) - _HARD_CAP_ENTRIES
+        # Oldest expiry first — those will expire soonest anyway, so
+        # dropping them costs us the least useful information.
+        ordered = sorted(self._entries.items(), key=lambda kv: kv[1].expires_at)
+        for uid, _ in ordered[:overflow]:
+            self._entries.pop(uid, None)
 
 
 _instance: CaptchaGrace | None = None
