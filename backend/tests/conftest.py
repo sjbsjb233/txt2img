@@ -61,6 +61,7 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
     from app.db.migrate import upgrade_to_head
     from app.domain.access_policy import reset_access_policy_for_tests
     from app.domain.batch_service import reset_batch_progress_emitter_for_tests
+    from app.domain.captcha_grace import reset_captcha_grace_for_tests
     from app.domain.circuit_breaker import reset_circuit_breaker_for_tests
     from app.domain.config_center import reset_config_center_for_tests
     from app.domain.job_executor import reset_job_executor_for_tests
@@ -89,6 +90,7 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
     reset_soft_penalty_for_tests()
     reset_sse_hub_for_tests()
     reset_batch_progress_emitter_for_tests()
+    reset_captcha_grace_for_tests()
     reset_logging_for_tests()
     reset_rate_limit_for_tests()
 
@@ -111,6 +113,7 @@ async def initialized_db(fresh_env: None) -> AsyncIterator[None]:
         reset_soft_penalty_for_tests()
         reset_sse_hub_for_tests()
         reset_batch_progress_emitter_for_tests()
+        reset_captcha_grace_for_tests()
     reset_logging_for_tests()
     reset_rate_limit_for_tests()
 

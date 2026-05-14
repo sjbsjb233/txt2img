@@ -55,6 +55,7 @@ from app.db.jobs_repository import (
 from app.db.models import Batch, Image, Job, Session as SessionRow, SessionJob
 from app.deps import CurrentUser
 from app.domain.access_policy import AccessDecision, get_access_policy
+from app.domain.captcha_grace import get_captcha_grace
 from app.domain.job_lifecycle import (
     CANCELLED,
     DELETED,
@@ -1385,11 +1386,17 @@ async def _verify_captcha_if_needed(
     ``CAPTCHA_INVALID`` on failure.
     """
     settings = _settings()
+    grace = get_captcha_grace()
+    in_grace = await grace.is_in_grace(user.id)
+    # The grace window only exempts the rolling burst counter — the
+    # other gates (soft quota, force-captcha emergency switch, global
+    # FORCE_CAPTCHA env) reflect explicit policy and must not be
+    # bypassable by one successful Turnstile.
     require = (
         decision.soft_quota_exceeded
         or settings.FORCE_CAPTCHA
         or EmergencyConfig().force_captcha_global
-        or await _recent_burst(user.id)
+        or (not in_grace and await _recent_burst(user.id))
     )
     if not require:
         return False
@@ -1404,6 +1411,10 @@ async def _verify_captcha_if_needed(
     ok = await turnstile.verify(body.captcha_token, remote_ip=ip)
     if not ok:
         raise api_error(412, "CAPTCHA_INVALID", "Captcha verification failed.")
+    # Successful verification opens the 60 s grace window so the rest
+    # of this user's fan-out doesn't re-trip the burst counter and
+    # demand another captcha for every sub-request.
+    await grace.mark(user.id)
     return True
 
 
