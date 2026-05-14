@@ -73,9 +73,19 @@ class QuotaGuard:
         caller should reject job creation with 429 ``HARD_QUOTA_EXCEEDED``
         when this returns True.
         """
-        _, hard = get_tier_config().effective_quotas(user)
+        soft, hard = get_tier_config().effective_quotas(user)
         count = await self.today_count(user.id, session=session)
-        return count >= hard
+        if count >= hard:
+            logger.warning(
+                "quota: deny u=%s used=%d hard=%d soft=%d tier=%s",
+                user.id,
+                count,
+                hard,
+                soft,
+                user.tier,
+            )
+            return True
+        return False
 
     async def check_soft_quota_exceeded(
         self,
@@ -147,8 +157,11 @@ class QuotaGuard:
 
         if session is None:
             async with get_session() as s:
-                return await _write(s)
-        return await _write(session)
+                new_count = await _write(s)
+        else:
+            new_count = await _write(session)
+        logger.debug("quota: record u=%s new_count=%d", user_id, new_count)
+        return new_count
 
     async def refund_usage(
         self,
@@ -185,8 +198,11 @@ class QuotaGuard:
 
         if session is None:
             async with get_session() as s:
-                return await _write(s)
-        return await _write(session)
+                new_count = await _write(s)
+        else:
+            new_count = await _write(session)
+        logger.info("quota: refund u=%s new_count=%d", user_id, new_count)
+        return new_count
 
     async def reset_stale_users(
         self,

@@ -33,7 +33,10 @@ Wire-format notes (design doc §2 / §3 / §5):
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import logging
+import time
 from typing import Any
 
 import httpx
@@ -88,6 +91,15 @@ _THINKING_LEVELS = {"minimal", "high"}
 _MAX_REFERENCES = 14
 _PROMPT_MAX_CHARS = 32_000
 _BODY_EXCERPT_CHARS = 800
+
+
+logger = logging.getLogger("txt2img.adapter.gemini")
+
+
+def _prompt_fingerprint(prompt: str | None) -> str:
+    if not prompt:
+        return ""
+    return hashlib.sha256(prompt.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
 class GeminiV1BetaAdapter(BaseAdapter):
@@ -560,7 +572,21 @@ class GeminiV1BetaAdapter(BaseAdapter):
         }
         base = provider.base_url.rstrip("/")
         url = f"{base}/models/{request.model}:generateContent"
+        n_refs = len(request.references or [])
+        prompt_hash = _prompt_fingerprint(request.prompt)
+        logger.info(
+            "upstream call: provider=%s model=%s n_refs=%d aspect=%s "
+            "size=%s prompt_hash=%s prompt_len=%d",
+            provider.id,
+            request.model,
+            n_refs,
+            request.aspect_ratio,
+            request.size,
+            prompt_hash,
+            len(request.prompt or ""),
+        )
 
+        t0 = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=provider.timeout_seconds) as client:
                 resp = await client.post(
@@ -568,9 +594,57 @@ class GeminiV1BetaAdapter(BaseAdapter):
                     headers=headers,
                     content=json.dumps(body).encode("utf-8"),
                 )
-        except StandardError:
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            logger.info(
+                "upstream response: provider=%s model=%s status=%d "
+                "latency_ms=%d bytes=%d",
+                provider.id,
+                request.model,
+                resp.status_code,
+                latency_ms,
+                len(resp.content or b""),
+            )
+        except StandardError as exc:
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            logger.warning(
+                "upstream business error: provider=%s model=%s kind=%s "
+                "status=%s latency_ms=%d msg=%s",
+                provider.id,
+                request.model,
+                getattr(exc, "kind", None),
+                getattr(exc, "upstream_status", None),
+                latency_ms,
+                str(exc)[:200],
+            )
             raise
+        except httpx.TimeoutException as exc:
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            logger.warning(
+                "upstream timeout: provider=%s model=%s latency_ms=%d exc=%r",
+                provider.id,
+                request.model,
+                latency_ms,
+                exc,
+            )
+            raise self.normalize_error(exc) from exc
+        except httpx.TransportError as exc:
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            logger.warning(
+                "upstream transport: provider=%s model=%s latency_ms=%d exc=%r",
+                provider.id,
+                request.model,
+                latency_ms,
+                exc,
+            )
+            raise self.normalize_error(exc) from exc
         except Exception as exc:
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            logger.exception(
+                "upstream unexpected: provider=%s model=%s latency_ms=%d",
+                provider.id,
+                request.model,
+                latency_ms,
+            )
             raise self.normalize_error(exc) from exc
 
         return self._parse_response(resp)
@@ -709,6 +783,11 @@ class GeminiV1BetaAdapter(BaseAdapter):
             pass
 
         if resp.status_code in (401, 403):
+            logger.warning(
+                "upstream auth failure: status=%d msg=%s",
+                resp.status_code,
+                message[:200],
+            )
             raise StandardError(
                 StandardErrorKind.AUTH,
                 f"upstream auth failure: {message}",
@@ -716,6 +795,11 @@ class GeminiV1BetaAdapter(BaseAdapter):
                 upstream_body_excerpt=excerpt,
             )
         if resp.status_code == 429:
+            logger.warning(
+                "upstream rate-limited: status=%d msg=%s",
+                resp.status_code,
+                message[:200],
+            )
             raise StandardError(
                 StandardErrorKind.RATE_LIMITED,
                 f"upstream rate-limited: {message}",

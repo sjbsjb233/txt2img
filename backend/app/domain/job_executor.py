@@ -108,6 +108,20 @@ class JobExecutor:
 
     async def execute(self, queued: QueuedJob) -> None:
         """Run ``queued`` until SUCCEEDED/FAILED or it is no longer runnable."""
+        # Stamp the worker's contextvars so every downstream logger
+        # call inherits the job id / user id without us threading them
+        # through every helper.
+        from app.utils import log_context
+
+        log_context.set_job_id(queued.hash_id)
+        log_context.set_user_id(queued.user_id)
+        logger.info(
+            "executor: start hash_id=%s user_id=%s tier=%s model=%s",
+            queued.hash_id,
+            queued.user_id,
+            queued.tier,
+            queued.model,
+        )
         try:
             ctx = await self._load_context(queued.hash_id)
         except Exception:
@@ -119,12 +133,23 @@ class JobExecutor:
 
         try:
             await self._mark_running(ctx)
+            logger.info(
+                "executor: marked RUNNING hash_id=%s user=%s model=%s",
+                ctx.hash_id,
+                ctx.user.id,
+                ctx.model,
+            )
         except InvalidTransition:
             # The job was likely cancelled/deleted after being enqueued.
             logger.info("executor: job=%s no longer QUEUED; skip", queued.hash_id)
             return
 
         if is_soft_quota_job(ctx.flags):
+            logger.info(
+                "executor: soft-quota path hash_id=%s flags=%s",
+                ctx.hash_id,
+                sorted(ctx.flags.keys()),
+            )
             should_continue = await self._apply_soft_penalty(ctx)
             if not should_continue:
                 return
@@ -136,9 +161,21 @@ class JobExecutor:
             hash_id=ctx.hash_id,
         )
         if not candidates:
+            logger.warning(
+                "executor: no provider available hash_id=%s user=%s model=%s",
+                ctx.hash_id,
+                ctx.user.id,
+                ctx.model,
+            )
             await self._fail(ctx, "NO_PROVIDER_AVAILABLE", refund_quota=True)
             return
 
+        logger.info(
+            "executor: candidates selected hash_id=%s n=%d providers=%s",
+            ctx.hash_id,
+            len(candidates),
+            [c.provider.provider_id for c in candidates],
+        )
         await self._mark_started(ctx.hash_id)
         await self._try_candidates(ctx, candidates)
 
@@ -422,6 +459,15 @@ class JobExecutor:
                 provider_id=provider.provider_id,
             )
             await self._lifecycle.transition(ctx.hash_id, SUCCEEDED)
+            logger.info(
+                "executor: SUCCEEDED hash_id=%s provider=%s attempt=%d "
+                "images=%d cost_cny=%.4f",
+                ctx.hash_id,
+                provider.provider_id,
+                attempt_no,
+                len(response.images),
+                float(deduction.cost_cny or 0.0),
+            )
             return
 
         reason = "ALL_PROVIDERS_FAILED"
@@ -430,6 +476,13 @@ class JobExecutor:
             and last_error.kind == StandardErrorKind.INVALID_PARAMETER
         ):
             reason = "INVALID_PARAMETER"
+        logger.warning(
+            "executor: FAILED hash_id=%s reason=%s attempts=%d last_error=%s",
+            ctx.hash_id,
+            reason,
+            len(attempts),
+            (last_error.kind.value if last_error is not None else None),
+        )
         await self._fail(ctx, reason, refund_quota=False)
 
     async def _call_adapter(

@@ -84,6 +84,7 @@ from app.utils.errors import api_error
 from app.utils.ids import new_set_id
 
 logger = logging.getLogger("txt2img.jobs")
+job_lifecycle_logger = logging.getLogger("txt2img.job_lifecycle")
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
@@ -157,8 +158,15 @@ async def precheck(body: PrecheckRequest, user: CurrentUser) -> PrecheckResponse
         reason = "force_captcha"
 
     if reason is None:
+        logger.debug("precheck: u=%s model=%s outcome=no_captcha", user.id, body.model)
         return PrecheckResponse(captcha_required=False)
 
+    logger.info(
+        "precheck: u=%s model=%s outcome=captcha reason=%s",
+        user.id,
+        body.model,
+        reason,
+    )
     return PrecheckResponse(
         captcha_required=True,
         captcha_provider="turnstile",
@@ -207,6 +215,16 @@ async def create_job(
       ordered by the integer suffix.
     """
     body = _parse_payload(payload)
+    logger.info(
+        "job submit: u=%s model=%s n=%d derivation=%s parent=%s batch=%s session=%s",
+        user.id,
+        body.model,
+        body.n,
+        body.derivation_kind.value if body.derivation_kind else None,
+        body.parent_hash_id,
+        body.batch_id,
+        body.session_id,
+    )
 
     # Idempotency: same user + same client_request_id within the
     # dedup window returns the prior response unchanged. Done up
@@ -216,6 +234,12 @@ async def create_job(
             user.id, body.client_request_id
         )
         if existing is not None:
+            logger.info(
+                "job submit: u=%s dedup hit client_request_id=%s hash=%s",
+                user.id,
+                body.client_request_id,
+                existing.hash_id,
+            )
             return existing
 
     # Walk the entire multipart up front so we have refs in hand for
@@ -511,6 +535,16 @@ async def create_job(
         flags=dict(flags),
     )
     await queue.enqueue(queued_job)
+    job_lifecycle_logger.info(
+        "job queued: u=%s hash_id=%s seq=%d tier=%s model=%s set=%s flags=%s",
+        user.id,
+        created.hash_id,
+        created.seq_no,
+        user.tier,
+        body.model,
+        set_id,
+        sorted(flags.keys()),
+    )
 
     position = await queue.position(created.hash_id)
     eta = _estimate_wait_seconds(position)
@@ -816,11 +850,24 @@ async def cancel_job(hash_id: str, user: CurrentUser) -> JobActionResponse:
     current_status = job_row.status
 
     if current_status not in (QUEUED, RUNNING):
+        logger.info(
+            "job cancel rejected: u=%s hash_id=%s status=%s",
+            user.id,
+            hash_id,
+            current_status,
+        )
         raise api_error(
             409,
             "CONFLICT",
             f"Job in status {current_status} cannot be cancelled.",
         )
+
+    logger.info(
+        "job cancel: u=%s hash_id=%s state_before=%s",
+        user.id,
+        hash_id,
+        current_status,
+    )
 
     # Pull from the in-memory queue first so the scheduler doesn't
     # immediately try to dispatch what we're about to cancel.
@@ -869,11 +916,24 @@ async def delete_job(hash_id: str, user: CurrentUser) -> JobActionResponse:
     job_row = await _load_owned_job(hash_id, user.id)
 
     if job_row.status not in ("SUCCEEDED", FAILED, CANCELLED):
+        logger.info(
+            "job delete rejected: u=%s hash_id=%s status=%s",
+            user.id,
+            hash_id,
+            job_row.status,
+        )
         raise api_error(
             409,
             "CONFLICT",
             f"Job in status {job_row.status} cannot be deleted yet.",
         )
+
+    logger.info(
+        "job delete: u=%s hash_id=%s state_before=%s",
+        user.id,
+        hash_id,
+        job_row.status,
+    )
 
     try:
         await get_job_lifecycle().transition(

@@ -163,6 +163,10 @@ async def captcha_check(body: CaptchaCheckRequest) -> CaptchaCheckResponse:
     settings = get_settings()
 
     if settings.FORCE_CAPTCHA:
+        logger.info(
+            "captcha_check: u=%s required=true reason=force_captcha",
+            body.username,
+        )
         return CaptchaCheckResponse(
             captcha_required=True,
             captcha_provider="turnstile",
@@ -171,6 +175,10 @@ async def captcha_check(body: CaptchaCheckRequest) -> CaptchaCheckResponse:
         )
 
     if await _force_captcha_global():
+        logger.info(
+            "captcha_check: u=%s required=true reason=force_captcha_global",
+            body.username,
+        )
         return CaptchaCheckResponse(
             captcha_required=True,
             captcha_provider="turnstile",
@@ -180,6 +188,11 @@ async def captcha_check(body: CaptchaCheckRequest) -> CaptchaCheckResponse:
 
     failures = await _recent_failed_attempts(body.username)
     if failures >= FAILURE_THRESHOLD:
+        logger.info(
+            "captcha_check: u=%s required=true reason=failure_threshold failures=%d",
+            body.username,
+            failures,
+        )
         return CaptchaCheckResponse(
             captcha_required=True,
             captcha_provider="turnstile",
@@ -187,6 +200,9 @@ async def captcha_check(body: CaptchaCheckRequest) -> CaptchaCheckResponse:
             reason="failure_threshold_exceeded",
         )
 
+    logger.debug(
+        "captcha_check: u=%s required=false failures=%d", body.username, failures
+    )
     return CaptchaCheckResponse(captcha_required=False)
 
 
@@ -235,6 +251,7 @@ async def login(body: LoginRequest, request: Request) -> LoginResponse:
     """
     settings = get_settings()
     ip = _client_ip(request)
+    logger.info("login attempt: u=%s ip=%s", body.username, ip)
 
     async with get_session() as session:
         user = (
@@ -256,11 +273,20 @@ async def login(body: LoginRequest, request: Request) -> LoginResponse:
 
     if not valid_password:
         await _record_attempt(body.username, ip, success=False)
+        logger.warning(
+            "login failed: u=%s reason=bad_password ip=%s user_exists=%s",
+            body.username,
+            ip,
+            user is not None,
+        )
         raise api_error(401, "UNAUTHORIZED", "Invalid username or password.")
 
     # ----- emergency login block (admins bypass)
     assert user is not None  # narrow for type-checker; valid_password implies this
     if user.role != "admin" and await _block_new_member_login():
+        logger.warning(
+            "login failed: u=%s reason=blocked_new_member ip=%s", body.username, ip
+        )
         raise api_error(
             401,
             "BLOCKED_BY_EMERGENCY",
@@ -271,6 +297,11 @@ async def login(body: LoginRequest, request: Request) -> LoginResponse:
     if captcha_was_required:
         if not body.captcha_token:
             await _record_attempt(body.username, ip, success=False)
+            logger.warning(
+                "login failed: u=%s reason=captcha_required ip=%s",
+                body.username,
+                ip,
+            )
             raise api_error(
                 412,
                 "CAPTCHA_REQUIRED",
@@ -279,11 +310,19 @@ async def login(body: LoginRequest, request: Request) -> LoginResponse:
         captcha_ok = await turnstile.verify(body.captcha_token, remote_ip=ip)
         if not captcha_ok:
             await _record_attempt(body.username, ip, success=False)
+            logger.warning(
+                "login failed: u=%s reason=captcha_invalid ip=%s",
+                body.username,
+                ip,
+            )
             raise api_error(412, "CAPTCHA_INVALID", "Captcha verification failed.")
 
     # ----- account-status gate (after credentials so we don't leak existence)
     if user.status == "disabled":
         await _record_attempt(body.username, ip, success=False)
+        logger.warning(
+            "login failed: u=%s reason=account_disabled ip=%s", body.username, ip
+        )
         raise api_error(403, "ACCOUNT_DISABLED", "Your account has been disabled.")
 
     # ----- success
@@ -313,6 +352,14 @@ async def login(body: LoginRequest, request: Request) -> LoginResponse:
         )
 
     token = issue_access_token(user.id, user.username, user.role, jti=jti)
+    logger.info(
+        "login success: u=%s user_id=%s role=%s ip=%s jti=%s",
+        user.username,
+        user.id,
+        user.role,
+        ip,
+        jti,
+    )
     return LoginResponse(
         access_token=token,
         token_type="bearer",
@@ -342,6 +389,12 @@ async def logout(ctx: CurrentContext) -> dict[str, bool]:
             ).scalar_one_or_none()
             if row is not None and row.revoked_at is None:
                 row.revoked_at = datetime.now(timezone.utc)
+    logger.info(
+        "logout: user_id=%s jti=%s impersonator_id=%s",
+        ctx.user.id,
+        ctx.jti,
+        ctx.impersonator_id,
+    )
     return {"ok": True}
 
 

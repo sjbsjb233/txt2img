@@ -18,6 +18,7 @@ layer (``app.domain.access_policy``, added in PR-09).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -27,8 +28,12 @@ from sqlalchemy import select
 from app.db.engine import get_session
 from app.db.models import AuthSession, User
 from app.domain.runtime_configs import EmergencyConfig
+from app.utils import log_context
 from app.utils.errors import api_error
 from app.utils.security import TokenError, decode_access_token
+
+
+logger = logging.getLogger("txt2img.deps.auth")
 
 
 # ---------------------------------------------------------------------------
@@ -77,9 +82,11 @@ def _extract_bearer(authorization: str | None) -> str:
     Raises 401 ``UNAUTHORIZED`` if the header is missing or malformed.
     """
     if not authorization:
+        logger.warning("auth: missing Authorization header")
         raise api_error(401, "UNAUTHORIZED", "Missing Authorization header.")
     parts = authorization.split(" ", 1)
     if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+        logger.warning("auth: malformed Authorization header")
         raise api_error(401, "UNAUTHORIZED", "Malformed Authorization header.")
     return parts[1].strip()
 
@@ -110,10 +117,12 @@ async def get_auth_context(
     try:
         payload = decode_access_token(token)
     except TokenError as exc:
+        logger.warning("auth: token decode failed reason=%s", exc)
         raise api_error(401, "UNAUTHORIZED", "Invalid or expired token.") from exc
 
     user_id = payload.get("sub")
     if not isinstance(user_id, str) or not user_id:
+        logger.warning("auth: token missing subject claim")
         raise api_error(401, "UNAUTHORIZED", "Token missing subject claim.")
 
     impersonator_raw = payload.get("impersonator")
@@ -142,18 +151,34 @@ async def get_auth_context(
                 )
             ).scalar_one_or_none()
             if sess_row is not None and sess_row.revoked_at is not None:
+                logger.warning(
+                    "auth: session revoked jti=%s user_id=%s", jti, user_id
+                )
                 raise api_error(401, "UNAUTHORIZED", "Session has been revoked.")
 
     if user is None:
         # Token references a user that no longer exists.
+        logger.warning("auth: token user not found user_id=%s", user_id)
         raise api_error(401, "UNAUTHORIZED", "Account not found.")
     if user.status == "disabled":
+        logger.warning("auth: account_disabled user_id=%s", user.id)
         raise api_error(403, "ACCOUNT_DISABLED", "Your account has been disabled.")
     if user.status == "deleted":
         # Soft-deleted users are functionally gone. We deliberately surface
         # the same 401 a missing user would, so admins deleting accounts
         # don't accidentally leak the soft-delete distinction.
+        logger.warning("auth: account_deleted user_id=%s", user.id)
         raise api_error(401, "UNAUTHORIZED", "Account not found.")
+
+    # Stamp the request-scoped log context. Downstream ``logger.*`` calls
+    # in the request handler will now carry ``user_id`` automatically.
+    log_context.set_user_id(user.id)
+    if impersonator_id is not None:
+        logger.info(
+            "auth: impersonation request user_id=%s impersonator_id=%s",
+            user.id,
+            impersonator_id,
+        )
 
     return AuthContext(user=user, impersonator_id=impersonator_id, jti=jti)
 
@@ -194,12 +219,22 @@ async def get_current_admin(
     session, not the admin who started it).
     """
     if ctx.impersonator_id is not None:
+        logger.warning(
+            "auth: admin endpoint denied during impersonation user_id=%s impersonator_id=%s",
+            ctx.user.id,
+            ctx.impersonator_id,
+        )
         raise api_error(
             403,
             "FORBIDDEN",
             "Admin endpoints are not available while impersonating a user.",
         )
     if ctx.user.role != "admin":
+        logger.warning(
+            "auth: admin required, denied user_id=%s role=%s",
+            ctx.user.id,
+            ctx.user.role,
+        )
         raise api_error(403, "FORBIDDEN", "Admin privileges required.")
     return ctx.user
 
@@ -215,12 +250,22 @@ async def get_current_admin_context(
     directly without re-deriving the context.
     """
     if ctx.impersonator_id is not None:
+        logger.warning(
+            "auth: admin context denied during impersonation user_id=%s impersonator_id=%s",
+            ctx.user.id,
+            ctx.impersonator_id,
+        )
         raise api_error(
             403,
             "FORBIDDEN",
             "Admin endpoints are not available while impersonating a user.",
         )
     if ctx.user.role != "admin":
+        logger.warning(
+            "auth: admin context required, denied user_id=%s role=%s",
+            ctx.user.id,
+            ctx.user.role,
+        )
         raise api_error(403, "FORBIDDEN", "Admin privileges required.")
     return ctx
 
@@ -246,6 +291,9 @@ async def require_not_blocked(
     switch for handlers that only need "generation is not paused".
     """
     if EmergencyConfig().pause_generation:
+        logger.warning(
+            "auth: generation paused by emergency switch user_id=%s", user.id
+        )
         raise api_error(
             403,
             "BLOCKED_BY_EMERGENCY",

@@ -14,8 +14,10 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # /app/data is bind-mounted in production; create it here so ad-hoc runs
-# without a mount still have a writable data root.
-RUN mkdir -p /app/data
+# without a mount still have a writable data root. The logs directory
+# is pre-created so the first lifespan run never races to mkdir under a
+# read-only bind mount.
+RUN mkdir -p /app/data /app/data/logs/backend /app/data/logs/frontend
 
 FROM base AS dev
 COPY app ./app

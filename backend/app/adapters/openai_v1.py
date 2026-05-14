@@ -33,8 +33,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import ipaddress
 import json
+import logging
+import time
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
@@ -85,6 +88,15 @@ _PROMPT_MAX_CHARS = 32_000
 # here for backward compat with existing tests that import them from
 # this module — the adapter is the historical home, not the canonical one.
 from app.utils.size import parse_custom_size, validate_custom_size  # noqa: E402,F401
+
+
+logger = logging.getLogger("txt2img.adapter.openai")
+
+
+def _prompt_fingerprint(prompt: str | None) -> str:
+    if not prompt:
+        return ""
+    return hashlib.sha256(prompt.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
 class OpenAIV1Adapter(BaseAdapter):
@@ -598,13 +610,32 @@ class OpenAIV1Adapter(BaseAdapter):
             "Accept": "application/json",
         }
         base = provider.base_url.rstrip("/")
+        is_edits = self._is_edits_request(request)
+        endpoint = "/images/edits" if is_edits else "/images/generations"
+        prompt_hash = _prompt_fingerprint(request.prompt)
+        prompt_len = len(request.prompt or "")
+        n_refs = len(request.references or [])
+        logger.info(
+            "upstream call: provider=%s model=%s endpoint=%s n=%d size=%s "
+            "prompt_hash=%s prompt_len=%d n_refs=%d has_mask=%s",
+            provider.id,
+            request.model,
+            endpoint,
+            request.n,
+            request.size,
+            prompt_hash,
+            prompt_len,
+            n_refs,
+            request.mask is not None,
+        )
 
+        t0 = time.perf_counter()
         try:
             async with httpx.AsyncClient(timeout=provider.timeout_seconds) as client:
-                if self._is_edits_request(request):
+                if is_edits:
                     files, data = self._build_edits_multipart(request)
                     resp = await client.post(
-                        f"{base}/images/edits",
+                        f"{base}{endpoint}",
                         headers=headers,
                         files=files,
                         data=data,
@@ -612,10 +643,20 @@ class OpenAIV1Adapter(BaseAdapter):
                 else:
                     body = self._build_generations_body(request)
                     resp = await client.post(
-                        f"{base}/images/generations",
+                        f"{base}{endpoint}",
                         headers={**headers, "Content-Type": "application/json"},
                         content=json.dumps(body).encode("utf-8"),
                     )
+                latency_ms = int((time.perf_counter() - t0) * 1000)
+                logger.info(
+                    "upstream response: provider=%s model=%s status=%d "
+                    "latency_ms=%d bytes=%d",
+                    provider.id,
+                    request.model,
+                    resp.status_code,
+                    latency_ms,
+                    len(resp.content or b""),
+                )
                 # The same client is reused to fetch any ``url``-format
                 # items the upstream returned (BLTCY-style relays do
                 # this), so we don't pay TLS-handshake twice.
@@ -624,9 +665,47 @@ class OpenAIV1Adapter(BaseAdapter):
                     request.output_format or "png",
                     client,
                 )
-        except StandardError:
+        except StandardError as exc:
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            logger.warning(
+                "upstream business error: provider=%s model=%s kind=%s "
+                "status=%s latency_ms=%d msg=%s",
+                provider.id,
+                request.model,
+                getattr(exc, "kind", None),
+                getattr(exc, "upstream_status", None),
+                latency_ms,
+                str(exc)[:200],
+            )
             raise
+        except httpx.TimeoutException as exc:
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            logger.warning(
+                "upstream timeout: provider=%s model=%s latency_ms=%d exc=%r",
+                provider.id,
+                request.model,
+                latency_ms,
+                exc,
+            )
+            raise self.normalize_error(exc) from exc
+        except httpx.TransportError as exc:
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            logger.warning(
+                "upstream transport: provider=%s model=%s latency_ms=%d exc=%r",
+                provider.id,
+                request.model,
+                latency_ms,
+                exc,
+            )
+            raise self.normalize_error(exc) from exc
         except Exception as exc:
+            latency_ms = int((time.perf_counter() - t0) * 1000)
+            logger.exception(
+                "upstream unexpected: provider=%s model=%s latency_ms=%d",
+                provider.id,
+                request.model,
+                latency_ms,
+            )
             raise self.normalize_error(exc) from exc
 
     # ------------------------------------------------------------------
@@ -691,6 +770,12 @@ class OpenAIV1Adapter(BaseAdapter):
                         item_mime = ctype_main
 
         if image_bytes is None:
+            logger.warning(
+                "upstream item undecodable: format=%s has_b64=%s has_url=%s",
+                requested_format,
+                isinstance(item.get("b64_json"), str),
+                isinstance(item.get("url"), str),
+            )
             return None
 
         image_meta: dict[str, Any] = {}
@@ -840,6 +925,9 @@ class OpenAIV1Adapter(BaseAdapter):
             pass
 
         if resp.status_code in (401, 403):
+            logger.warning(
+                "upstream auth failure: status=%d msg=%s", resp.status_code, message[:200]
+            )
             raise StandardError(
                 StandardErrorKind.AUTH,
                 f"upstream auth failure: {message}",
@@ -847,6 +935,9 @@ class OpenAIV1Adapter(BaseAdapter):
                 upstream_body_excerpt=excerpt,
             )
         if resp.status_code == 429:
+            logger.warning(
+                "upstream rate-limited: status=%d msg=%s", resp.status_code, message[:200]
+            )
             raise StandardError(
                 StandardErrorKind.RATE_LIMITED,
                 f"upstream rate-limited: {message}",

@@ -18,6 +18,16 @@ services:
     env_file: ./backend.env
     environment:
       DB_URL: sqlite+aiosqlite:////app/data/txt2img.db
+      # Structured-logging defaults for the dev image. ``backend.env``
+      # may override any of these; we leave LOG_LEVEL at INFO so the
+      # dev server isn't drowning in debug noise but still captures
+      # the full request / executor / adapter trail. Logs land under
+      # ./data/logs/backend on the host through the existing
+      # ./data:/app/data bind mount.
+      LOG_DIR: /app/data/logs/backend
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+      LOG_RETAIN_DAYS: 30
     volumes:
       # Bind-mount: everything the backend needs to persist (SQLite DB, generated
       # images, etc.) lives under ./data on the host so the whole project is in

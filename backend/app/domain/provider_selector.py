@@ -203,6 +203,15 @@ class ProviderSelector:
             )
 
         if not candidates:
+            logger.warning(
+                "selector: exhausted user=%s tier=%s model=%s pool_total=%d "
+                "filtered=%d",
+                user.id,
+                user.tier,
+                request.model,
+                pool_total,
+                len(filtered_out),
+            )
             await self._persist_trace(
                 hash_id,
                 pool_total=pool_total,
@@ -222,7 +231,18 @@ class ProviderSelector:
         )
 
         k = top_k if top_k is not None else self._fallback_top_k()
-        return scored[:k]
+        chosen = scored[:k]
+        logger.info(
+            "selector: chose user=%s model=%s pool=%d survivors=%d top_k=%d "
+            "winner=%s",
+            user.id,
+            request.model,
+            pool_total,
+            len(scored),
+            len(chosen),
+            chosen[0].provider.provider_id if chosen else None,
+        )
+        return chosen
 
     async def _persist_trace(
         self,

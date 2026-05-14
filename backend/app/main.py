@@ -36,6 +36,7 @@ from app.api.announcements import router as announcements_router
 from app.api.archive import router as archive_router
 from app.api.auth import router as auth_router
 from app.api.batches import router as batches_router
+from app.api.client_logs import router as client_logs_router
 from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
 from app.api.me import router as me_router
@@ -49,6 +50,8 @@ from app.api.picker import (
 from app.api.sessions import router as sessions_router
 from app.api.sse import router as sse_router
 from app.config import get_settings
+from app.middleware.request_logging import RequestLoggingMiddleware
+from app.utils.logging_setup import configure_logging
 from app.db import engine as db_engine
 from app.db import seed as db_seed
 from app.db.migrate import upgrade_to_head
@@ -94,8 +97,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     and background tasks in here in dependency order.
     """
     settings = get_settings()
+    # Install structured logging before anything else writes a log line.
+    # The function is idempotent so a second lifespan run inside a test
+    # is harmless. We do it inside the lifespan (not at module import
+    # time) so unit tests that swap LOG_DIR per fixture see their own
+    # value, not whatever was cached at first import.
+    configure_logging(settings)
     print(f"[txt2img] starting backend version={settings.APP_VERSION}", flush=True)
-    logger.info("starting txt2img backend version=%s", settings.APP_VERSION)
+    logger.info(
+        "startup: txt2img backend version=%s log_dir=%s log_level=%s log_format=%s",
+        settings.APP_VERSION,
+        settings.LOG_DIR,
+        settings.LOG_LEVEL,
+        settings.LOG_FORMAT,
+    )
     try:
         os.makedirs(settings.DATA_ROOT, exist_ok=True)
     except OSError as exc:
@@ -256,12 +271,22 @@ def create_app() -> FastAPI:
         version=settings.APP_VERSION,
         lifespan=lifespan,
     )
+    # Request-id + access-log middleware. Registered before CORS so the
+    # id is stamped (and the access record is emitted) even on
+    # pre-flight OPTIONS rejections handled by Starlette's CORS layer.
+    # Starlette runs middleware in reverse-registration order, so adding
+    # this one *first* means it wraps the CORS middleware — every
+    # outgoing response, including CORS pre-flight, carries the id.
+    app.add_middleware(RequestLoggingMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # Expose the request-id echo so browser dev-tools and the JS
+        # logger can pick it up alongside the response body.
+        expose_headers=["X-Request-ID"],
     )
     # Surface a corrupted ``providers.api_key_enc`` row as a clean 500
     # rather than letting the raw exception escape past starlette's
@@ -323,6 +348,7 @@ def create_app() -> FastAPI:
     app.include_router(auth_router)
     app.include_router(me_router)
     app.include_router(sse_router)
+    app.include_router(client_logs_router)
     app.include_router(sessions_router)
     # Picker session routes (finalize/unfinalize/cursor + GET ../picker)
     # share ``/api/sessions`` with the legacy session CRUD; register

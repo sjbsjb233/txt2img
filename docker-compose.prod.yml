@@ -20,6 +20,14 @@ services:
     env_file: ./backend.env
     environment:
       DB_URL: sqlite+aiosqlite:////app/data/txt2img.db
+      # Structured-logging defaults (see backend/app/utils/logging_setup.py).
+      # Logs land on the host at ./data/logs/backend/*.log through the
+      # existing ./data:/app/data bind mount. Override via backend.env
+      # if a host needs different retention / level.
+      LOG_DIR: /app/data/logs/backend
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+      LOG_RETAIN_DAYS: 30
     volumes:
       # Bind-mount: everything the backend needs to persist (SQLite DB, generated
       # images, etc.) lives under ./data on the host so the whole project is in
