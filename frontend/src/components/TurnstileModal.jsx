@@ -82,6 +82,7 @@ export default function TurnstileModal({ open, onClose, onSuccess, siteKey }) {
   if (!open) return null;
   return (
     <div
+      data-testid="turnstile-modal"
       style={{
         position: "fixed",
         inset: 0,

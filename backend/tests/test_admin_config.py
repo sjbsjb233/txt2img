@@ -452,3 +452,71 @@ async def test_patch_tier_forbidden_for_non_admin(
         json={"weight": 16},
     )
     assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# burst_limit — per-tier override of _recent_burst threshold (S4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_tiers_includes_burst_limit_with_seed_defaults(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Seeded defaults: vip=20, premium=12, standard=8, free=5."""
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get("/api/admin/tiers", headers=_auth(token))
+    assert resp.status_code == 200
+    by_tier = {t["tier"]: t for t in resp.json()["tiers"]}
+    assert by_tier["vip"]["burst_limit"] == 20
+    assert by_tier["premium"]["burst_limit"] == 12
+    assert by_tier["standard"]["burst_limit"] == 8
+    assert by_tier["free"]["burst_limit"] == 5
+
+
+@pytest.mark.asyncio
+async def test_patch_tier_burst_limit_hot_reload(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """PATCH burst_limit → TierConfig.get(...).burst_limit reflects it."""
+    from app.domain.tier_config import get_tier_config
+
+    token = await _login_admin(seeded_app)
+    assert get_tier_config().get("vip").burst_limit == 20
+
+    resp = await seeded_app.patch(
+        "/api/admin/tiers/vip",
+        headers=_auth(token),
+        json={"burst_limit": 30},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["burst_limit"] == 30
+    # In-memory cache reloaded before the handler returned.
+    assert get_tier_config().get("vip").burst_limit == 30
+
+
+@pytest.mark.asyncio
+async def test_patch_tier_burst_limit_rejects_zero(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """``ge=1`` — setting 0 would effectively disable the gate."""
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.patch(
+        "/api/admin/tiers/vip",
+        headers=_auth(token),
+        json={"burst_limit": 0},
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_patch_tier_burst_limit_rejects_negative(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.patch(
+        "/api/admin/tiers/free",
+        headers=_auth(token),
+        json={"burst_limit": -1},
+    )
+    assert resp.status_code == 422

@@ -53,6 +53,11 @@ class TierSpec:
     soft_quota: int
     hard_quota: int
     slo_p95_ms: int | None
+    # Rolling-window threshold consulted by ``_recent_burst`` —
+    # ``N submissions in the last 60 s`` triggers a Turnstile.
+    # Per-tier so VIP users don't trip on fan-out and free users
+    # keep stricter anti-abuse limits.
+    burst_limit: int = 5
 
 
 class TierConfig:
@@ -94,6 +99,7 @@ class TierConfig:
                 soft_quota=row.soft_quota,
                 hard_quota=row.hard_quota,
                 slo_p95_ms=row.slo_p95_ms,
+                burst_limit=row.burst_limit,
             )
 
         async with self._lock:

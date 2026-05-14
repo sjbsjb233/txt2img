@@ -29,6 +29,7 @@ import {
 } from "../api/batches.js";
 import { createJob } from "../api/jobs.js";
 import { getModels } from "../api/models.js";
+import { useCaptchaGate } from "../hooks/useCaptchaGate.jsx";
 import * as batchStore from "../store/batch.js";
 import { useAuth } from "../store/auth.js";
 import {
@@ -163,6 +164,14 @@ export default function BatchPage() {
   const [submitProgress, setSubmitProgress] = useState({ done: 0, total: 0 });
   const [drawerBatchId, setDrawerBatchId] = useState(null);
   const [draftSavedAt, setDraftSavedAt] = useState(null);
+
+  // ``modelId`` is picked just-in-time inside ``submit`` because the
+  // model list arrives async. We pass null to the hook here and let
+  // ``acquireMidFlight`` re-precheck against whichever model the fan-out
+  // actually used — the modelId only influences the precheck call
+  // inside the hook, and the captcha gate decision is per-user, not
+  // per-model.
+  const captchaGate = useCaptchaGate({ modelId: null });
   const draftRef = useRef(draft);
   draftRef.current = draft;
 
@@ -334,25 +343,65 @@ export default function BatchPage() {
       "gpt-image-2";
 
     let done = 0;
+    let succeeded = 0;
     const concurrency = meta?.batch_concurrency_max || 4;
     const queue = [...tasks];
+    // Same pause-resume pattern as Create's submitFanout — see the
+    // longer comment there for the rationale. When the first worker
+    // trips CAPTCHA_REQUIRED we pause the rest, open Turnstile once,
+    // and resume with the token. Subsequent posts ride the backend's
+    // captcha grace window.
+    const pausedRef = { current: false };
+    const captchaInFlightRef = { current: false };
+    const captchaTokenRef = { current: null };
+    let cancelled = false;
+
     const work = async () => {
-      while (queue.length) {
+      while (queue.length || pausedRef.current) {
+        while (pausedRef.current) {
+          await sleep(50);
+          if (cancelled) return;
+        }
+        if (cancelled) return;
         const t = queue.shift();
         if (!t) break;
+        const subPayload = {
+          model: modelId,
+          prompt: t.prompt || "(empty)",
+          n: 1,
+          batch_id: registered.batch_id,
+          set_id: t.set_id || undefined,
+          client_request_id: t.client_request_id,
+        };
+        if (captchaTokenRef.current) {
+          subPayload.captcha_token = captchaTokenRef.current;
+          captchaTokenRef.current = null;
+        }
         try {
-          await createJob({
-            payload: {
-              model: modelId,
-              prompt: t.prompt || "(empty)",
-              n: 1,
-              batch_id: registered.batch_id,
-              set_id: t.set_id || undefined,
-              client_request_id: t.client_request_id,
-            },
-            references: [],
-          });
+          await createJob({ payload: subPayload, references: [] });
+          succeeded += 1;
         } catch (err) {
+          if (err?.code === "CAPTCHA_REQUIRED") {
+            queue.unshift(t);
+            if (!captchaInFlightRef.current) {
+              captchaInFlightRef.current = true;
+              pausedRef.current = true;
+              try {
+                const token = await captchaGate.acquireMidFlight();
+                captchaTokenRef.current = token || null;
+              } catch (cancelErr) {
+                cancelled = true;
+                queue.length = 0;
+                // eslint-disable-next-line no-console
+                console.warn("batch fan-out cancelled by user", cancelErr);
+              } finally {
+                captchaInFlightRef.current = false;
+                pausedRef.current = false;
+              }
+            }
+            // ``done`` does NOT tick — task is re-enqueued.
+            continue;
+          }
           // Don't abort the whole batch on per-job failures —
           // mirror the doc's "failed Job is partial, not abort"
           // semantics. The backend's batch state will end up
@@ -362,8 +411,6 @@ export default function BatchPage() {
         }
         done += 1;
         setSubmitProgress({ done, total: tasks.length });
-        // Pacing: tiny stagger so multiple concurrent fan-out
-        // workers don't dogpile the SSE bus.
         await sleep(20);
       }
     };
@@ -372,6 +419,15 @@ export default function BatchPage() {
         work()
       )
     );
+    if (cancelled && succeeded < tasks.length) {
+      // Surface to the user — Batch UI doesn't have a banner slot
+      // like Create, so we put it in the page-level error toast so
+      // the running batch card's "partial" state has context.
+      const dropped = tasks.length - succeeded;
+      setError(
+        `Submitted ${succeeded} of ${tasks.length}. ${dropped} dropped: verification cancelled.`
+      );
+    }
 
     // Stage ④: finalize.
     try {
@@ -383,7 +439,7 @@ export default function BatchPage() {
     setSubmitting(false);
     setSubmitProgress({ done: 0, total: 0 });
     batchStore.refresh();
-  }, [draft, totalImages, models, meta, user?.id, totalsCapped]);
+  }, [captchaGate, draft, totalImages, models, meta, user?.id, totalsCapped]);
 
   // ---- Card actions ---------------------------------------------------
 
@@ -805,6 +861,7 @@ export default function BatchPage() {
           {draftSavedAt}
         </span>
       )}
+      <captchaGate.Modal />
     </div>
   );
 }

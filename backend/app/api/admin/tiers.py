@@ -49,6 +49,7 @@ def _row_to_response(row: TierRow) -> TierResponse:
         soft_quota=row.soft_quota,
         hard_quota=row.hard_quota,
         slo_p95_ms=row.slo_p95_ms,
+        burst_limit=row.burst_limit,
     )
 
 
@@ -121,6 +122,7 @@ async def patch_tier(
             "soft_quota": row.soft_quota,
             "hard_quota": row.hard_quota,
             "slo_p95_ms": row.slo_p95_ms,
+            "burst_limit": row.burst_limit,
         }
         for field in set_fields:
             merged[field] = getattr(body, field)
@@ -131,6 +133,7 @@ async def patch_tier(
         soft_quota = cast(int, merged["soft_quota"])
         hard_quota = cast(int, merged["hard_quota"])
         slo_p95_ms = cast(int | None, merged["slo_p95_ms"])
+        burst_limit = cast(int, merged["burst_limit"])
 
         if hard_quota < soft_quota:
             raise api_error(
@@ -166,4 +169,5 @@ async def patch_tier(
         soft_quota=soft_quota,
         hard_quota=hard_quota,
         slo_p95_ms=slo_p95_ms,
+        burst_limit=burst_limit,
     )

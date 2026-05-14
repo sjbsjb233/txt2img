@@ -42,12 +42,15 @@ logger = logging.getLogger("txt2img.db.seed")
 # ---------------------------------------------------------------------------
 
 
-# (tier, weight, max_concurrency, max_queue, soft_quota, hard_quota, slo_p95_ms)
-DEFAULT_TIERS: list[tuple[str, int, int, int, int, int, int | None]] = [
-    ("vip", 8, 4, 10, 100, 200, 30_000),
-    ("premium", 4, 2, 5, 50, 100, 60_000),
-    ("standard", 2, 1, 3, 20, 40, 180_000),
-    ("free", 1, 1, 3, 8, 10, None),
+# (tier, weight, max_concurrency, max_queue, soft_quota, hard_quota, slo_p95_ms, burst_limit)
+DEFAULT_TIERS: list[tuple[str, int, int, int, int, int, int | None, int]] = [
+    # burst_limit is how many submissions in the last 60 s trigger a
+    # Turnstile. VIP/premium have headroom for fan-out, free stays at
+    # 5 so unverified accounts get the strictest anti-abuse posture.
+    ("vip",      8, 4, 10, 100, 200, 30_000,  20),
+    ("premium",  4, 2,  5,  50, 100, 60_000,  12),
+    ("standard", 2, 1,  3,  20,  40, 180_000,  8),
+    ("free",     1, 1,  3,   8,  10, None,     5),
 ]
 
 
@@ -118,7 +121,7 @@ async def _seed_tiers(session: AsyncSession) -> None:
         for row in (await session.execute(select(Tier.tier))).all()
     }
     inserted = 0
-    for tier_name, weight, conc, queue, soft, hard, slo in DEFAULT_TIERS:
+    for tier_name, weight, conc, queue, soft, hard, slo, burst in DEFAULT_TIERS:
         if tier_name in existing:
             continue
         session.add(
@@ -130,6 +133,7 @@ async def _seed_tiers(session: AsyncSession) -> None:
                 soft_quota=soft,
                 hard_quota=hard,
                 slo_p95_ms=slo,
+                burst_limit=burst,
             )
         )
         inserted += 1
