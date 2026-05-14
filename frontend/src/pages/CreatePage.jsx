@@ -5,6 +5,7 @@ import TopBar from "../components/TopBar.jsx";
 import TurnstileModal from "../components/TurnstileModal.jsx";
 import SizeCustomModal, { isValidSize } from "../components/SizeCustomModal.jsx";
 import DraftToast from "../components/DraftToast.jsx";
+import OutputCountSlider from "../components/OutputCountSlider.jsx";
 import { getModels } from "../api/models.js";
 import { createJob, precheck as precheckJob } from "../api/jobs.js";
 import { createSession } from "../api/sessions.js";
@@ -558,10 +559,18 @@ export default function CreatePage() {
   // POST. The existing single-shot path; unchanged behaviour for models
   // where ``n_max_upstream`` matches (or exceeds) the picked ``n``.
   const submitSingle = useCallback(
-    async (captchaToken) => {
+    async (captchaToken, overrideN = null) => {
       if (!selectedModel) return;
       const payload = buildPayload();
       if (!payload) return;
+      if (typeof overrideN === "number") {
+        // Defense-in-depth clamp from ``submit()``: we get the clamped
+        // value here because ``setParams`` is async — the closure inside
+        // ``buildPayload`` still sees the pre-clamp ``params.n``. Apply
+        // the override on the freshly built payload before it's sent so
+        // the wire value matches what we told the user we were doing.
+        payload.n = overrideN;
+      }
       if (captchaToken) payload.captcha_token = captchaToken;
 
       setSubmitting(true);
@@ -738,17 +747,28 @@ export default function CreatePage() {
     async (captchaToken) => {
       if (!selectedModel) return;
       const caps = selectedModel.capabilities || {};
+      const capN = typeof caps.n_max === "number" ? caps.n_max : 1;
       const upstream =
         typeof caps.n_max_upstream === "number"
           ? caps.n_max_upstream
-          : typeof caps.n_max === "number"
-          ? caps.n_max
-          : 1;
-      const requested = typeof params.n === "number" ? params.n : 1;
+          : capN;
+      // Defense-in-depth: clamp the picked count to ``[1, n_max]`` here
+      // too. The new free-input slider already clamps inside its own
+      // onChange, but a stale ``params.n`` (sticky leftover from a model
+      // with a higher cap, or any future control that bypasses the
+      // slider) must never reach buildPayload — otherwise the user sees
+      // ``×N`` in the UI while the backend silently caps to ``n_max``.
+      const rawRequested = typeof params.n === "number" ? params.n : 1;
+      const requested = Math.max(1, Math.min(rawRequested, capN));
+      if (requested !== rawRequested) {
+        // Sync params so the next render and any subsequent submit
+        // settle on the clamped value.
+        setParams((prev) => ({ ...prev, n: requested }));
+      }
       if (requested > upstream && requested > 1) {
         await submitFanout(captchaToken, requested);
       } else {
-        await submitSingle(captchaToken);
+        await submitSingle(captchaToken, requested);
       }
     },
     [selectedModel, params.n, submitSingle, submitFanout]
@@ -1317,6 +1337,9 @@ export default function CreatePage() {
                 return (
                   <button
                     key={m.model_id}
+                    data-testid={`create-model-tile-${m.model_id}`}
+                    data-model-id={m.model_id}
+                    data-available={m.available}
                     onClick={() => {
                       if (disabled) return;
                       // Flush any pending sticky write for the *current*
@@ -1908,122 +1931,11 @@ function Toggle({
 }
 
 // ---------------------------------------------------------------------------
-// Schema-driven param panel — NumberPresets / FieldRenderer / SchemaParamsPanel.
+// Schema-driven param panel — FieldRenderer / SchemaParamsPanel.
 //
-// NumberPresets is intentionally "Output count specific" rather than a
-// generic number input: it carries the ticker (×N) visual the original
-// mockup used. The plan reserves it for the `n_max` field today; if a
-// future schema field also wants this control they get the same look.
+// The output-count control lives in components/OutputCountSlider.jsx now;
+// FieldRenderer pulls it in for ``field.control === "number"``.
 // ---------------------------------------------------------------------------
-
-function NumberPresets({
-  label,
-  hint,
-  presets,
-  max,
-  value,
-  onChange,
-  fieldDisabled = false,
-  disabledReason = null,
-}) {
-  const display = typeof value === "number" ? value : 1;
-  const presetList = presets && presets.length ? presets : [1, 2, 4, 8];
-  return (
-    <div
-      data-testid="create-output-count-slider"
-      data-value={display}
-      data-max={typeof max === "number" ? max : ""}
-      title={fieldDisabled ? disabledReason || undefined : undefined}
-      style={{ opacity: fieldDisabled ? 0.55 : 1 }}
-    >
-      <div
-        className="mono caps"
-        style={{
-          fontSize: 10,
-          color: fieldDisabled ? "var(--ink-4)" : "var(--ink-3)",
-          marginBottom: 8,
-        }}
-      >
-        {label}
-      </div>
-      <div
-        style={{
-          border: "1px solid var(--ink)",
-          padding: 12,
-          background: fieldDisabled ? "var(--paper-3)" : "#fffdf7",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "baseline",
-          }}
-        >
-          <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
-            {hint || ""}
-          </span>
-          <div
-            data-testid="create-output-count-value"
-            className="ticker"
-            style={{ fontSize: 24, fontWeight: 900, letterSpacing: "-0.03em" }}
-          >
-            ×{display}
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 4, marginTop: 8 }}>
-          {presetList.map((n) => {
-            const allowed =
-              !fieldDisabled && (typeof max === "number" ? n <= max : true);
-            const on = display === n;
-            return (
-              <button
-                key={n}
-                data-testid={`create-output-count-preset-${n}`}
-                data-allowed={allowed}
-                onClick={() => allowed && onChange(n)}
-                disabled={!allowed}
-                title={
-                  fieldDisabled
-                    ? disabledReason || undefined
-                    : allowed
-                    ? undefined
-                    : `caps at ${max}`
-                }
-                style={{
-                  flex: 1,
-                  height: 30,
-                  background: on
-                    ? "var(--banana)"
-                    : allowed
-                    ? "transparent"
-                    : "var(--paper-3)",
-                  border: "1px solid var(--ink)",
-                  cursor: allowed ? "pointer" : "not-allowed",
-                  fontFamily: "var(--font-mono)",
-                  fontSize: 12,
-                  fontWeight: 700,
-                  color: allowed ? "var(--ink)" : "var(--ink-4)",
-                  opacity: allowed ? 1 : 0.5,
-                }}
-              >
-                {n}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-      {fieldDisabled && disabledReason ? (
-        <div
-          className="mono"
-          style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 4 }}
-        >
-          {disabledReason}
-        </div>
-      ) : null}
-    </div>
-  );
-}
 
 // Field-key-specific cell renderers we still want to keep when migrating
 // off the hard-coded JSX. Aspect ratio cells need a proportional preview
@@ -2193,7 +2105,7 @@ function FieldRenderer({
     const max = typeof cap === "number" ? cap : field.max ?? null;
     return (
       <div data-field={field.k}>
-        <NumberPresets
+        <OutputCountSlider
           label={field.label}
           hint={field.hint || null}
           presets={field.presets || [1, 2, 4, 8]}
