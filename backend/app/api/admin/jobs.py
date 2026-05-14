@@ -60,6 +60,7 @@ from app.schemas.archive import (
 )
 from app.services import image_io
 from app.utils.audit import write_audit
+from app.utils.client_ip import client_ip_from
 from app.utils.errors import api_error
 from app.utils.redact import excerpt_for_response, redact_payload
 
@@ -74,13 +75,6 @@ _VISIBLE_TERMINAL = {"SUCCEEDED", "FAILED", "CANCELLED"}
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _client_ip(request: Request) -> str | None:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
 
 
 def _aware_utc(dt: datetime | None) -> datetime | None:
@@ -907,7 +901,7 @@ async def inspect_job(
                     "target_user_id": job_row.user_id,
                     "target_user_username": user_row.username,
                 },
-                ip=_client_ip(request),
+                ip=client_ip_from(request),
             )
     except Exception:
         logger.exception("inspect: audit write failed for job=%s", hash_id)
@@ -994,7 +988,7 @@ async def get_upstream_log(
                     "attempt_no": int(attempt_no),
                     "target_user_id": target_user_id,
                 },
-                ip=_client_ip(request),
+                ip=client_ip_from(request),
             )
     except Exception:  # pragma: no cover - best-effort
         logger.exception(
@@ -1115,7 +1109,7 @@ async def requeue_job(
                 "source_hash_id": src.hash_id,
                 "user_id": src.user_id,
             },
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     queue = get_job_queue()

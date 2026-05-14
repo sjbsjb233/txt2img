@@ -35,6 +35,7 @@ from app.schemas.client_logs import (
     ClientLogsRequest,
     ClientLogsResponse,
 )
+from app.utils.client_ip import client_ip_from
 from app.utils.errors import api_error
 
 logger = logging.getLogger("txt2img.client")
@@ -69,13 +70,6 @@ def _hit(bucket: dict[str, deque[float]], key: str, limit: int) -> bool:
 def reset_rate_limit_for_tests() -> None:
     _USER_HITS.clear()
     _IP_HITS.clear()
-
-
-def _client_ip(request: Request) -> str | None:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip() or None
-    return request.client.host if request.client else None
 
 
 def _safe_user_id_from_token(
@@ -172,7 +166,7 @@ async def post_client_logs(
         )
 
     user_id = _safe_user_id_from_token(authorization)
-    ip = _client_ip(request)
+    ip = client_ip_from(request)
 
     if user_id is not None:
         if not _hit(_USER_HITS, user_id, settings.LOG_CLIENT_LOGS_RATE_LIMIT):

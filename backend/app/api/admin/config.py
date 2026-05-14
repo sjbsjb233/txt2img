@@ -32,6 +32,7 @@ from app.domain.config_center import (
 )
 from app.schemas.admin_config import ConfigUpdateResponse
 from app.utils.audit import write_audit
+from app.utils.client_ip import client_ip_from
 from app.utils.errors import api_error
 
 from sqlalchemy import select
@@ -39,14 +40,6 @@ from sqlalchemy import select
 logger = logging.getLogger("txt2img.admin.config")
 
 router = APIRouter(prefix="/api/admin", tags=["admin", "config"])
-
-
-def _client_ip(request: Request) -> str | None:
-    """Best-effort IP for audit. Same logic as auth.py to stay consistent."""
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
 
 
 @router.get("/config")
@@ -143,7 +136,7 @@ async def patch_config(
             target_kind="config",
             target_id=None,
             payload={"keys": sorted(accepted.keys()), "values": accepted},
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     return ConfigUpdateResponse(updated=accepted)

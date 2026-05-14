@@ -32,18 +32,12 @@ from app.schemas.admin_config import (
     TierResponse,
 )
 from app.utils.audit import write_audit
+from app.utils.client_ip import client_ip_from
 from app.utils.errors import api_error
 
 logger = logging.getLogger("txt2img.admin.tiers")
 
 router = APIRouter(prefix="/api/admin", tags=["admin", "tiers"])
-
-
-def _client_ip(request: Request) -> str | None:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
 
 
 def _row_to_response(row: TierRow) -> TierResponse:
@@ -157,7 +151,7 @@ async def patch_tier(
             target_kind="tier",
             target_id=tier,
             payload={"changes": {f: merged[f] for f in set_fields}},
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     # Hot-reload the cache after the transaction commits. ``get_session``

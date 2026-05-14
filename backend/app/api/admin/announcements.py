@@ -51,6 +51,7 @@ from app.schemas.announcements import (
     AnnouncementPatchRequest,
 )
 from app.utils.audit import write_audit
+from app.utils.client_ip import client_ip_from
 from app.utils.errors import api_error
 from app.utils.ids import new_announcement_id
 
@@ -75,13 +76,6 @@ _ALLOWED_COVER_MIME = {
     "image/webp",
     "image/gif",
 }
-
-
-def _client_ip(request: Request) -> str | None:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
 
 
 def _ann_dir(ann_id: str) -> Path:
@@ -360,7 +354,7 @@ async def create_announcement(
                 ),
                 "ends_at": ann.ends_at.isoformat() if ann.ends_at else None,
             },
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     # Re-read after commit so the response carries server-generated
@@ -495,7 +489,7 @@ async def patch_announcement(
             target_kind="announcement",
             target_id=ann_id,
             payload={"changes": diff},
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     # Re-broadcast so newly-eligible users (e.g. tier expansion) see it.
@@ -559,7 +553,7 @@ async def delete_announcement(
             target_kind="announcement",
             target_id=ann_id,
             payload={"title": row.title, "content_kind": row.content_kind},
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     _delete_cover_dir(ann_id)

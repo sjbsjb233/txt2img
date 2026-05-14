@@ -30,6 +30,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from app.utils import log_context
+from app.utils.client_ip import client_ip_with_source
 from app.utils.logging_setup import ACCESS_LOGGER_NAME
 
 access_logger = logging.getLogger(ACCESS_LOGGER_NAME)
@@ -38,14 +39,6 @@ boundary_logger = logging.getLogger("txt2img.request")
 
 _X_REQUEST_ID = "X-Request-ID"
 _MAX_REQUEST_ID_LEN = 128
-
-
-def _client_ip(request: Request) -> str | None:
-    """Honour X-Forwarded-For (nginx in front), else socket peer."""
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip() or None
-    return request.client.host if request.client else None
 
 
 def _sanitise_inbound_request_id(raw: str | None) -> str | None:
@@ -84,7 +77,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             _sanitise_inbound_request_id(request.headers.get(_X_REQUEST_ID))
             or uuid.uuid4().hex
         )
-        client_ip = _client_ip(request)
+        client_ip, ip_source = client_ip_with_source(request)
 
         rid_token = log_context.set_request_id(request_id)
         ip_token = log_context.set_client_ip(client_ip)
@@ -118,6 +111,13 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 "status": status_code,
                 "duration_ms": duration_ms,
                 "client_ip": client_ip,
+                # Which header / signal the IP came from. Useful for
+                # spotting "all requests look like 172.23.0.1" when the
+                # CF tunnel is bypassed or the frp container is exposed
+                # directly. ``cf`` = CF-Connecting-IP, ``xff`` =
+                # X-Forwarded-For, ``peer`` = socket peer, ``unknown`` =
+                # neither.
+                "ip_source": ip_source,
                 "user_agent": request.headers.get("user-agent"),
                 "request_id": request_id,
                 "user_id": log_context.get_user_id(),

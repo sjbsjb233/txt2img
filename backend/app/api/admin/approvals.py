@@ -40,18 +40,12 @@ from app.schemas.admin_approvals import (
     DeletionRequestRow,
 )
 from app.utils.audit import write_audit
+from app.utils.client_ip import client_ip_from
 from app.utils.errors import api_error
 
 logger = logging.getLogger("txt2img.admin.approvals")
 
 router = APIRouter(prefix="/api/admin/approvals", tags=["admin", "approvals"])
-
-
-def _client_ip(request: Request) -> str | None:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
 
 
 def _to_user(user: User) -> ApprovalUser:
@@ -190,7 +184,7 @@ async def trigger_lifecycle_sweep(
             target_kind="system",
             target_id=None,
             payload=dict(report),
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
     return report
 
@@ -270,7 +264,7 @@ async def _decide(
                 "user_id": user.id,
                 "has_admin_note": bool(admin_note),
             },
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
         return _to_row(req, user)
