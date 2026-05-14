@@ -19,6 +19,7 @@ import HudToast from "../components/maskeditor/HudToast.jsx";
 
 import { getJob, imageOriginalUrl, fetchImageBlob } from "../api/archive.js";
 import { createJob, replaceJobImage } from "../api/jobs.js";
+import { useCaptchaGate } from "../hooks/useCaptchaGate.jsx";
 import { getDerivedJobs } from "../api/derived.js";
 import { getModels } from "../api/models.js";
 import {
@@ -106,6 +107,11 @@ export default function MaskEditPage() {
   const [derivedVersions, setDerivedVersions] = useState([]);
   const [streaming, setStreaming] = useState(null);
   const [hud, setHud] = useState(null);
+
+  // Captcha state machine — same hook used by Create / Batch so the
+  // user sees a consistent Turnstile flow no matter which page they
+  // hit the burst threshold on.
+  const captchaGate = useCaptchaGate({ modelId: sourceJob?.model });
 
   // Mask method is decided once, on load, from the model's capabilities
   // surfaced via /api/models. ``null`` until we know — we render a
@@ -529,11 +535,33 @@ export default function MaskEditPage() {
         maskBlob = await exportMaskPng(maskCanvasRef);
       }
 
-      const resp = await createJob({
-        payload,
-        references: refFiles,
-        mask: maskBlob,
-      });
+      // Send via the captcha gate so we get the same UX as Create /
+      // Batch when the burst threshold trips. ``precheckThenRun``
+      // returns whatever the inner function returns; we surface that
+      // out into ``resp`` for the rest of the submission flow.
+      const submitOnce = async (token) => {
+        const p = token ? { ...payload, captcha_token: token } : payload;
+        return await createJob({
+          payload: p,
+          references: refFiles,
+          mask: maskBlob,
+        });
+      };
+      let resp;
+      try {
+        resp = await captchaGate.precheckThenRun(submitOnce);
+      } catch (err) {
+        if (err?.code === "CAPTCHA_REQUIRED") {
+          // Precheck said "no captcha" but the backend's gate
+          // disagreed (rolling counter ticked between precheck and
+          // POST). Open the modal mid-flight and retry once.
+          const token = await captchaGate.acquireMidFlight();
+          if (!token) throw err;
+          resp = await submitOnce(token);
+        } else {
+          throw err;
+        }
+      }
       markMaskEditUsed();
       setStatus("running");
       setStatusHint("queued · waiting for upstream");
@@ -1063,6 +1091,7 @@ export default function MaskEditPage() {
       )}
       {hud && <HudToast text={hud} />}
       {showCheat && <CheatSheetOverlay onClose={() => setShowCheat(false)} />}
+      <captchaGate.Modal />
     </div>
   );
 }

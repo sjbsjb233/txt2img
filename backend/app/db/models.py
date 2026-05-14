@@ -103,6 +103,12 @@ class Tier(Base):
     soft_quota: Mapped[int] = mapped_column(Integer, nullable=False)
     hard_quota: Mapped[int] = mapped_column(Integer, nullable=False)
     slo_p95_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Per-tier override of the rolling burst threshold consulted by
+    # ``_recent_burst``. Default 5 preserves the historical hardcoded
+    # value for any tier that hasn't been bumped explicitly.
+    burst_limit: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("5")
+    )
     updated_at: Mapped[datetime] = mapped_column(
         nullable=False, server_default=text("CURRENT_TIMESTAMP")
     )

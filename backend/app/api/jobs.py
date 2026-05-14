@@ -71,6 +71,7 @@ from app.domain.model_catalog import effective_capabilities_for_user
 from app.domain.job_validator import validate_against_capabilities
 from app.domain.quota_guard import get_quota_guard
 from app.domain.runtime_configs import EmergencyConfig
+from app.domain.tier_config import get_tier_config
 from app.domain.sse_hub import get_sse_hub
 from app.schemas.jobs import (
     JobActionResponse,
@@ -154,7 +155,7 @@ async def precheck(body: PrecheckRequest, user: CurrentUser) -> PrecheckResponse
         reason = "force_captcha_global"
     elif await get_quota_guard().check_soft_quota_exceeded(user):
         reason = "soft_quota_exceeded"
-    elif await _recent_burst(user.id):
+    elif await _recent_burst(user):
         reason = "rate_limit_pre_warn"
     elif settings.FORCE_CAPTCHA:
         reason = "force_captcha"
@@ -177,24 +178,35 @@ async def precheck(body: PrecheckRequest, user: CurrentUser) -> PrecheckResponse
     )
 
 
-async def _recent_burst(user_id: str) -> bool:
-    """True if the user submitted ≥ 5 jobs in the last 60 seconds.
+async def _recent_burst(user) -> bool:
+    """True if the user submitted ≥ ``burst_limit`` jobs in the last 60 s.
+
+    Threshold is per-tier (``tiers.burst_limit``); previously hardcoded
+    to 5. The 60 s window is unchanged — long enough to catch fan-out
+    bursts, short enough that an honest user retrying a failed prompt
+    doesn't get caught.
 
     Counted against the durable ``jobs`` table — the in-memory queue
     might already have shed dispatched jobs, but the rows are still
     fresh in the DB. Uses ``created_at`` because that's the canonical
     submission time.
     """
+    try:
+        limit = get_tier_config().get(user.tier).burst_limit
+    except KeyError:
+        # Tier missing from cache (cold start race) — fall back to the
+        # historical literal so we never *under*-restrict by accident.
+        limit = 5
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=60)
     async with get_session() as session:
         rows = (
             await session.execute(
                 select(Job.id)
-                .where(Job.user_id == user_id, Job.created_at >= cutoff)
-                .limit(5)
+                .where(Job.user_id == user.id, Job.created_at >= cutoff)
+                .limit(limit)
             )
         ).all()
-    return len(rows) >= 5
+    return len(rows) >= limit
 
 
 # ---------------------------------------------------------------------------
@@ -1396,7 +1408,7 @@ async def _verify_captcha_if_needed(
         decision.soft_quota_exceeded
         or settings.FORCE_CAPTCHA
         or EmergencyConfig().force_captcha_global
-        or (not in_grace and await _recent_burst(user.id))
+        or (not in_grace and await _recent_burst(user))
     )
     if not require:
         return False

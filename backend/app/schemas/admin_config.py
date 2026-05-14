@@ -43,6 +43,7 @@ class TierResponse(BaseModel):
     soft_quota: int
     hard_quota: int
     slo_p95_ms: int | None = None
+    burst_limit: int
 
 
 class TierListResponse(BaseModel):
@@ -66,3 +67,9 @@ class TierPatchRequest(BaseModel):
     soft_quota: int | None = Field(default=None, ge=0, le=1_000_000)
     hard_quota: int | None = Field(default=None, ge=0, le=1_000_000)
     slo_p95_ms: int | None = Field(default=None, ge=1, le=24 * 3600 * 1000)
+    # Per-tier rolling-window threshold for the anti-abuse burst gate
+    # (``_recent_burst``). Lower bound 1 so accidentally setting 0
+    # doesn't disable the gate entirely; upper bound is the per-tier
+    # hard_quota practical ceiling (no point allowing more burst than
+    # the user's daily hard cap).
+    burst_limit: int | None = Field(default=None, ge=1, le=1_000)

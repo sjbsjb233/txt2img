@@ -853,3 +853,241 @@ async def test_create_job_broadcasts_task_created(
         if ev.kind == "task_created"
     ]
     assert any(p.get("hash_id") == hash_id for p in payloads)
+
+
+# ---------------------------------------------------------------------------
+# Burst gate + per-tier burst_limit (S4)
+# ---------------------------------------------------------------------------
+
+
+def _mock_turnstile_ok():
+    async def _stub(token: str, *, remote_ip: str | None = None) -> bool:
+        return True
+
+    return _stub
+
+
+async def _post_n_jobs(client, token, n: int, *, override_username: str | None = None):
+    """Fire ``n`` POST /api/jobs in series under ``token``; return responses.
+
+    Series rather than gather() so the rolling window sees a monotonic
+    count, which is what real fan-out under one user looks like.
+    """
+    out = []
+    for i in range(n):
+        out.append(
+            await client.post(
+                "/api/jobs",
+                headers=_auth(token),
+                files=[
+                    (
+                        "payload",
+                        (
+                            None,
+                            _job_payload(client_request_id=f"req_{i}"),
+                            "application/json",
+                        ),
+                    )
+                ],
+            )
+        )
+    return out
+
+
+@pytest.mark.asyncio
+async def test_burst_limit_trips_below_queue_capacity(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """When burst_limit < (max_concurrency + max_queue), the captcha
+    gate trips before the user-busy gate.
+
+    Uses VIP (capacity 14) and admin-patches burst_limit down to 5 so
+    the threshold fires before the queue fills. This exercises the
+    same code path as the free-tier seed default; we don't test the
+    free seed directly here because free's max_queue=3 means the
+    queue gate fires first and would mask the burst gate.
+    """
+    from app.domain.tier_config import get_tier_config
+
+    await _seed_gpt_provider(seeded_app)
+    admin_token = await _login_admin(seeded_app)
+    await seeded_app.patch(
+        "/api/admin/tiers/vip",
+        headers=_auth(admin_token),
+        json={"burst_limit": 5},
+    )
+    assert get_tier_config().get("vip").burst_limit == 5
+
+    user_token = await _login_user(seeded_app, username="burst_low", tier="vip")
+    # _recent_burst returns True when ``len(rows) >= limit``: it checks
+    # rows already in the DB before this insert, so with limit=5 the
+    # 6th POST is the one that trips (5 prior rows are visible).
+    results = await _post_n_jobs(seeded_app, user_token, 6)
+    assert [r.status_code for r in results[:5]] == [200] * 5
+    assert results[5].status_code == 412
+    assert results[5].json()["detail"]["code"] == "CAPTCHA_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_burst_limit_vip_default_allows_fan_out_n8(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """VIP seed burst_limit=20 — a typical n=8 fan-out lands cleanly.
+
+    This is the user-visible win of the per-tier work: previously every
+    VIP fan-out tripped the same hardcoded 5; now they don't.
+    """
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(seeded_app, username="burst_vip", tier="vip")
+
+    results = await _post_n_jobs(seeded_app, token, 8)
+    assert all(r.status_code == 200 for r in results), [r.status_code for r in results]
+
+
+@pytest.mark.asyncio
+async def test_burst_limit_honours_admin_override(
+    seeded_app: httpx.AsyncClient,
+) -> None:
+    """Admin lowers vip.burst_limit to 3 → 3rd POST trips captcha."""
+    from app.domain.tier_config import get_tier_config
+
+    await _seed_gpt_provider(seeded_app)
+    admin_token = await _login_admin(seeded_app)
+    user_token = await _login_user(seeded_app, username="burst_vip2", tier="vip")
+
+    # Re-shape the cache so the per-tier limit is in force.
+    resp = await seeded_app.patch(
+        "/api/admin/tiers/vip",
+        headers=_auth(admin_token),
+        json={"burst_limit": 3},
+    )
+    assert resp.status_code == 200
+    assert get_tier_config().get("vip").burst_limit == 3
+
+    # With limit=3, the 4th POST is the one that trips (3 prior rows
+    # visible in the DB satisfy ``len(rows) >= 3``).
+    results = await _post_n_jobs(seeded_app, user_token, 4)
+    assert [r.status_code for r in results[:3]] == [200, 200, 200]
+    assert results[3].status_code == 412
+    assert results[3].json()["detail"]["code"] == "CAPTCHA_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_captcha_grace_covers_subsequent_fanout(
+    seeded_app: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One successful captcha → next 60 s skips the burst gate.
+
+    Models the fan-out flow: VIP user with burst_limit lowered to 5
+    trips on the 5th, solves Turnstile, then the 6th..8th sub-POSTs go
+    through without a token because they fall inside the grace window.
+    VIP rather than free so the queue gate doesn't fire first.
+    """
+    monkeypatch.setattr("app.api.jobs.turnstile.verify", _mock_turnstile_ok())
+    await _seed_gpt_provider(seeded_app)
+    admin = await _login_admin(seeded_app)
+    await seeded_app.patch(
+        "/api/admin/tiers/vip",
+        headers=_auth(admin),
+        json={"burst_limit": 5},
+    )
+    token = await _login_user(seeded_app, username="grace_vip", tier="vip")
+
+    # Burn through the burst threshold. 5 rows in DB → 6th POST trips.
+    pre = await _post_n_jobs(seeded_app, token, 5)
+    assert all(r.status_code == 200 for r in pre)
+
+    # 6th without token → 412 CAPTCHA_REQUIRED.
+    blocked = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (None, _job_payload(client_request_id="trip"), "application/json"),
+            )
+        ],
+    )
+    assert blocked.status_code == 412
+    assert blocked.json()["detail"]["code"] == "CAPTCHA_REQUIRED"
+
+    # 5th retry with a token → succeeds and opens the grace window.
+    retry = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (
+                    None,
+                    _job_payload(
+                        client_request_id="trip_retry",
+                        captcha_token="cf-good",
+                    ),
+                    "application/json",
+                ),
+            )
+        ],
+    )
+    assert retry.status_code == 200, retry.text
+
+    # 6th..8th without a token — should now ride the grace window.
+    post_grace = await _post_n_jobs(seeded_app, token, 3)
+    assert all(r.status_code == 200 for r in post_grace), [
+        r.status_code for r in post_grace
+    ]
+
+
+@pytest.mark.asyncio
+async def test_captcha_grace_does_not_bypass_soft_quota(
+    seeded_app: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Grace exempts burst only — soft_quota still demands a fresh captcha.
+
+    VIP with soft_quota=100; setting today_count=100 puts the user
+    over the soft cap but well below the hard cap (200), so the
+    follow-up POST is blocked specifically by the soft-quota branch
+    (which grace does NOT exempt) rather than by hard quota.
+    """
+    monkeypatch.setattr("app.api.jobs.turnstile.verify", _mock_turnstile_ok())
+    await _seed_gpt_provider(seeded_app)
+    token = await _login_user(
+        seeded_app, username="grace_soft", tier="vip", today_count=100
+    )
+
+    # Open the grace window via one successful captcha.
+    first = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (
+                    None,
+                    _job_payload(
+                        client_request_id="open_grace",
+                        captcha_token="cf-good",
+                    ),
+                    "application/json",
+                ),
+            )
+        ],
+    )
+    assert first.status_code == 200
+
+    # Subsequent submission without a token must still 412, because
+    # soft_quota_exceeded is not bypassed by grace.
+    second = await seeded_app.post(
+        "/api/jobs",
+        headers=_auth(token),
+        files=[
+            (
+                "payload",
+                (None, _job_payload(client_request_id="next"), "application/json"),
+            )
+        ],
+    )
+    assert second.status_code == 412
+    assert second.json()["detail"]["code"] == "CAPTCHA_REQUIRED"

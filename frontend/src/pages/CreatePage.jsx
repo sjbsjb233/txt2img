@@ -2,12 +2,12 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { useNavigate } from "react-router-dom";
 import Icon from "../components/Icon.jsx";
 import TopBar from "../components/TopBar.jsx";
-import TurnstileModal from "../components/TurnstileModal.jsx";
 import SizeCustomModal, { isValidSize } from "../components/SizeCustomModal.jsx";
 import DraftToast from "../components/DraftToast.jsx";
 import OutputCountSlider from "../components/OutputCountSlider.jsx";
 import { getModels } from "../api/models.js";
-import { createJob, precheck as precheckJob } from "../api/jobs.js";
+import { createJob } from "../api/jobs.js";
+import { useCaptchaGate } from "../hooks/useCaptchaGate.jsx";
 import { createSession } from "../api/sessions.js";
 import * as sseStore from "../store/sse.js";
 import * as archiveStore from "../store/archive.js";
@@ -401,23 +401,16 @@ export default function CreatePage() {
   // Submission state.
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
-  const [showTurnstile, setShowTurnstile] = useState(false);
-  const [turnstileSiteKey, setTurnstileSiteKey] = useState(null);
   const [showSizeCustom, setShowSizeCustom] = useState(false);
   // Fan-out progress for models where the upstream returns 1 image per
   // call and the user picked n>1. ``total === 0`` means "not fanning
   // out" — single-shot submit hides the progress indicator entirely.
   const [submitProgress, setSubmitProgress] = useState({ done: 0, total: 0 });
-  const pendingSubmitRef = useRef(null); // payload waiting for cf token
-  // When a fan-out worker trips the backend captcha gate mid-flight, the
-  // pool pauses and opens the Turnstile modal. The resolver below is the
-  // bridge back into ``submitFanout``: ``onCaptchaSuccess`` calls it with
-  // the freshly minted token, ``TurnstileModal``'s onClose rejects it.
-  // Single-shot ``submitSingle`` keeps using ``pendingSubmitRef`` and is
-  // unaffected.
-  const fanoutCaptchaResolverRef = useRef(null);
   const lastFetchAtRef = useRef(0);
   const clientRequestIdRef = useRef(null);
+
+  // Captcha state machine shared with MaskEdit / Batch pages.
+  const captchaGate = useCaptchaGate({ modelId: selectedModel?.model_id });
 
   const refresh = useCallback(async () => {
     try {
@@ -598,19 +591,30 @@ export default function CreatePage() {
       } catch (err) {
         if (err?.code === "CAPTCHA_REQUIRED") {
           // Precheck said no captcha but the backend's gate disagreed
-          // (rolling counter crossed mid-flight). Re-run precheck so
-          // the user sees the modal.
+          // (rolling counter crossed mid-flight). Hand off to the
+          // captcha gate so the user sees a Turnstile modal, then
+          // retry the same payload with the freshly minted token.
           try {
-            const fresh = await precheckJob({ model: selectedModel.model_id });
-            if (fresh.captcha_required) {
-              setTurnstileSiteKey(fresh.site_key || null);
-              pendingSubmitRef.current = payload;
-              setShowTurnstile(true);
-              setSubmitError(null);
+            const token = await captchaGate.acquireMidFlight();
+            if (token) {
+              const retried = { ...payload, captcha_token: token };
+              const response = await createJob({
+                payload: retried,
+                references: refs,
+              });
+              await archiveStore.insertOptimistic(response);
+              clientRequestIdRef.current = null;
+              clearDraft({ silent: true });
+              navigate("/archive");
             } else {
+              // Race: gate cleared between the failed POST and the
+              // precheck inside the hook. Surface the original error
+              // so the user can decide what to do.
               setSubmitError(err);
             }
           } catch (e2) {
+            // Either the user cancelled (CAPTCHA_CANCELLED) or the
+            // retry itself failed. Either way, show what went wrong.
             setSubmitError(e2);
           }
         } else {
@@ -620,7 +624,7 @@ export default function CreatePage() {
         setSubmitting(false);
       }
     },
-    [buildPayload, clearDraft, navigate, refs, selectedModel]
+    [buildPayload, captchaGate, clearDraft, navigate, refs, selectedModel]
   );
 
   // Submit N independent ``n=1`` jobs that share one ``set_id``. Used
@@ -682,35 +686,9 @@ export default function CreatePage() {
       // re-enqueue their task and wait for the resume signal. Without
       // this, all N concurrent 412s would try to open N modals.
       const captchaInFlightRef = { current: false };
-      // Promise-based bridge to ``onCaptchaSuccess``. ``cancelled``
-      // turns true when the user closes the modal — workers see this
-      // and bail without re-enqueueing anything.
+      // ``cancelled`` turns true when the user closes the modal —
+      // workers see this and bail without re-enqueueing anything.
       let cancelled = false;
-
-      const tryOpenCaptcha = async (firstErr) => {
-        // Issue a fresh precheck so the modal renders against the
-        // current site key — keeps the flow correct if the operator
-        // rotated keys mid-session.
-        let siteKeyForModal = null;
-        try {
-          const fresh = await precheckJob({ model: selectedModel.model_id });
-          if (!fresh?.captcha_required) {
-            // Race: backend's counter relaxed between the 412 and the
-            // precheck. Treat as "no captcha needed", let workers
-            // resume with the next iteration's natural retry path.
-            return null;
-          }
-          siteKeyForModal = fresh.site_key || null;
-        } catch {
-          // Precheck failure isn't fatal — fall back to whatever site
-          // key the page already has.
-        }
-        if (siteKeyForModal) setTurnstileSiteKey(siteKeyForModal);
-        return new Promise((resolve, reject) => {
-          fanoutCaptchaResolverRef.current = { resolve, reject };
-          setShowTurnstile(true);
-        });
-      };
 
       const work = async () => {
         while (queue.length || pausedRef.current) {
@@ -753,8 +731,8 @@ export default function CreatePage() {
                 captchaInFlightRef.current = true;
                 pausedRef.current = true;
                 try {
-                  const token = await tryOpenCaptcha(err);
-                  // ``tryOpenCaptcha`` returns null when precheck
+                  const token = await captchaGate.acquireMidFlight();
+                  // ``acquireMidFlight`` returns null when precheck
                   // says no captcha is needed — workers resume with
                   // no token and let the next 412 (if any) re-open.
                   captchaTokenRef.current = token || null;
@@ -790,11 +768,6 @@ export default function CreatePage() {
           Array.from({ length: concurrency }, () => work())
         );
       } finally {
-        // Whichever path we leave on (success / partial / cancel),
-        // wipe the captcha resolver so a stale modal close can't poke
-        // a finished pool. Defensive — ``setShowTurnstile(false)`` in
-        // the success path already detaches the modal.
-        fanoutCaptchaResolverRef.current = null;
         setSubmitting(false);
       }
 
@@ -831,6 +804,7 @@ export default function CreatePage() {
     },
     [
       buildPayload,
+      captchaGate,
       catalog?.meta?.batch_concurrency_max,
       clearDraft,
       navigate,
@@ -884,64 +858,22 @@ export default function CreatePage() {
     }
 
     await ensureFresh();
+    // Delegate "do I need a captcha before submitting?" to the hook.
+    // Single-shot path: if a token is required up front, the hook
+    // opens the modal and resolves with the token; otherwise it calls
+    // the builder with ``null``.
     try {
-      const check = await precheckJob({ model: selectedModel.model_id });
-      if (check?.captcha_required) {
-        setTurnstileSiteKey(check.site_key || null);
-        pendingSubmitRef.current = null;
-        setShowTurnstile(true);
-        return;
-      }
-    } catch (err) {
-      // Precheck shouldn't fail under normal conditions; surface and
-      // refuse to submit so the user isn't stuck guessing.
-      setSubmitError(err);
-      return;
-    }
-    await submit(null);
-  }, [ensureFresh, prompt, selectedModel, submit, submitting]);
-
-  const onCaptchaSuccess = useCallback(
-    async (token) => {
-      setShowTurnstile(false);
-      // Three paths land here:
-      //   1. Fan-out mid-flight 412 → resolver bridges the token back
-      //      into the worker pool so it can resume.
-      //   2. Initial precheck said captcha → no payload was built yet.
-      //   3. createJob threw CAPTCHA_REQUIRED mid-flight on the single
-      //      path → payload was stashed in pendingSubmitRef.
-      const fanoutResolver = fanoutCaptchaResolverRef.current;
-      if (fanoutResolver) {
-        fanoutCaptchaResolverRef.current = null;
-        fanoutResolver.resolve(token);
-        return;
-      }
-      const stashed = pendingSubmitRef.current;
-      pendingSubmitRef.current = null;
-      if (stashed) {
-        // Re-submit using the same client_request_id so we don't double-charge.
-        const enriched = { ...stashed, captcha_token: token };
-        setSubmitting(true);
-        try {
-          const response = await createJob({ payload: enriched, references: refs });
-          // FE-04: feed the response straight into the archive store so
-          // the page we navigate to renders the QUEUED card immediately.
-          // The store also persists it to IndexedDB so a reload survives.
-          await archiveStore.insertOptimistic(response);
-          clientRequestIdRef.current = null;
-          clearDraft({ silent: true });
-          navigate("/archive");
-        } catch (err) {
-          setSubmitError(err);
-        } finally {
-          setSubmitting(false);
-        }
-      } else {
+      await captchaGate.precheckThenRun(async (token) => {
         await submit(token);
-      }
-    },
-    [clearDraft, navigate, refs, submit]
-  );
+      });
+    } catch (err) {
+      // CAPTCHA_CANCELLED falls through here. Show it so the user
+      // knows nothing was submitted; this is the cleanest behaviour
+      // for the up-front case (no rows were created, nothing to
+      // partially recover).
+      setSubmitError(err);
+    }
+  }, [captchaGate, ensureFresh, prompt, selectedModel, submit, submitting]);
 
   // -----------------------------------------------------------------
   // Reference upload helpers
@@ -1807,25 +1739,7 @@ export default function CreatePage() {
         </div>
       </div>
 
-      <TurnstileModal
-        open={showTurnstile}
-        siteKey={turnstileSiteKey}
-        onClose={() => {
-          setShowTurnstile(false);
-          pendingSubmitRef.current = null;
-          // Fan-out path: a closed modal is the user saying "stop";
-          // unblock the workers by rejecting so they can see the
-          // partial-submit banner instead of spinning forever.
-          const fanoutResolver = fanoutCaptchaResolverRef.current;
-          if (fanoutResolver) {
-            fanoutCaptchaResolverRef.current = null;
-            const err = new Error("Captcha verification cancelled.");
-            err.code = "CAPTCHA_CANCELLED";
-            fanoutResolver.reject(err);
-          }
-        }}
-        onSuccess={onCaptchaSuccess}
-      />
+      <captchaGate.Modal />
 
       <SizeCustomModal
         open={showSizeCustom}
