@@ -28,25 +28,51 @@ export default function OutputCountSlider({
   fieldDisabled = false,
   disabledReason = null,
 }) {
+  const lockedToOne =
+    typeof max === "number" && max >= 1 && max === 1 && !fieldDisabled;
   const hardDisabled =
     fieldDisabled || typeof max !== "number" || max < 1 || max === 1;
   const effectiveMax = typeof max === "number" && max >= 1 ? max : 1;
   const display = clamp(typeof value === "number" ? value : 1, MIN, effectiveMax) ?? 1;
 
-  // Local editable string so the user can clear the input mid-type.
+  // When the disable is driven by ``max === 1`` (single-image models) we
+  // surface a default reason so a user tabbing to the input understands
+  // why every control is greyed out. ``fieldDisabled`` carries its own
+  // reason from the caller — we don't overwrite it.
+  const effectiveDisabledReason =
+    disabledReason ??
+    (lockedToOne ? "This model returns a single image." : null);
+
+  // Local editable string so the user can clear the input mid-type. We
+  // only re-seed it from the controlled ``display`` value when the two
+  // genuinely disagree — otherwise a mid-typing re-render (e.g. parent
+  // setState landing between digits) would clobber what the user is
+  // still typing.
   const [inputText, setInputText] = useState(String(display));
   useEffect(() => {
-    setInputText(String(display));
+    const parsed = parseInt(inputText, 10);
+    if (Number.isNaN(parsed) || parsed !== display) {
+      setInputText(String(display));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [display]);
 
-  // Clamp warning: shown briefly when the user enters / drags to a value
-  // beyond ``max``. Mirrors the design prototype's ``.clamp`` toast.
+  // Clamp warning: shown briefly when the user types a value above
+  // ``max``. ``fromClientX`` already clamps drag/click input before
+  // ``commit`` sees it, so those paths don't surface the toast.
   const [clampShown, setClampShown] = useState(false);
   const clampTimer = useRef(null);
   const showClamp = useCallback(() => {
     setClampShown(true);
     if (clampTimer.current) clearTimeout(clampTimer.current);
     clampTimer.current = setTimeout(() => setClampShown(false), 1400);
+  }, []);
+  const hideClamp = useCallback(() => {
+    setClampShown(false);
+    if (clampTimer.current) {
+      clearTimeout(clampTimer.current);
+      clampTimer.current = null;
+    }
   }, []);
   useEffect(() => () => {
     if (clampTimer.current) clearTimeout(clampTimer.current);
@@ -59,8 +85,15 @@ export default function OutputCountSlider({
       if (Number.isNaN(parsed)) return;
       const next = clamp(parsed, MIN, effectiveMax);
       if (next == null) return;
-      if (parsed > effectiveMax || (opts.markClamp && parsed !== next)) {
+      const triggeredClamp =
+        parsed > effectiveMax || (opts.markClamp && parsed !== next);
+      if (triggeredClamp) {
         showClamp();
+      } else {
+        // A subsequent valid commit retires any stale "capped at N"
+        // toast immediately — leaving it lingering while the user
+        // is happily editing within range is misleading.
+        hideClamp();
       }
       if (next !== value) {
         onChange(next);
@@ -69,7 +102,7 @@ export default function OutputCountSlider({
         setInputText(String(next));
       }
     },
-    [effectiveMax, hardDisabled, onChange, showClamp, value]
+    [effectiveMax, hardDisabled, hideClamp, onChange, showClamp, value]
   );
 
   const trackRef = useRef(null);
@@ -107,24 +140,24 @@ export default function OutputCountSlider({
     draggingRef.current = false;
   };
 
-  // Preset/MAX row. Distinct values: user-provided presets that fit under
-  // max (deduped) followed by MAX = effectiveMax. The MAX button is
-  // always rendered, per spec.
+  // Preset/MAX row. Spec: the last button always represents ``max`` and
+  // is rendered as "MAX". Other presets are user-provided values strictly
+  // less than ``max`` — anything ≥ max is dropped from the regular row
+  // because it would either duplicate the MAX slot or exceed the cap.
+  // This is order-independent: a caller passing ``[1, 12, 4, 8]`` with
+  // max=12 still gets ``[1, 4, 8, MAX]``, not "MAX rendered as 8".
   const presetSource = Array.isArray(presets) && presets.length
     ? presets
     : [1, 2, 4, 8];
   const seen = new Set();
-  const safePresets = [];
+  const regularPresets = [];
   for (const n of presetSource) {
-    if (typeof n !== "number" || n < MIN) continue;
+    if (typeof n !== "number" || n < MIN || n >= effectiveMax) continue;
     if (seen.has(n)) continue;
     seen.add(n);
-    safePresets.push(n);
+    regularPresets.push(n);
   }
-  if (!seen.has(effectiveMax)) safePresets.push(effectiveMax);
-  // Spec: MAX shortcut is the last button and represents ``max``. Pull
-  // its value out so the rendered label can read "MAX" instead of the
-  // raw number; non-MAX duplicates have already been filtered above.
+  const safePresets = [...regularPresets, effectiveMax];
   const maxValue = effectiveMax;
 
   // Axis tick labels — scale 1 / ⌈max/3⌉ / ⌈2*max/3⌉ / max so the user
@@ -150,7 +183,7 @@ export default function OutputCountSlider({
       data-testid="create-output-count-slider"
       data-value={display}
       data-max={typeof max === "number" ? max : ""}
-      title={hardDisabled ? disabledReason || undefined : undefined}
+      title={hardDisabled ? effectiveDisabledReason || undefined : undefined}
       style={{ opacity: hardDisabled ? 0.55 : 1 }}
     >
       <div
@@ -255,11 +288,27 @@ export default function OutputCountSlider({
                 MozAppearance: "textfield",
               }}
             />
-            {/* Hidden mirror so e2e tests have a static current-value node */}
+            {/* Visually-hidden mirror so e2e tests retain a static
+                ``create-output-count-value`` text node without depending
+                on the input's controlled ``value``. Uses the standard
+                visually-hidden recipe (1×1 clip) instead of
+                ``left:-9999px`` so it doesn't extend the document
+                scroll area or interact with absolutely-positioned
+                ancestors. */}
             <span
               data-testid="create-output-count-value"
-              style={{ position: "absolute", left: -9999, top: -9999 }}
               aria-hidden="true"
+              style={{
+                position: "absolute",
+                width: 1,
+                height: 1,
+                padding: 0,
+                margin: -1,
+                overflow: "hidden",
+                clip: "rect(0,0,0,0)",
+                whiteSpace: "nowrap",
+                borderWidth: 0,
+              }}
             >
               ×{display}
             </span>
@@ -283,7 +332,12 @@ export default function OutputCountSlider({
           </div>
         </div>
 
-        {/* Slider track */}
+        {/* Slider track — rail / fill / ticks / thumb all align to the
+            same horizontal coordinate system. The rail spans the same
+            2 %..98 % gutter the thumb is constrained to, so the thumb
+            sits exactly on the rail endpoints regardless of column
+            width. (Earlier draft had rail in px and thumb in %, which
+            drifted in narrow right-rail layouts.) */}
         <div
           data-testid="create-output-count-track"
           ref={trackRef}
@@ -294,7 +348,6 @@ export default function OutputCountSlider({
           style={{
             position: "relative",
             height: 20,
-            margin: "0 -2px",
             cursor: hardDisabled ? "not-allowed" : "pointer",
             userSelect: "none",
             touchAction: "none",
@@ -304,8 +357,8 @@ export default function OutputCountSlider({
           <div
             style={{
               position: "absolute",
-              left: 2,
-              right: 2,
+              left: "2%",
+              right: "2%",
               top: "50%",
               height: 2,
               background: "var(--ink)",
@@ -316,7 +369,7 @@ export default function OutputCountSlider({
           <div
             style={{
               position: "absolute",
-              left: 2,
+              left: "2%",
               top: "50%",
               height: 5,
               background: "var(--banana)",
@@ -350,14 +403,40 @@ export default function OutputCountSlider({
               );
             })}
           </div>
-          {/* Thumb */}
+          {/* Thumb — ``role="slider"`` requires arrow-key handling per
+              ARIA APG, mirroring the input's onKeyDown so users who
+              tab onto the thumb can step values too. */}
           <div
             data-testid="create-output-count-thumb"
             role="slider"
             aria-valuemin={MIN}
             aria-valuemax={effectiveMax}
             aria-valuenow={display}
+            aria-label={label}
+            aria-disabled={hardDisabled ? "true" : "false"}
             tabIndex={hardDisabled ? -1 : 0}
+            onKeyDown={(e) => {
+              if (hardDisabled) return;
+              if (e.key === "ArrowUp" || e.key === "ArrowRight") {
+                e.preventDefault();
+                commit(display + 1);
+              } else if (e.key === "ArrowDown" || e.key === "ArrowLeft") {
+                e.preventDefault();
+                commit(display - 1);
+              } else if (e.key === "Home") {
+                e.preventDefault();
+                commit(MIN);
+              } else if (e.key === "End") {
+                e.preventDefault();
+                commit(effectiveMax);
+              } else if (e.key === "PageUp") {
+                e.preventDefault();
+                commit(display + Math.max(1, Math.round(effectiveMax / 10)));
+              } else if (e.key === "PageDown") {
+                e.preventDefault();
+                commit(display - Math.max(1, Math.round(effectiveMax / 10)));
+              }
+            }}
             style={{
               position: "absolute",
               top: "50%",
@@ -382,20 +461,38 @@ export default function OutputCountSlider({
           </div>
         </div>
 
-        {/* Axis labels */}
+        {/* Axis labels — absolute-positioned at the same ``leftPct``
+            formula the ticks use, so each label sits directly over the
+            tick it annotates instead of drifting toward the gutter
+            edges (which is what ``justify-content: space-between``
+            produced when the slider range is 2 %..98 %). */}
         <div
           style={{
-            display: "flex",
-            justifyContent: "space-between",
+            position: "relative",
+            height: 12,
+            marginTop: 4,
             fontFamily: "var(--font-mono)",
             fontSize: 9,
             color: "var(--ink-4)",
-            marginTop: 4,
           }}
         >
-          {axisStops.map((n) => (
-            <span key={n}>{n}</span>
-          ))}
+          {axisStops.map((n) => {
+            const leftPct =
+              ((n - MIN) / Math.max(1, effectiveMax - MIN)) * 96 + 2;
+            return (
+              <span
+                key={n}
+                style={{
+                  position: "absolute",
+                  left: `${leftPct}%`,
+                  transform: "translateX(-50%)",
+                  top: 0,
+                }}
+              >
+                {n}
+              </span>
+            );
+          })}
         </div>
 
         {/* Preset / MAX row */}
@@ -407,14 +504,14 @@ export default function OutputCountSlider({
             const isMax = isLast && n === maxValue;
             return (
               <button
-                key={`${n}-${idx}`}
+                key={n}
                 data-testid={`create-output-count-preset-${n}`}
                 data-allowed={allowed}
                 onClick={() => allowed && commit(n)}
                 disabled={!allowed}
                 title={
                   hardDisabled
-                    ? disabledReason || undefined
+                    ? effectiveDisabledReason || undefined
                     : allowed
                     ? undefined
                     : `caps at ${effectiveMax}`
@@ -490,12 +587,12 @@ export default function OutputCountSlider({
         </div>
       </div>
 
-      {hardDisabled && disabledReason ? (
+      {hardDisabled && effectiveDisabledReason ? (
         <div
           className="mono"
           style={{ fontSize: 9, color: "var(--ink-4)", marginTop: 4 }}
         >
-          {disabledReason}
+          {effectiveDisabledReason}
         </div>
       ) : null}
     </div>

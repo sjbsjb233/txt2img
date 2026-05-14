@@ -559,10 +559,18 @@ export default function CreatePage() {
   // POST. The existing single-shot path; unchanged behaviour for models
   // where ``n_max_upstream`` matches (or exceeds) the picked ``n``.
   const submitSingle = useCallback(
-    async (captchaToken) => {
+    async (captchaToken, overrideN = null) => {
       if (!selectedModel) return;
       const payload = buildPayload();
       if (!payload) return;
+      if (typeof overrideN === "number") {
+        // Defense-in-depth clamp from ``submit()``: we get the clamped
+        // value here because ``setParams`` is async — the closure inside
+        // ``buildPayload`` still sees the pre-clamp ``params.n``. Apply
+        // the override on the freshly built payload before it's sent so
+        // the wire value matches what we told the user we were doing.
+        payload.n = overrideN;
+      }
       if (captchaToken) payload.captcha_token = captchaToken;
 
       setSubmitting(true);
@@ -760,7 +768,7 @@ export default function CreatePage() {
       if (requested > upstream && requested > 1) {
         await submitFanout(captchaToken, requested);
       } else {
-        await submitSingle(captchaToken);
+        await submitSingle(captchaToken, requested);
       }
     },
     [selectedModel, params.n, submitSingle, submitFanout]

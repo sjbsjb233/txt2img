@@ -1417,7 +1417,7 @@ function PageSection({
                 data-testid={`card-set-${item.set_id}`}
                 data-set-id={item.set_id}
                 data-set-total={expectedTotal}
-                data-set-member-count={item.members.length}
+                data-set-member-count={item.members?.length ?? 0}
                 key={item.set_id}
               >
                 <ArchiveSetCard
