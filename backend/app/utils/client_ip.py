@@ -13,9 +13,7 @@ the "true" client IP:
 1. **Cloudflare-fronted**: ``request.client.host`` is the frp container's
    address (e.g. ``172.23.0.1``) — useless. The right value lives in
    the ``CF-Connecting-IP`` header which Cloudflare sets to the original
-   visitor IP. We trust it whenever it's present because the only paths
-   into this backend that *can* produce that header are the CF tunnel
-   itself; LAN clients won't set it.
+   visitor IP.
 
 2. **Direct via frp (rare; no CF)**: there is no ``CF-Connecting-IP``.
    ``X-Forwarded-For`` may be present (frp's HTTP mode adds it). We
@@ -27,12 +25,20 @@ the "true" client IP:
 The fallback order ``CF → XFF → peer`` makes all three cases work
 without configuration.
 
-We deliberately don't validate the inbound headers against a whitelist
-of Cloudflare IPs here — the backend is not directly exposed to the
-internet (CF + frp / LAN only), so spoofing the header would require
-being already on the trusted path. If that assumption ever changes the
-right place to add the check is in front of ``client_ip_from``, not in
-every caller.
+Trust model
+-----------
+``CF-Connecting-IP`` (and ``X-Forwarded-For``) are *trivially spoofable*
+HTTP headers — any client can attach them to a request. We honour them
+verbatim here on the assumption that **the backend is only reachable
+through trusted network paths** (the Cloudflare ➜ frp tunnel or the
+local LAN); spoofing therefore requires already being on one of those
+paths, at which point the attacker has bigger primitives than a
+falsified IP.
+
+If that network assumption ever changes — e.g. the backend port is
+exposed directly to the public internet — the right place to add a
+Cloudflare-IP-range allowlist (or to strip the header for non-CF
+peers) is in front of ``client_ip_from``, not in every caller.
 """
 
 from __future__ import annotations
@@ -80,9 +86,12 @@ def client_ip_with_source(request: Request) -> tuple[str | None, IpSource]:
     fwd = request.headers.get(XFF_HEADER)
     if fwd:
         # XFF is a comma-separated list of hops; the leftmost is the
-        # originator (each hop appends, never prepends). Edge cases:
-        # empty entries, IPv6 with brackets, port suffixes — strip what
-        # we can but don't try to validate; the log consumer can.
+        # originator (each hop appends, never prepends). We trim
+        # whitespace and return the token as-is — IPv6 brackets or
+        # ``host:port`` suffixes (if any upstream proxy ever produces
+        # them) are kept intact so the log consumer can decide how to
+        # interpret them. An empty leftmost token falls through to the
+        # socket peer.
         first = fwd.split(",", 1)[0].strip()
         if first:
             return first, "xff"
