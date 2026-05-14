@@ -75,6 +75,7 @@ from app.schemas.admin_users import (
     UserPatchRequest,
 )
 from app.utils.audit import write_audit
+from app.utils.client_ip import client_ip_from
 from app.utils.errors import api_error
 from app.utils.ids import new_user_id
 from app.utils.security import hash_password, issue_impersonate_token
@@ -121,13 +122,6 @@ _BULK_ALLOWED_FIELDS = {
 
 # Daily usage strip and rollup window per design doc §13.2: 30 days.
 _USAGE_WINDOW_DAYS = 30
-
-
-def _client_ip(request: Request) -> str | None:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
 
 
 def _effective_quotas(user: User) -> tuple[int, int]:
@@ -541,7 +535,7 @@ async def create_user(
                 "override_soft_quota": user.override_soft_quota,
                 "override_hard_quota": user.override_hard_quota,
             },
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
         # Capture identity before the session closes — accessing the
         # ORM row after commit can trigger a lazy refresh that requires
@@ -694,7 +688,7 @@ async def patch_user(
             target_kind="user",
             target_id=user.id,
             payload={"changes": diff},
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     return await _build_detail_response_by_id(user_id)
@@ -748,7 +742,7 @@ async def delete_user(
             target_kind="user",
             target_id=user.id,
             payload={"old_username": old_username},
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     return ActionStatusResponse(id=user_id, status="deleted")
@@ -792,7 +786,7 @@ async def disable_user(
                 action="user.disable",
                 target_kind="user",
                 target_id=user.id,
-                ip=_client_ip(request),
+                ip=client_ip_from(request),
             )
         return ActionStatusResponse(id=user.id, status="disabled")
 
@@ -825,7 +819,7 @@ async def enable_user(
                 action="user.enable",
                 target_kind="user",
                 target_id=user.id,
-                ip=_client_ip(request),
+                ip=client_ip_from(request),
             )
         return ActionStatusResponse(id=user.id, status="active")
 
@@ -864,7 +858,7 @@ async def reset_password(
             action="user.reset_password",
             target_kind="user",
             target_id=user.id,
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     return ResetPasswordResponse(id=user_id, ok=True)
@@ -929,7 +923,7 @@ async def impersonate_user(
             target_kind="user",
             target_id=target.id,
             payload={"expires_in_seconds": expires_in},
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     return ImpersonateResponse(
@@ -1062,7 +1056,7 @@ async def bulk_patch_users(
                     "skipped_count": len(skipped),
                     "patch": _audit_safe_patch(patch_payload),
                 },
-                ip=_client_ip(request),
+                ip=client_ip_from(request),
             )
 
     return BulkPatchResponse(updated=updated, skipped_ids=skipped)

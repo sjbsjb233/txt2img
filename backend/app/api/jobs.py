@@ -80,6 +80,7 @@ from app.schemas.jobs import (
 )
 from app.services import image_io, turnstile
 from app.utils.audit import write_audit  # noqa: F401  -- reserved for cancel audit
+from app.utils.client_ip import client_ip_from
 from app.utils.errors import api_error
 from app.utils.ids import new_set_id
 
@@ -1399,7 +1400,7 @@ async def _verify_captcha_if_needed(
             "CAPTCHA_REQUIRED",
             "Captcha verification is required for this submission.",
         )
-    ip = _client_ip(request)
+    ip = client_ip_from(request)
     ok = await turnstile.verify(body.captcha_token, remote_ip=ip)
     if not ok:
         raise api_error(412, "CAPTCHA_INVALID", "Captcha verification failed.")
@@ -1416,13 +1417,6 @@ def _build_flags(
     if captcha_verified:
         flags["captcha_verified"] = True
     return flags
-
-
-def _client_ip(request: Request) -> str | None:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
 
 
 def _estimate_wait_seconds(position: int | None) -> int | None:

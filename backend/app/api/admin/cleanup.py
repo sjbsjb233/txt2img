@@ -47,6 +47,7 @@ from app.schemas.admin_cleanup import (
     CleanupTaskView,
 )
 from app.utils.audit import write_audit
+from app.utils.client_ip import client_ip_from
 from app.utils.errors import api_error
 from app.db.engine import get_session
 
@@ -58,13 +59,6 @@ router = APIRouter(prefix="/api/admin/cleanup", tags=["admin", "cleanup"])
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _client_ip(request: Request) -> str | None:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
 
 
 def _human_bytes(n: int) -> str:
@@ -191,7 +185,7 @@ async def run_cleanup(
                     "image_count": estimate.image_count,
                     "disk_bytes": estimate.disk_bytes,
                 },
-                ip=_client_ip(request),
+                ip=client_ip_from(request),
             )
 
         return CleanupDryRunResponse(
@@ -262,7 +256,7 @@ async def run_cleanup(
                 "rules": raw_rules,
                 "exempt_starred": body.exempt_starred,
             },
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     return CleanupTaskView(**state.public())

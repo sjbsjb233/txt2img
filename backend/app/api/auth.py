@@ -41,6 +41,7 @@ from app.schemas.auth import (
     MeResponse,
 )
 from app.services import turnstile
+from app.utils.client_ip import client_ip_from
 from app.utils.errors import api_error
 from app.utils.ids import new_auth_session_id
 from app.utils.security import issue_access_token, new_jti, verify_password
@@ -137,19 +138,6 @@ async def _record_attempt(username: str, ip: str | None, success: bool) -> None:
                 success=1 if success else 0,
             )
         )
-
-
-def _client_ip(request: Request) -> str | None:
-    """Best-effort client IP extraction.
-
-    We trust ``X-Forwarded-For`` because the production deployment runs
-    behind nginx (per the repo's ``docker-compose.prod.yml``); for direct
-    LAN hits we fall back to the socket peer.
-    """
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +238,7 @@ async def login(body: LoginRequest, request: Request) -> LoginResponse:
            pass; we don't leak existence to anonymous callers).
     """
     settings = get_settings()
-    ip = _client_ip(request)
+    ip = client_ip_from(request)
     logger.info("login attempt: u=%s ip=%s", body.username, ip)
 
     async with get_session() as session:

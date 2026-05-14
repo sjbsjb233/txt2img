@@ -83,6 +83,7 @@ from app.domain.provider_test_runner import (
 )
 from app.utils.audit import write_audit
 from app.utils.crypto import CryptoError, decrypt, encrypt, mask_api_key
+from app.utils.client_ip import client_ip_from
 from app.utils.errors import api_error
 
 logger = logging.getLogger("txt2img.admin.providers")
@@ -93,13 +94,6 @@ router = APIRouter(prefix="/api/admin/providers", tags=["admin", "providers"])
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _client_ip(request: Request) -> str | None:
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
 
 
 def _validate_adapter_and_models(
@@ -492,7 +486,7 @@ async def create_provider(
                 "models": [e.model_id for e in body.supported_models],
                 "tier_access": body.tier_access,
             },
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
         # Flush so the dependent inserts are visible to ``_build_view``
@@ -601,7 +595,7 @@ async def patch_provider(
             target_kind="provider",
             target_id=provider_id,
             payload={"changes": change_summary},
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
         await session.flush()
@@ -632,7 +626,7 @@ async def delete_provider(
             target_kind="provider",
             target_id=provider_id,
             payload=None,
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     return {"ok": True}
@@ -703,7 +697,7 @@ async def patch_provider_model(
             target_kind="provider_model",
             target_id=f"{provider_id}/{model_id}",
             payload={"changes": list(set_fields)},
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
         return ProviderModelUpdateResponse(
@@ -763,7 +757,7 @@ async def patch_provider_tier_access(
             target_kind="provider",
             target_id=provider_id,
             payload={"tiers": body.tiers},
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
         return TierAccessResponse(
@@ -822,7 +816,7 @@ async def topup_provider(
                 "amount_cny": body.amount_cny,
                 "promoted_from_drained": result.promoted_from_drained,
             },
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
         return ProviderTopupResponse(
@@ -874,7 +868,7 @@ async def reset_circuit(
             target_kind="provider",
             target_id=provider_id,
             payload={"prior_state": provider.circuit_state},
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     return ProviderResetCircuitResponse(
@@ -1059,7 +1053,7 @@ async def test_provider(
                 "latency_ms": response.latency_ms,
                 "error_kind": response.error_kind,
             },
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
     return response
 
@@ -1162,7 +1156,7 @@ async def run_test_suite(
                 "case_ids": body.case_ids,
                 "dry_run": body.dry_run,
             },
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     headers = {
@@ -1248,7 +1242,7 @@ async def post_test_suite_manual_verdict(
                 "case_id": case_id,
                 "verdict": body.verdict,
             },
-            ip=_client_ip(request),
+            ip=client_ip_from(request),
         )
 
     return ProviderTestSuiteVerdictResponse(
