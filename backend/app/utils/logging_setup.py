@@ -677,11 +677,32 @@ def _install(settings: Settings) -> None:
         )
 
     uvicorn_access = logging.getLogger("uvicorn.access")
-    # Our middleware emits its own access record; uvicorn's default
-    # format is too sparse. Quiet uvicorn.access and rely on our line.
-    uvicorn_access.setLevel(logging.WARNING)
+    # Our :class:`RequestLoggingMiddleware` emits the canonical access
+    # record for every request that actually reaches the middleware
+    # chain, so we'd rather not have uvicorn double-log to stdout in
+    # the common case. But the middleware can't see anything rejected
+    # *before* it dispatches — e.g. a lifespan-error short-circuit, or
+    # an exception in another middleware registered outside ours. To
+    # keep ``access.log`` honest during outages we route uvicorn's
+    # access records onto the same file at INFO. The two streams will
+    # interleave in ``access.log``; ours is the structured JSON,
+    # uvicorn's is its terse default format — both survive ``jq`` (or
+    # ``grep``) and operators can tell them apart by the ``logger``
+    # field on our records.
+    uvicorn_access.setLevel(logging.INFO)
     uvicorn_access.handlers = []
     uvicorn_access.propagate = False
+    if settings.LOG_ACCESS_ENABLED:
+        uvicorn_access.addHandler(
+            _make_file_handler(
+                path=log_dir / "access.log",
+                when=settings.LOG_ROTATE_WHEN,
+                backup_count=max(7, min(settings.LOG_RETAIN_DAYS, 14)),
+                level=logging.INFO,
+                formatter=primary_formatter,
+                filters=common_filters,
+            )
+        )
 
 
 def field_extra(**fields: Any) -> dict[str, dict[str, Any]]:

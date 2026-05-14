@@ -1,4 +1,5 @@
 import React from "react";
+import { useLocation } from "react-router-dom";
 import { log } from "../utils/logger.js";
 
 // Top-level React error boundary. Mounted just inside <BrowserRouter> by
@@ -9,9 +10,13 @@ import { log } from "../utils/logger.js";
 // This intentionally does NOT try to be a fancy "something went wrong"
 // page — we render a minimal centred message and rely on the in-app
 // log reporting to bring back the stack trace. Once the user navigates
-// away (route change) we recover by clearing the captured error.
+// away (route change) we recover by clearing the captured error — the
+// default export is a thin function wrapper that injects the current
+// ``useLocation().key`` so ``componentDidUpdate`` sees a real prop
+// change to compare against (without the wrapper the prop was always
+// undefined and the recovery branch was dead).
 
-export default class ErrorBoundary extends React.Component {
+class ErrorBoundaryImpl extends React.Component {
   constructor(props) {
     super(props);
     this.state = { hasError: false, message: null };
@@ -107,4 +112,15 @@ export default class ErrorBoundary extends React.Component {
     }
     return this.props.children;
   }
+}
+
+export default function ErrorBoundary({ children }) {
+  // ``useLocation().key`` flips on every history push/replace, so the
+  // class component's ``componentDidUpdate`` sees a real prop change
+  // when the user navigates after an error and can clear its captured
+  // state automatically.
+  const location = useLocation();
+  return (
+    <ErrorBoundaryImpl locationKey={location.key}>{children}</ErrorBoundaryImpl>
+  );
 }

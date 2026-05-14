@@ -604,6 +604,13 @@ class GeminiV1BetaAdapter(BaseAdapter):
                 latency_ms,
                 len(resp.content or b""),
             )
+            # Parse inside the try so HTTP 4xx/5xx — surfaced as
+            # StandardError by ``_raise_http_error`` — flow through the
+            # "upstream business error" branch alongside any
+            # ``EMPTY_RESPONSE`` / ``UPSTREAM_ERROR`` cases. This also
+            # mirrors the OpenAI adapter so both providers share the
+            # same error-logging surface.
+            return self._parse_response(resp)
         except StandardError as exc:
             latency_ms = int((time.perf_counter() - t0) * 1000)
             logger.warning(
@@ -646,8 +653,6 @@ class GeminiV1BetaAdapter(BaseAdapter):
                 latency_ms,
             )
             raise self.normalize_error(exc) from exc
-
-        return self._parse_response(resp)
 
     # ------------------------------------------------------------------
     # Response parsing

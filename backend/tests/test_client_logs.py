@@ -104,6 +104,12 @@ async def test_rate_limit_blocks_after_quota(
 async def test_oversized_item_dropped_not_failed(
     seeded_app: httpx.AsyncClient,
 ) -> None:
+    # First item is ~1900 char ``msg`` + 7800 char ``stack`` →
+    # JSON-encodes to roughly 9.7 KB, well above the default
+    # ``LOG_CLIENT_LOGS_ITEM_MAX_BYTES=8192``, so it should be dropped
+    # by ``_validate_item_size``. Second item is tiny and lands. The
+    # exact ``accepted == 1, dropped == 1`` shape guards against a
+    # future regression where the size cap is silently relaxed.
     big = "x" * 1900
     resp = await seeded_app.post(
         "/api/client-logs",
@@ -116,8 +122,8 @@ async def test_oversized_item_dropped_not_failed(
     )
     assert resp.status_code == 200
     body = resp.json()
-    # The first item still fits the 8KB default; both should land.
-    assert body["accepted"] >= 1
+    assert body["accepted"] == 1
+    assert body["dropped"] == 1
 
 
 @pytest.mark.asyncio

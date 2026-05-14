@@ -163,38 +163,60 @@ function _endpoint() {
   }
 }
 
+function _beaconSend(payload, url) {
+  if (typeof navigator === "undefined" || !navigator.sendBeacon) return false;
+  try {
+    const blob = new Blob([payload], {
+      type: "application/json;charset=UTF-8",
+    });
+    return navigator.sendBeacon(url, blob);
+  } catch (_e) {
+    return false;
+  }
+}
+
 async function flush({ useBeacon = false } = {}) {
-  if (flushing || buffer.length === 0 || disabled) return;
+  if (disabled || buffer.length === 0) return;
+  // Beacon path bypasses the ``flushing`` guard: a regular interval
+  // flush already in flight is keepalive-best-effort across navigation,
+  // and anything newly buffered during its ``fetch`` would otherwise be
+  // silently dropped on hide/pagehide/beforeunload. Snapshot+drain the
+  // buffer and fire the beacon synchronously here.
+  if (useBeacon) {
+    const items = buffer.splice(0, buffer.length);
+    const payload = JSON.stringify({ items });
+    const url = _endpoint();
+    const sent = _beaconSend(payload, url);
+    if (!sent) {
+      // Beacon refused (typically because the body is over the user
+      // agent's per-beacon quota, default 64KB). Re-queue so the next
+      // regular flush picks it up; we don't fall back to fetch here
+      // because the page is mid-navigation and the request would just
+      // get cancelled.
+      buffer.unshift(...items);
+      if (buffer.length > MAX_QUEUE) {
+        buffer.splice(0, buffer.length - MAX_QUEUE);
+      }
+    }
+    return;
+  }
+  if (flushing) return;
   flushing = true;
   const items = buffer.splice(0, buffer.length);
   const payload = JSON.stringify({ items });
   const url = _endpoint();
   let sent = false;
   try {
-    if (useBeacon && typeof navigator !== "undefined" && navigator.sendBeacon) {
-      // sendBeacon ignores Content-Type; the backend accepts text bodies
-      // and falls back to JSON.parse — see app/api/client_logs.py.
-      try {
-        const blob = new Blob([payload], {
-          type: "application/json;charset=UTF-8",
-        });
-        sent = navigator.sendBeacon(url, blob);
-      } catch (_e) {
-        sent = false;
-      }
-    }
-    if (!sent) {
-      try {
-        await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: payload,
-          keepalive: true,
-        });
-        sent = true;
-      } catch (_e) {
-        sent = false;
-      }
+    try {
+      await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+        keepalive: true,
+      });
+      sent = true;
+    } catch (_e) {
+      sent = false;
     }
   } finally {
     flushing = false;
