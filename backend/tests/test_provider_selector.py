@@ -364,6 +364,64 @@ async def test_circuit_open_is_filtered(initialized_db: None) -> None:
 
 
 @pytest.mark.asyncio
+async def test_circuit_open_recovers_when_cooldown_elapsed(
+    initialized_db: None,
+) -> None:
+    """After the cooldown passes, the selector auto-recovers an OPEN provider.
+
+    Regression: HALF_OPEN's ``acquire_probe`` path is not wired into the
+    selector/executor, so a tripped provider used to stay OPEN until an
+    operator clicked Reset. The selector now calls
+    ``breaker.try_auto_recover`` for OPEN candidates whose cooldown has
+    elapsed; this test pins that the provider becomes routable again
+    without manual intervention.
+    """
+    from app.domain.circuit_breaker import CircuitBreaker
+    from app.domain.runtime_configs import CircuitBreakerConfig
+    from sqlalchemy import select
+
+    await _bootstrap()
+    await _seed_provider(pid="p_recover")
+
+    fake_t = [1000.0]
+    breaker = CircuitBreaker(
+        config=CircuitBreakerConfig(),
+        time_source=lambda: fake_t[0],
+    )
+
+    # Trip to OPEN through real observations so cooldown_until is set
+    # exactly the way production code sets it.
+    for _ in range(5):
+        await breaker.observe("p_recover", success=False)
+    assert await breaker.get_state("p_recover") == "open"
+
+    selector, _, _ = _selector(breaker=breaker)
+
+    # Cooldown not yet elapsed — provider is still filtered out.
+    out = await selector.select(_user(), _request())
+    assert out == []
+    async with get_session() as session:
+        state = (
+            await session.execute(
+                select(Provider.circuit_state).where(Provider.id == "p_recover")
+            )
+        ).scalar_one()
+    assert state == "open"
+
+    # Move past the default 30s initial cooldown — selector recovers it.
+    fake_t[0] += 31.0
+    out = await selector.select(_user(), _request())
+    assert [c.provider.provider_id for c in out] == ["p_recover"]
+    async with get_session() as session:
+        state = (
+            await session.execute(
+                select(Provider.circuit_state).where(Provider.id == "p_recover")
+            )
+        ).scalar_one()
+    assert state == "healthy"
+
+
+@pytest.mark.asyncio
 async def test_all_providers_open_returns_empty(initialized_db: None) -> None:
     """Headline acceptance: every provider OPEN → no candidates."""
     await _bootstrap()

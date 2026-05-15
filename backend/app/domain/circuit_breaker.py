@@ -437,6 +437,45 @@ class CircuitBreaker:
             )
             return HEALTHY
 
+    async def try_auto_recover(self, provider_id: str) -> str:
+        """Promote ``OPEN`` back to ``HEALTHY`` if the cooldown has elapsed.
+
+        The state machine in design doc §7.5 routes a recovered provider
+        through ``OPEN → HALF_OPEN → HEALTHY`` via :meth:`acquire_probe`.
+        That probe path is not wired into the selector / executor today,
+        which means a provider that trips OPEN stays OPEN until an
+        operator clicks Reset in the admin UI — even when the cooldown
+        expired hours ago. This method is the pragmatic fallback: when
+        ``cooldown_until`` is in the past, flip directly to ``HEALTHY``
+        and let the next observation (success or failure) drive the
+        next transition. A still-broken provider re-trips into ``OPEN``
+        after ``failure_threshold`` consecutive failures, so the routing
+        cost of probing without HALF_OPEN's slot cap is bounded.
+
+        Returns the post-call state. No-op (returns current state) when:
+          - state ≠ ``OPEN``;
+          - cooldown is unset or still in the future.
+        """
+        async with self._lock_for(provider_id):
+            st = await self._load_state(provider_id)
+            if st.state != OPEN:
+                return st.state
+            if st.cooldown_until is None or self._time() < st.cooldown_until:
+                return st.state
+            st.state = HEALTHY
+            st.consecutive_failures = 0
+            st.cooldown_until = None
+            st.current_cooldown_seconds = self._initial_cooldown()
+            await self._persist_state(provider_id, HEALTHY, None)
+            logger.info(
+                "breaker: state transition provider=%s from=%s to=%s "
+                "reason=cooldown_elapsed",
+                provider_id,
+                OPEN,
+                HEALTHY,
+            )
+            return HEALTHY
+
     async def admin_disable(self, provider_id: str) -> str:
         async with self._lock_for(provider_id):
             st = await self._load_state(provider_id)
