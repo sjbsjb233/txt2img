@@ -239,3 +239,15 @@ export async function prune(userId, opts = {}) {
   await txDone(tx);
   return { removed };
 }
+
+// Test hook (dev only): expose IDB helpers to Playwright so specs can
+// seed and inspect drafts without going through React state.
+if (import.meta.env?.DEV && typeof window !== "undefined") {
+  window.__maskDraftDB = {
+    putDraft,
+    getDraft,
+    deleteDraft,
+    listDrafts,
+    makeDraftId,
+  };
+}

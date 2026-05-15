@@ -31,6 +31,7 @@ export default function CompareRightPanel({
   onVersionPick,
   accepting,
   analyzing,
+  maskPainted = true,
 }) {
   const renderSec = result?.timing?.render_seconds;
   const isOverride = !!strategy && autoStrategy && strategy !== autoStrategy;
@@ -66,11 +67,12 @@ export default function CompareRightPanel({
         </Section>
         <Section title="preservation strategy">
           <StrategyControl
-            strategy={strategy || autoStrategy || "mask"}
-            auto={autoStrategy || "mask"}
+            strategy={strategy || autoStrategy || (maskPainted ? "mask" : "full")}
+            auto={autoStrategy || (maskPainted ? "mask" : "full")}
             isOverride={isOverride}
             tier={t}
             onChange={onStrategyChange}
+            maskPainted={maskPainted}
           />
         </Section>
         <Section title="actions">
@@ -176,19 +178,26 @@ function DiffMetrics({ metrics, showHeatmap, onToggleHeatmap }) {
   );
 }
 
-function StrategyControl({ strategy, auto, isOverride, tier, onChange }) {
-  const hint = isOverride
+function StrategyControl({ strategy, auto, isOverride, tier, onChange, maskPainted = true }) {
+  const hint = !maskPainted
+    ? "no mask painted · only full replace makes sense"
+    : isOverride
     ? `manual override · auto would pick ${auto === "mask" ? "mask-only" : "full replace"}`
     : tier === "danger"
     ? "auto-picked: model changed too much for a clean composite"
     : "auto-picked: model stayed within the mask region";
+  // ``Seg`` doesn't expose per-option disable, so when there's no mask
+  // we render only the "full replace" choice.
+  const options = maskPainted
+    ? [
+        { value: "mask", label: "mask-only" },
+        { value: "full", label: "full replace" },
+      ]
+    : [{ value: "full", label: "full replace" }];
   return (
     <div data-testid="me-cmp-strategy" data-value={strategy} data-auto={auto} data-override={isOverride ? "true" : "false"}>
       <Seg
-        options={[
-          { value: "mask", label: "mask-only" },
-          { value: "full", label: "full replace" },
-        ]}
+        options={options}
         value={strategy}
         onChange={onChange}
         dense

@@ -49,6 +49,18 @@ function recordIsEmpty({ prompt, refsCount, hasPaint, outpaintMode, outpaint }) 
   return true;
 }
 
+function shallowEqualObj(a, b) {
+  const ao = a || {};
+  const bo = b || {};
+  const ak = Object.keys(ao);
+  const bk = Object.keys(bo);
+  if (ak.length !== bk.length) return false;
+  for (const k of ak) {
+    if (ao[k] !== bo[k]) return false;
+  }
+  return true;
+}
+
 async function canvasToPngBlob(canvas) {
   if (!canvas) return null;
   return await new Promise((resolve) => {
@@ -97,8 +109,21 @@ export function useMaskDraftAutosave({
   // the default in records to keep them small and so a template change
   // ships to existing drafts automatically.
   customTemplate,
+  // Baseline values captured at restore-or-mount time. Anything matching
+  // baseline is "not really edited" — debounce fires but no toast, no
+  // write. Without this, opening a job with a non-empty source prompt
+  // makes every casual focus event flash DRAFT SAVED.
+  baseline,
+  // Monotonic counter the page bumps on every mask edit (history.length
+  // works fine). Listed in the debounce-effect deps so painting alone
+  // (no other state change) still triggers a save.
+  canvasRev = 0,
   onRestore,
 }) {
+  const baselineRef = useRef(baseline);
+  useEffect(() => {
+    baselineRef.current = baseline;
+  }, [baseline]);
   const draftId = useMemo(
     () => (hashId && order ? maskDraftDB.makeDraftId(hashId, order, mode) : null),
     [hashId, order, mode]
@@ -227,6 +252,34 @@ export function useMaskDraftAutosave({
 
   const markCanvasDirty = useCallback(() => {
     maskDirtyRef.current = true;
+    canvasRevRef.current += 1;
+  }, []);
+
+  // Bumped on every brush stroke / op / undo. Real "have they painted
+  // since open?" signal — paired with the baseline below so the page
+  // can tell DRAFT SAVED from "user just clicked focus on the prompt".
+  const canvasRevRef = useRef(0);
+
+  const isDirtyVsBaseline = useCallback(() => {
+    const live = liveRef.current;
+    const base = baselineRef.current;
+    if (!base) {
+      // No baseline yet (e.g. mid-mount before the page captures it);
+      // err on the side of "yes" so the original behaviour of writing
+      // user changes still works.
+      return true;
+    }
+    if ((live.prompt || "") !== (base.prompt || "")) return true;
+    const refsLen = Array.isArray(live.refs) ? live.refs.length : 0;
+    if (refsLen !== (base.refsLen || 0)) return true;
+    if (canvasRevRef.current > (base.canvasRev || 0)) return true;
+    if (!shallowEqualObj(live.advanced, base.advanced)) return true;
+    if (!shallowEqualObj(live.outpaint, base.outpaint)) return true;
+    if (!!live.outpaintMode !== !!base.outpaintMode) return true;
+    if ((live.customTemplate ?? null) !== (base.customTemplate ?? null)) {
+      return true;
+    }
+    return false;
   }, []);
 
   // -------------------------------------------------------------
@@ -299,6 +352,14 @@ export function useMaskDraftAutosave({
 
   const writeDraftNow = useCallback(async () => {
     if (!userId || !draftId) return false;
+    // Suppress writes (and the DRAFT SAVED toast) when nothing has
+    // changed vs the baseline captured at restore-or-mount time.
+    // Without this gate, opening a job whose source prompt is non-empty
+    // makes the very first debounce tick "save" the unchanged record
+    // and flash the toast.
+    if (!isDirtyVsBaseline()) {
+      return false;
+    }
     const record = await buildRecord();
     if (!record) {
       // Nothing meaningful to save — clean any prior record.
@@ -322,7 +383,18 @@ export function useMaskDraftAutosave({
       }
       return false;
     }
-  }, [userId, draftId, buildRecord]);
+  }, [userId, draftId, buildRecord, isDirtyVsBaseline]);
+
+  // Public "flush right now" — used by the page's onBack handler so
+  // leaving = save, no confirm dialog. Returns a promise that resolves
+  // once the IDB write settles.
+  const flushNow = useCallback(async () => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    return await writeDraftNow();
+  }, [writeDraftNow]);
 
   // Synchronous-ish flush for ``beforeunload``. We can't await IDB
   // here without blocking the unload, so we fire-and-forget; the
@@ -465,9 +537,13 @@ export function useMaskDraftAutosave({
     advanced,
     outpaint,
     outpaintMode,
-    activeTool,
-    activeTab,
+    // ``activeTool`` and ``activeTab`` are intentionally NOT in this
+    // dependency list — switching brush ↔ eraser or tabs is not a
+    // material edit and shouldn't flash DRAFT SAVED. Their values
+    // still get persisted (via liveRef) the next time a real edit
+    // triggers a write.
     customTemplate,
+    canvasRev,
     showToast,
     writeDraftNow,
   ]);
@@ -559,5 +635,5 @@ export function useMaskDraftAutosave({
     [showToast, userId, draftId]
   );
 
-  return { toast, clearDraft, hydrated, markCanvasDirty };
+  return { toast, clearDraft, hydrated, markCanvasDirty, flushNow };
 }

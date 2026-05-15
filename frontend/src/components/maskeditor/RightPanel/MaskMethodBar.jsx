@@ -3,8 +3,15 @@
 // In fallback mode there's a small ▸ show template / ▾ hide template
 // trigger that toggles the FallbackTemplateBlock below.
 
-export default function MaskMethodBar({ method, expanded, onToggle }) {
+export default function MaskMethodBar({ method, expanded, onToggle, maskPainted = true }) {
   const isFallback = method === "fallback";
+  // No painted mask = no fallback template applies. Surface that
+  // explicitly so the user understands the prompt ships verbatim.
+  const labelText = isFallback
+    ? maskPainted
+      ? "mask · fallback (described in prompt)"
+      : "prompt-only · no mask"
+    : "mask · native";
   return (
     <div className="me-mask-method-bar" data-testid="me-mask-method-bar" data-method={method || "unknown"}>
       <span
@@ -13,10 +20,10 @@ export default function MaskMethodBar({ method, expanded, onToggle }) {
         }`}
       />
       <span className="me-mask-method-bar__label" data-testid="me-mask-method-label">
-        {isFallback ? "mask · fallback (described in prompt)" : "mask · native"}
+        {labelText}
         {!isFallback && <span className="me-mask-method-bar__check"> ✓</span>}
       </span>
-      {isFallback && (
+      {isFallback && maskPainted && (
         <button
           type="button"
           className="me-mask-method-bar__toggle"

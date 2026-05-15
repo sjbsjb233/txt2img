@@ -1751,3 +1751,425 @@
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
+
+/* === Canvas skeleton ===================================================
+ * Shown in the canvas area when the source image is still loading.
+ * Page chrome (top bar, toolbar, right panel, status) stays mounted
+ * around it — first-paint feels instant.
+ */
+.me-canvas-skeleton {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 32px;
+}
+.me-canvas-skeleton__rect {
+  width: min(420px, 80%);
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--ink);
+  background: var(--paper-3);
+  position: relative;
+  overflow: hidden;
+}
+.me-canvas-skeleton__shimmer {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg,
+    rgba(231, 224, 205, 0) 0%,
+    rgba(231, 224, 205, 0.55) 45%,
+    rgba(255, 253, 247, 0.85) 50%,
+    rgba(231, 224, 205, 0.55) 55%,
+    rgba(231, 224, 205, 0) 100%);
+  background-size: 220% 100%;
+  animation: me-skel-shimmer 1.4s linear infinite;
+}
+@keyframes me-skel-shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -120% 0; }
+}
+.me-canvas-skeleton__label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-3);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+.me-canvas-skeleton__card {
+  background: #fffdf7;
+  border: 2px solid var(--ink);
+  box-shadow: 6px 6px 0 var(--ink);
+  padding: 20px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 420px;
+}
+.me-canvas-skeleton__card--error {
+  border-color: var(--bad);
+  box-shadow: 6px 6px 0 var(--bad);
+}
+.me-canvas-skeleton__title {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--bad);
+}
+.me-canvas-skeleton__message {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+
+/* === LockVeil ==========================================================
+ * Covers the entire editor while a job is in flight. Heavy diagonal
+ * stripes + LOCKED labels make it visually obvious — far more honest
+ * than just opacity 0.5.
+ */
+.me-lock-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  pointer-events: auto;
+  cursor: not-allowed;
+}
+.me-lock-veil__stripe {
+  position: absolute;
+  background:
+    repeating-linear-gradient(45deg,
+      rgba(20,18,14,0.06) 0px, rgba(20,18,14,0.06) 8px,
+      rgba(20,18,14,0.00) 8px, rgba(20,18,14,0.00) 16px),
+    rgba(231,224,205,0.78);
+}
+.me-lock-veil__stripe--canvas {
+  background:
+    repeating-linear-gradient(45deg,
+      rgba(20,18,14,0.06) 0px, rgba(20,18,14,0.06) 8px,
+      rgba(20,18,14,0.00) 8px, rgba(20,18,14,0.00) 16px),
+    rgba(231,224,205,0.35);
+}
+.me-lock-badge--rail {
+  position: absolute;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  font-weight: 700;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  box-shadow: 2px 2px 0 var(--banana-deep);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-transform: uppercase;
+}
+.me-lock-badge--right {
+  position: absolute;
+  padding: 5px 9px;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-transform: uppercase;
+}
+.me-lock-badge--right::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  background: var(--banana);
+  display: inline-block;
+  animation: me-spin 1.2s linear infinite;
+}
+
+/* Back-only top bar: floats above the LockVeil so the back button
+ * remains usable while the editor is locked.
+ */
+.me-back-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 60px;
+  height: 60px;
+  z-index: 11;
+  border-right: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+  background: var(--paper-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.me-back-overlay button {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.me-back-overlay button:hover {
+  background: var(--paper-3);
+}
+
+/* === GeneratingCard ====================================================
+ * Centred modal-ish card that owns the "generating" UX. Banana header
+ * strip, partial preview thumbnail, fake-but-believable progress bar,
+ * stage track, and an advisory footer.
+ */
+.me-gen-card {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 520px;
+  max-width: calc(100% - 64px);
+  background: #fffdf7;
+  border: 2px solid var(--ink);
+  box-shadow: 8px 8px 0 var(--ink);
+  z-index: 12;
+  pointer-events: auto;
+  font-family: var(--font-sans);
+  display: flex;
+  flex-direction: column;
+}
+.me-gen-card__head {
+  background: var(--banana);
+  border-bottom: 2px solid var(--ink);
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.me-gen-card__head-spin {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--ink);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: me-spin 700ms linear infinite;
+  flex-shrink: 0;
+}
+.me-gen-card__head-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.me-gen-card__head-sub {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.7;
+}
+.me-gen-card__head-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  margin-left: auto;
+}
+.me-gen-card__body {
+  display: flex;
+  gap: 14px;
+  padding: 16px;
+}
+.me-gen-card__thumb {
+  width: 136px;
+  height: 136px;
+  border: 1px solid var(--ink);
+  background: #1f1812;
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.me-gen-card__thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: blur(1.5px) saturate(0.9);
+  opacity: 0.95;
+}
+.me-gen-card__thumb-spin {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--paper);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: me-spin 700ms linear infinite;
+}
+.me-gen-card__thumb-scan {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 62%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--banana), transparent);
+  box-shadow: 0 0 8px var(--banana);
+  pointer-events: none;
+}
+.me-gen-card__thumb-tag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 2px 6px;
+  background: var(--info);
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+.me-gen-card__meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.me-gen-card__label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.me-gen-card__prompt {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: var(--ink);
+}
+.me-gen-card__metarow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--ink-2);
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.me-gen-card__progress {
+  height: 8px;
+  background: var(--paper-2);
+  border: 1px solid var(--ink);
+  position: relative;
+  margin-top: 4px;
+}
+.me-gen-card__progress-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background-color: var(--banana);
+  background-image: repeating-linear-gradient(45deg,
+    rgba(20,18,14,0.18) 0px, rgba(20,18,14,0.18) 4px,
+    transparent 4px, transparent 8px);
+  border-right: 1px solid var(--ink);
+  transition: width 250ms linear;
+}
+.me-gen-card__progress-pct {
+  position: absolute;
+  right: 0;
+  top: -16px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+}
+.me-gen-card__phases {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  letter-spacing: 0.04em;
+}
+.me-gen-card__phase {
+  margin-right: 8px;
+}
+.me-gen-card__phase--active {
+  color: var(--ink);
+  font-weight: 700;
+}
+.me-gen-card__foot {
+  border-top: 1px solid var(--ink);
+  background: var(--paper-2);
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.me-gen-card__foot-text {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  line-height: 1.4;
+}
+
+/* Canvas-overlay partial preview (lives under LockVeil + GeneratingCard
+ * but above the source canvas). Marching-ants border via stroke-dashoffset.
+ */
+.me-canvas-partial {
+  position: absolute;
+  pointer-events: none;
+  z-index: 8;
+}
+.me-canvas-partial__img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: blur(2px) saturate(0.9);
+  opacity: 0.94;
+}
+.me-canvas-partial__scan {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 62%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--banana), transparent);
+  box-shadow: 0 0 12px var(--banana);
+  pointer-events: none;
+}
+.me-canvas-partial__tag {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  padding: 4px 8px;
+  background: var(--info);
+  color: var(--paper);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+.me-canvas-partial__svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.me-canvas-partial__rect {
+  fill: none;
+  stroke: var(--banana);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+  animation: me-ants 700ms linear infinite;
+}
+@keyframes me-ants {
+  to { stroke-dashoffset: -8; }
+}

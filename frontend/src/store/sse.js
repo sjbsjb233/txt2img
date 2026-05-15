@@ -83,6 +83,18 @@ export function connect() {
     client.close();
     client = null;
   }
+  // Test hook: when the page sets ``window.__MOCK_SSE = true`` before
+  // mount (Playwright addInitScript), skip the real EventSource and
+  // expose ``window.__pushSSE(kind, payload)`` so specs can drive the
+  // pipeline directly. Dev-only; prod builds set
+  // ``import.meta.env.DEV`` to false so this whole arm dead-codes out.
+  if (import.meta.env?.DEV && typeof window !== "undefined" && window.__MOCK_SSE) {
+    connectionState = { status: "open", attempts: 0 };
+    notifyState();
+    window.__pushSSE = (kind, payload, id) => dispatchEvent(kind, payload, id || `mock_${Date.now()}`);
+    client = { close() { delete window.__pushSSE; }, reconnectNow() {} };
+    return;
+  }
   client = createSSEClient({
     url: ssEUrl(),
     getToken,
