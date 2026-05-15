@@ -443,7 +443,16 @@ class ProviderSelector:
             # be caught by the actual call attempt: the executor
             # consults the breaker at observe-time and records the
             # failure if the call fails.
+            #
+            # OPEN providers with an elapsed cooldown get one chance to
+            # recover here. ``try_auto_recover`` is a single ``UPDATE``
+            # gated by an in-memory lock, so the per-OPEN cost is bounded
+            # and only paid until the row is flipped back to HEALTHY.
             persisted_state = provider.circuit_state or HEALTHY
+            if persisted_state == "open":
+                persisted_state = await self._breaker.try_auto_recover(
+                    provider.id
+                )
             if persisted_state != HEALTHY:
                 reason = (
                     "circuit_drained"

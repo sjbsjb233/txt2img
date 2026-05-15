@@ -246,6 +246,87 @@ async def test_cooldown_capped_at_max(initialized_db: None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Auto-recovery after cooldown
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_try_auto_recover_promotes_open_after_cooldown(
+    initialized_db: None,
+) -> None:
+    """``try_auto_recover`` flips OPEN → HEALTHY once cooldown elapses.
+
+    Regression: HALF_OPEN's ``acquire_probe`` path is not wired into the
+    selector / executor, so providers tripped to OPEN used to stay OPEN
+    indefinitely. The selector now calls this helper at filter time so
+    the next call after the cooldown can act as the recovery probe.
+    """
+    from app.db import seed
+    from app.domain.config_center import get_config_center
+
+    await seed.bootstrap()
+    await get_config_center().load_from_db()
+
+    fake_t = [1000.0]
+    breaker = _breaker(time_source=lambda: fake_t[0])
+    await _seed_provider("p1")
+
+    # Trip OPEN.
+    for _ in range(5):
+        await breaker.observe("p1", success=False)
+    assert await breaker.get_state("p1") == "open"
+    db_state, cooldown = await _db_state("p1")
+    assert db_state == "open"
+    assert cooldown is not None
+
+    # Before cooldown elapses, try_auto_recover is a no-op.
+    fake_t[0] += 10.0  # << 30s initial cooldown
+    assert await breaker.try_auto_recover("p1") == "open"
+    db_state, _ = await _db_state("p1")
+    assert db_state == "open"
+
+    # After cooldown elapses, it promotes to HEALTHY and persists.
+    fake_t[0] += 30.0
+    assert await breaker.try_auto_recover("p1") == "healthy"
+    db_state, cooldown = await _db_state("p1")
+    assert db_state == "healthy"
+    assert cooldown is None
+
+
+@pytest.mark.asyncio
+async def test_try_auto_recover_is_noop_for_non_open_states(
+    initialized_db: None,
+) -> None:
+    """Only OPEN providers are auto-recovered; DRAINED / DISABLED stay."""
+    from app.db import seed
+    from app.domain.config_center import get_config_center
+
+    await seed.bootstrap()
+    await get_config_center().load_from_db()
+
+    fake_t = [1000.0]
+    breaker = _breaker(time_source=lambda: fake_t[0])
+    await _seed_provider("p_drained", state="drained")
+    await _seed_provider("p_disabled", state="disabled")
+    await _seed_provider("p_healthy", state="healthy")
+
+    # No cooldown is set on these rows; even with a far-future clock the
+    # helper must not touch them.
+    fake_t[0] += 10_000.0
+    assert await breaker.try_auto_recover("p_drained") == "drained"
+    assert await breaker.try_auto_recover("p_disabled") == "disabled"
+    assert await breaker.try_auto_recover("p_healthy") == "healthy"
+
+    for pid, expected in (
+        ("p_drained", "drained"),
+        ("p_disabled", "disabled"),
+        ("p_healthy", "healthy"),
+    ):
+        db_state, _ = await _db_state(pid)
+        assert db_state == expected
+
+
+# ---------------------------------------------------------------------------
 # Probe concurrency
 # ---------------------------------------------------------------------------
 
