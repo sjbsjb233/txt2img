@@ -187,7 +187,15 @@ async def _providers_summary() -> list[ProviderSummaryView]:
             success = sum(
                 metrics.success_rate(p.id, m) for m in sample_models
             ) / len(sample_models)
-            p50_values = [metrics.p50_ms(p.id, m) for m in sample_models]
+            # ``p50_ms`` returns None for any model whose window has only
+            # failed calls — _percentile filters by ``r.ok``. Drop the
+            # Nones before averaging; if every model is None the provider
+            # has no successful latency sample yet, so report None.
+            p50_values = [
+                v
+                for v in (metrics.p50_ms(p.id, m) for m in sample_models)
+                if v is not None
+            ]
             p50: float | None = (
                 sum(p50_values) / len(p50_values) if p50_values else None
             )

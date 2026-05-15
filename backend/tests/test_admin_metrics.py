@@ -146,6 +146,58 @@ async def test_overview_with_populated_metrics_engine(seeded_app):
 
 
 @pytest.mark.asyncio
+async def test_overview_with_only_failed_samples(seeded_app):
+    """Overview must not 500 when a provider's window holds only failed
+    calls.
+
+    Regression: ``MetricsEngine.p50_ms`` only counts successful records
+    (``_percentile`` filters by ``r.ok``), so a model whose recent window
+    is 100% failures returns ``None``. ``_providers_summary`` used to
+    average those values directly, which made ``sum([None, ...])`` 500
+    the whole admin Overview tab — exactly when an upstream provider was
+    erroring, i.e. when operators need the dashboard the most.
+    """
+    from app.db.engine import get_session
+    from app.db.models import Provider
+    from app.domain.metrics_engine import get_metrics_engine
+
+    async with get_session() as session:
+        session.add(
+            Provider(
+                id="p_fail_only",
+                label="Fail Only",
+                adapter_type="openai_v1",
+                base_url="https://example.com",
+                api_key_enc="v1:fake",
+                cost_per_image_cny=0.1,
+                initial_balance_cny=1.0,
+                balance_cny=1.0,
+                circuit_state="healthy",
+            )
+        )
+
+    metrics = get_metrics_engine()
+    for _ in range(3):
+        metrics.record_call(
+            "p_fail_only", "m_x", ok=False, latency_ms=99.0
+        )
+
+    token = await _login_admin(seeded_app)
+    resp = await seeded_app.get(
+        "/api/admin/metrics/overview", headers=_auth(token)
+    )
+    assert resp.status_code == 200, resp.text
+
+    body = resp.json()
+    entry = next(
+        p for p in body["providers_summary"] if p["id"] == "p_fail_only"
+    )
+    # With no successful samples in the window the average p50 is
+    # undefined; the endpoint must report None instead of crashing.
+    assert entry["p50_ms_5min"] is None
+
+
+@pytest.mark.asyncio
 async def test_overview_requires_admin(seeded_app):
     # Forge a token-less request so the guard fires the same way it
     # would for any non-admin caller.
