@@ -11,17 +11,27 @@ import CanvasStage from "../components/maskeditor/CanvasStage.jsx";
 import RightPanel from "../components/maskeditor/RightPanel/index.jsx";
 import ErrorModal from "../components/maskeditor/ErrorModal.jsx";
 import ValidationBanner from "../components/maskeditor/ValidationBanner.jsx";
-import StreamingOverlay from "../components/maskeditor/StreamingOverlay.jsx";
 import CheatSheetOverlay from "../components/maskeditor/CheatSheetOverlay.jsx";
 import CompareSurface from "../components/maskeditor/CompareSurface.jsx";
 import CompareRightPanel from "../components/maskeditor/CompareRightPanel.jsx";
 import HudToast from "../components/maskeditor/HudToast.jsx";
+import CanvasSkeleton from "../components/maskeditor/CanvasSkeleton.jsx";
+import LockVeil from "../components/maskeditor/LockVeil.jsx";
+import GeneratingCard from "../components/maskeditor/GeneratingCard.jsx";
+import CanvasPartial from "../components/maskeditor/CanvasPartial.jsx";
+import MEIcon from "../components/maskeditor/MEIcon.jsx";
+import {
+  recordMaskEditDuration,
+  getEstimatedDuration,
+} from "../config/maskEditTiming.js";
 
 import { getJob, imageOriginalUrl, fetchImageBlob } from "../api/archive.js";
 import { createJob, replaceJobImage } from "../api/jobs.js";
 import { useCaptchaGate } from "../hooks/useCaptchaGate.jsx";
 import { getDerivedJobs } from "../api/derived.js";
 import { getModels } from "../api/models.js";
+import { applyDefaults, reconcileParams, paramKey } from "../config/modelParams.js";
+import { readSticky } from "../storage/stickyStore.js";
 import {
   markMaskEditUsed,
   pickMaskMethod,
@@ -69,6 +79,47 @@ const DEFAULT_ADVANCED = {
   streamPartial: false,
 };
 
+// Module-level set of `${hash}#${order}` keys that the page just
+// promoted into and therefore wants the prompt to stay empty for.
+// Module-scope (not React state / ref) so it survives the React 18
+// StrictMode dev unmount/remount cycle that wipes refs and fires
+// every effect twice. Once a key is in here, the load effect's
+// ``setPrompt(job.prompt)`` skips that key forever — for this tab.
+const PROMOTED_BLANK_KEYS = new Set();
+
+// Map a schema-shaped ``params`` object back into the legacy
+// ``advanced`` shape the right-rail Seg controls render. We keep the
+// Seg UI as-is (it's still functional) but pre-fill it from whatever
+// the source job actually used. Anything outside the four legacy keys
+// is ignored — those land into ``params`` directly via the wire payload.
+function paramsToAdvanced(params) {
+  const advanced = { ...DEFAULT_ADVANCED };
+  if (params && typeof params === "object") {
+    if (typeof params.size === "string") {
+      // The Seg labels are short ("sq" / "land" / "port" / "auto");
+      // map back from the wire shape so a job that ran at 1024x1024
+      // doesn't show "auto".
+      if (params.size === "1024x1024") advanced.size = "sq";
+      else if (params.size === "1536x1024") advanced.size = "land";
+      else if (params.size === "1024x1536") advanced.size = "port";
+      else if (params.size === "auto") advanced.size = "auto";
+    }
+    if (typeof params.quality === "string") {
+      advanced.quality = params.quality;
+    }
+    if (typeof params.thinking === "string") {
+      advanced.thinking = params.thinking;
+    }
+    if (typeof params.output_format === "string") {
+      advanced.output = params.output_format;
+    }
+    if (typeof params.partial_images === "number" && params.partial_images > 0) {
+      advanced.streamPartial = true;
+    }
+  }
+  return advanced;
+}
+
 export default function MaskEditPage() {
   const { hashId, order } = useParams();
   const [searchParams] = useSearchParams();
@@ -79,6 +130,10 @@ export default function MaskEditPage() {
   const [sourceJob, setSourceJob] = useState(null);
   const [sourceImage, setSourceImage] = useState(null); // ImageBitmap
   const [sourceImageUrl, setSourceImageUrl] = useState(null);
+  // Surface load failures inline (in the canvas area) instead of as a
+  // ``window.alert`` that yanks the user back to /archive without
+  // explanation. ``null`` = still loading or already loaded.
+  const [loadError, setLoadError] = useState(null);
   const [imageW, setImageW] = useState(1024);
   const [imageH, setImageH] = useState(1024);
   const [tool, setTool] = useState("brush");
@@ -94,7 +149,7 @@ export default function MaskEditPage() {
   const [showCheat, setShowCheat] = useState(false);
   const [maskCanvasRef, setMaskCanvasRef] = useState(null);
   const [sourceCanvasRef, setSourceCanvasRef] = useState(null);
-  const [statusHint, setStatusHint] = useState("paint a mask area before submitting (≥ 100 px)");
+  const [statusHint, setStatusHint] = useState("describe a change · mask is optional");
   const [zoomDisplay, setZoomDisplay] = useState(100);
   const [cursorXY, setCursorXY] = useState({ x: 0, y: 0 });
   const [outpaintMode, setOutpaintMode] = useState(searchParams.get("mode") === "outpaint");
@@ -105,8 +160,16 @@ export default function MaskEditPage() {
   const [resultJob, setResultJob] = useState(null);
   const [resultUrl, setResultUrl] = useState(null);
   const [derivedVersions, setDerivedVersions] = useState([]);
-  const [streaming, setStreaming] = useState(null);
   const [hud, setHud] = useState(null);
+  // Wall-clock the submission started — feeds GeneratingCard's
+  // elapsed/remaining display + the timing recorder. ``null`` while
+  // the editor is idle.
+  const [submitStartedAt, setSubmitStartedAt] = useState(null);
+  // Partial-event log for the GeneratingCard. Today the backend
+  // doesn't emit them; the array stays empty and the card falls back
+  // to its smooth fake-progress curve. Exists so wiring partials in
+  // later is a one-line setPartials call away.
+  const [partials] = useState([]);
 
   // Captcha state machine — same hook used by Create / Batch so the
   // user sees a consistent Turnstile flow no matter which page they
@@ -118,6 +181,18 @@ export default function MaskEditPage() {
   // loading state in the meantime so we don't accidentally route a
   // fallback model down the native path (or vice versa).
   const [maskMethod, setMaskMethod] = useState(null); // "native" | "fallback" | null
+  // Active model for the editor session (resolved via the chain in the
+  // load effect below). Locked for the entire session — switching
+  // native ↔ fallback mid-session would change the multipart shape and
+  // surprise the user. ``null`` while we wait for /api/models.
+  const [selectedModel, setSelectedModel] = useState(null);
+  // The full params object that ships on the wire. Defaults inherit
+  // from the source job; reconciled against the active model's
+  // ui_schema so nothing illegal sneaks through.
+  const [params, setParams] = useState({});
+  // User-facing notice when we had to fall back to a different model
+  // because the source job's model is no longer mask-edit-capable.
+  const [modelNotice, setModelNotice] = useState(null);
 
   // Fallback template state — only meaningful when maskMethod === "fallback".
   // We render the base template by default but let pro users unlock + edit.
@@ -141,6 +216,13 @@ export default function MaskEditPage() {
   const historyStackRef = useRef(null);
   const canvasStageRef = useRef(null);
   const hudTimerRef = useRef(null);
+  // Snapshot of "what counts as not edited" — captured after restore (or
+  // initial mount when there's no draft). Anything matching the baseline
+  // is treated as untouched: the autosave hook suppresses both writes
+  // and the DRAFT SAVED toast. Without this, clicking the prompt
+  // textarea on a job whose source prompt is non-empty (the default!)
+  // would trip a meaningless save on the very first debounce tick.
+  const [baseline, setBaseline] = useState(null);
 
   // Holds a draft record while we wait for the mask canvas to mount,
   // so the restoration sequence works regardless of which arrives
@@ -168,68 +250,197 @@ export default function MaskEditPage() {
     void archiveStore.mount(userId);
   }, [userId]);
 
-  // Load the source job + image bitmap, AND decide the mask method
-  // (native vs fallback) from the model's capabilities. We commit to
-  // one path for the whole editor session — switching halfway would
-  // require a different multipart shape and surprise the user.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
+  // Tracks the last URL pair we actually loaded. The path-change
+  // effect compares against this so a soft history switch (which
+  // ``replace``-navigates the URL after the swap) doesn't trip a
+  // second load that wipes the just-painted state.
+  const loadedKeyRef = useRef(null);
+  // Set during a soft switch so the canvas area shows a skeleton
+  // overlay while we fetch the new image, but the rest of the chrome
+  // stays mounted (history panel still on screen, can keep clicking).
+  const [softSwitching, setSoftSwitching] = useState(false);
+
+  const loadSource = useCallback(
+    async (targetHash, targetOrder, opts = {}) => {
+      const { keepTab = true, soft = false } = opts;
+      if (!targetHash) return;
       try {
-        const job = await getJob(hashId);
-        if (cancelled) return;
-        let caps = null;
+        if (soft) setSoftSwitching(true);
+        const job = await getJob(targetHash);
+        let modelsResp = null;
         try {
-          const resp = await getModels();
-          const row = (resp.models || []).find((m) => m.model_id === job.model);
-          caps = row?.capabilities || null;
+          modelsResp = await getModels();
         } catch (e) {
-          console.warn("getModels failed; assuming unsupported", e);
+          console.warn("getModels failed", e);
         }
-        const method = pickMaskMethod(caps);
-        if (method === "unsupported") {
-          alert("This model doesn't support mask editing.");
-          navigate("/archive");
-          return;
+        const allModels = modelsResp?.models || [];
+
+        // ---- Model resolution chain (Feature 7) -----------------
+        // ``available === false`` means admin disabled the model — we
+        // treat that as "can't mask" so the fallback chain triggers.
+        function pickMethodFor(model) {
+          if (!model) return "unsupported";
+          if (model.available === false) return "unsupported";
+          return pickMaskMethod(model.capabilities);
         }
-        setMaskMethod(method);
+        let chosenModel = allModels.find((m) => m.model_id === job.model);
+        let chosenMethod = pickMethodFor(chosenModel);
+        let notice = null;
+        if (!chosenModel || chosenMethod === "unsupported") {
+          const sticky = readSticky(userId);
+          const stickyId = sticky?.last_model_id || null;
+          const fromSticky = stickyId
+            ? allModels.find((m) => m.model_id === stickyId)
+            : null;
+          if (fromSticky && pickMethodFor(fromSticky) !== "unsupported") {
+            chosenModel = fromSticky;
+            chosenMethod = pickMethodFor(fromSticky);
+            notice = `source model unavailable · using ${fromSticky.model_id}`;
+          } else {
+            const firstOk = allModels.find(
+              (m) => pickMethodFor(m) !== "unsupported"
+            );
+            if (firstOk) {
+              chosenModel = firstOk;
+              chosenMethod = pickMethodFor(firstOk);
+              notice = `source model unavailable · using ${firstOk.model_id}`;
+            } else {
+              setLoadError("No available model supports mask editing.");
+              setSoftSwitching(false);
+              return;
+            }
+          }
+        }
+        setMaskMethod(chosenMethod);
+        setSelectedModel(chosenModel);
+        setModelNotice(notice);
+        // ---- Param inheritance chain (Feature 7) ----------------
+        let baseParams;
+        if (chosenModel.model_id === job.model && job.params) {
+          baseParams = { ...(job.params || {}) };
+        } else {
+          const sticky = readSticky(userId);
+          const stickyParams =
+            sticky?.params_by_model?.[chosenModel.model_id];
+          baseParams = stickyParams ? { ...stickyParams } : {};
+        }
+        const reconciled = applyDefaults(
+          chosenModel.defaults,
+          baseParams,
+          chosenModel.capabilities,
+          chosenModel.ui_schema
+        );
+        setParams(reconciled);
+        setAdvanced(paramsToAdvanced(reconciled));
+
         setSourceJob(job);
-        if (job.prompt) setPrompt(job.prompt);
-        const requestedOrder = parseInt(order, 10) || 1;
+        const requestedOrder = parseInt(targetOrder, 10) || 1;
+        // Set the job's prompt as the default UNLESS this exact
+        // (hash, order) was just freshly promoted from a result —
+        // in that case the page deliberately cleared the prompt and
+        // we don't want to refill it. The marker is module-scoped so
+        // it survives React 18 StrictMode dev re-mounts, and never
+        // cleared so multiple repeated loadSource calls all honor it.
+        const thisKey = `${job.hash_id}#${requestedOrder}`;
+        if (PROMOTED_BLANK_KEYS.has(thisKey)) {
+          // Honor the cleared prompt; do NOT setPrompt here.
+        } else if (job.prompt) {
+          setPrompt(job.prompt);
+        }
         const img = (job.images || []).find((i) => i.order === requestedOrder);
         if (!img) {
-          alert("Image not found for this order.");
-          navigate("/archive");
+          setLoadError("Image not found for this order.");
+          setSoftSwitching(false);
           return;
         }
         const url = imageOriginalUrl(job.hash_id, img.order);
         const blob = await fetchImageBlob(url);
         if (!blob) {
-          alert("Source image is no longer available.");
-          navigate("/archive");
+          setLoadError("Source image is no longer available.");
+          setSoftSwitching(false);
           return;
         }
         const bmp = await createImageBitmap(blob);
-        if (cancelled) return;
+        // Atomic source replacement: revoke the old URL after the new
+        // one is in hand so the canvas never renders against a half-
+        // swapped pair.
+        if (sourceImageUrl) URL.revokeObjectURL(sourceImageUrl);
         setImageW(bmp.width);
         setImageH(bmp.height);
         setSourceImage(bmp);
         setSourceImageUrl(URL.createObjectURL(blob));
+        setLoadError(null);
+        // Soft-switch reset: drop mask history (would jump to wrong
+        // image's painted state on ⌘Z) + result/diff (a result of the
+        // previous source is no longer relevant).
+        if (soft) {
+          historyStackRef.current = null;
+          setHistory([]);
+          setResultJob(null);
+          if (resultUrl) URL.revokeObjectURL(resultUrl);
+          setResultUrl(null);
+          if (diffResult?.heatmapUrl) URL.revokeObjectURL(diffResult.heatmapUrl);
+          setDiffResult(null);
+          setStrategy(null);
+          setAutoStrategy(null);
+          setStatus("idle");
+          setBaseline(null);
+          if (!keepTab) setTab("tool");
+        }
+        loadedKeyRef.current = `${job.hash_id}#${requestedOrder}`;
       } catch (e) {
         console.error("Failed to load source:", e);
-        // Source job is gone — drop any orphan draft so the user
-        // doesn't see a phantom "resume" entry pointing to nothing.
         if (userId) {
           const orphanMode = searchParams.get("mode") === "outpaint" ? "outpaint" : "inpaint";
-          const orphanId = maskDraftDB.makeDraftId(hashId, order, orphanMode);
+          const orphanId = maskDraftDB.makeDraftId(targetHash, targetOrder, orphanMode);
           maskDraftDB.deleteDraft(userId, orphanId).catch(() => {});
         }
-        alert(`Could not open editor: ${e.message || e}`);
-        navigate("/archive");
+        setLoadError(e.message || String(e) || "Could not open editor.");
+      } finally {
+        setSoftSwitching(false);
       }
-    })();
-    return () => { cancelled = true; };
-  }, [hashId, order, navigate, userId, searchParams]);
+    },
+    // sourceImageUrl / resultUrl / diffResult intentionally excluded —
+    // we only need their *latest* values at call time, not as deps
+    // that re-create this callback every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [userId, searchParams]
+  );
+
+  // Initial mount load + URL-change reload guard. The guard rejects
+  // routing changes that come from our own ``navigate(..., { replace })``
+  // after a soft switch — the load already happened in ``loadSource``.
+  useEffect(() => {
+    const key = `${hashId}#${order}`;
+    if (loadedKeyRef.current === key) return;
+    // Skip when the page already has the matching source in state
+    // (covers post-promote / soft-switch where loadSource set things
+    // up directly and React 18 StrictMode wiped the ref on a dev
+    // re-mount).
+    if (sourceJob?.hash_id === hashId) {
+      loadedKeyRef.current = key;
+      return;
+    }
+    loadSource(hashId, order, { soft: false });
+  }, [hashId, order, loadSource, sourceJob]);
+
+  // Soft "switch source" handler used by the lineage panel. Loads the
+  // new source in-place (canvas area shows a skeleton) without
+  // remounting the page; URL updates via ``replace`` *after* state
+  // settles so the URL-effect's guard skips the reload.
+  const onPickNode = useCallback(
+    async (nextHash, nextOrder) => {
+      if (!nextHash) return;
+      const targetOrder = nextOrder || 1;
+      if (nextHash === hashId && String(targetOrder) === String(order)) return;
+      await loadSource(nextHash, targetOrder, { soft: true, keepTab: true });
+      // URL sync — replace, not push, so back button doesn't fill up
+      // with breadcrumb noise. The load already happened, so the
+      // mount effect will detect ``loadedKeyRef === key`` and skip.
+      navigate(`/edit/${nextHash}/${targetOrder}`, { replace: true });
+    },
+    [hashId, order, loadSource, navigate]
+  );
 
   // Apply a pending restore record to the mask canvas. Returns true
   // when the mask blob was painted, false otherwise (no blob,
@@ -351,7 +562,7 @@ export default function MaskEditPage() {
     [maskCanvasRef, sourceJob]
   );
 
-  const { toast: draftToast, clearDraft, markCanvasDirty } = useMaskDraftAutosave({
+  const { toast: draftToast, clearDraft, markCanvasDirty, flushNow } = useMaskDraftAutosave({
     userId,
     hashId,
     order,
@@ -371,8 +582,37 @@ export default function MaskEditPage() {
     imageW,
     imageH,
     customTemplate,
+    baseline,
+    // Pass the history length so painting / undo / redo / op trips
+    // the autosave debounce. Without this, mask edits don't fire a
+    // save until the user changes some other state.
+    canvasRev: history.length,
     onRestore: onRestoreDraft,
   });
+
+  // Capture the baseline once the page has finished its initial setup
+  // (image loaded, draft restore — if any — has run). The autosave hook
+  // diffs against this snapshot to decide whether to flash DRAFT SAVED.
+  // We wait one tick after sourceImage arrives so any pendingRestore
+  // had a chance to call onRestoreDraft → setPrompt etc.
+  useEffect(() => {
+    if (!sourceImage || baseline) return;
+    const t = setTimeout(() => {
+      setBaseline({
+        prompt: prompt || "",
+        refsLen: refs.length,
+        canvasRev: 0,
+        advanced: { ...(advanced || {}) },
+        outpaint: { ...(outpaint || {}) },
+        outpaintMode,
+        customTemplate: customTemplate ?? null,
+      });
+    }, 250);
+    return () => clearTimeout(t);
+    // We *want* a stable baseline — only re-take it if the source
+    // image is replaced (e.g. after a soft-switch via history panel).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceImage, baseline]);
 
   function captureSnapshot(meta) {
     if (!historyStackRef.current || !maskCanvasRef) return;
@@ -439,32 +679,68 @@ export default function MaskEditPage() {
     setRefs(next);
   }
 
-  // Validation: whether the submit button is enabled.
+  // While a job is in flight (submitting → running → finalizing), we
+  // lock the page entirely so the user can't drift the prompt / mask /
+  // params out from under the request that already left the browser.
+  const locked =
+    status === "submitting" ||
+    status === "running" ||
+    status === "finalizing";
+
+  // Has the user actually painted enough mask to count? Drives the
+  // submit-path branching below: with-mask vs prompt-only.
+  const maskPainted = useMemo(() => {
+    if (!maskCanvasRef) return false;
+    return countMaskPaintedPixels(maskCanvasRef) >= MIN_MASK_PIXELS;
+  }, [maskCanvasRef, history]);
+
+  // Validation: whether the submit button is enabled. Inpaint mode no
+  // longer requires a mask — a non-empty prompt is enough; mask just
+  // narrows the edit region.
   const canSubmit = useMemo(() => {
-    if (status === "submitting" || status === "running") return false;
+    if (locked) return false;
+    // No submitting before the source image is in hand: we'd fail at
+    // multipart build time when the source blob isn't ready.
+    if (!sourceImage || !sourceImageUrl) return false;
     if (!prompt.trim()) return false;
     if (outpaintMode) {
       return outpaint.directions.length > 0 && !!outpaint.amount;
     }
-    if (!maskCanvasRef) return false;
-    const painted = countMaskPaintedPixels(maskCanvasRef);
-    if (painted < MIN_MASK_PIXELS) return false;
     return true;
-  }, [status, prompt, outpaintMode, outpaint, maskCanvasRef, history]);
+  }, [locked, sourceImage, sourceImageUrl, prompt, outpaintMode, outpaint]);
 
+  // Hard validation messages (red banner). Inpaint with no mask is
+  // *not* an error any more — only outpaint-without-direction trips
+  // this. See ``modeHint`` below for the soft "no mask" notice.
   const validationMessage = useMemo(() => {
-    if (status === "submitting" || status === "running") return "";
-    if (!maskCanvasRef || outpaintMode) return "";
-    const painted = countMaskPaintedPixels(maskCanvasRef);
-    if (painted < MIN_MASK_PIXELS) return "mask is empty — paint where you want changes";
+    if (locked) return "";
+    if (outpaintMode) {
+      if (!outpaint.directions.length || !outpaint.amount) {
+        return "pick at least one outpaint direction";
+      }
+    }
     return "";
-  }, [maskCanvasRef, outpaintMode, status, history]);
+  }, [locked, outpaintMode, outpaint]);
+
+  // Soft "you're about to submit without a mask" hint — informational,
+  // not an error. Surfaced in the StatusBar hint slot.
+  const modeHint = useMemo(() => {
+    if (locked || outpaintMode) return "";
+    if (!prompt.trim() && !maskPainted) {
+      return "describe the change you want — optionally paint a mask to limit it";
+    }
+    if (prompt.trim() && !maskPainted) {
+      return "no mask · prompt will edit the whole image";
+    }
+    return "";
+  }, [locked, outpaintMode, prompt, maskPainted]);
 
   async function onSubmit() {
     if (!canSubmit || !sourceJob) return;
     setStatus("submitting");
     setErrorState(null);
     setStatusHint("submitting…");
+    setSubmitStartedAt(Date.now());
     try {
       const sizeMap = {
         sq: "1024x1024",
@@ -483,7 +759,11 @@ export default function MaskEditPage() {
       // The resolved prompt is what hits the wire — backend has no
       // awareness of the template, by design.
       let finalPrompt = prompt;
-      if (maskMethod === "fallback" && !outpaintMode) {
+      // Fallback template ONLY makes sense when there's a real mask to
+      // describe. When the user submits prompt-only (no painted mask)
+      // we ship the bare prompt: wrapping it in "the second reference
+      // is a black-and-white mask" template would confuse the model.
+      if (maskMethod === "fallback" && !outpaintMode && maskPainted) {
         const tpl = customTemplate ?? FALLBACK_TEMPLATE_INPAINT;
         finalPrompt = resolveFallbackTemplate(tpl, prompt);
       } else if (maskMethod === "fallback" && outpaintMode) {
@@ -491,7 +771,7 @@ export default function MaskEditPage() {
         finalPrompt = resolveFallbackTemplate(tpl, prompt);
       }
       const payload = {
-        model: sourceJob.model,
+        model: selectedModel?.model_id || sourceJob.model,
         prompt: finalPrompt,
         n: 1,
         parent_hash_id: sourceJob.hash_id,
@@ -507,6 +787,29 @@ export default function MaskEditPage() {
       if (advanced.thinking && advanced.thinking !== "off") payload.thinking = advanced.thinking;
       if (advanced.output) payload.output_format = advanced.output;
       if (advanced.streamPartial) payload.partial_images = 2;
+      // Schema-inherited params (Feature 7): anything in the source
+      // job that the active model still accepts ships unless the
+      // advanced UI already covered it. The advanced UI keys win when
+      // both define the same field — that's how user edits to the Seg
+      // controls override an inherited default.
+      if (selectedModel && params && typeof params === "object") {
+        const reconciled = reconcileParams(
+          params,
+          selectedModel.capabilities,
+          selectedModel.ui_schema
+        );
+        for (const [k, v] of Object.entries(reconciled)) {
+          if (k === "model" || k === "prompt" || k === "n") continue;
+          // Don't shadow an explicit advanced choice the user just made.
+          if (k === "size" && payload.size != null) continue;
+          if (k === "quality" && payload.quality != null) continue;
+          if (k === "thinking" && payload.thinking != null) continue;
+          if (k === "output_format" && payload.output_format != null) continue;
+          if (k === "partial_images" && payload.partial_images != null) continue;
+          if (v === undefined || v === null || v === "") continue;
+          payload[k] = v;
+        }
+      }
       if (outpaintMode) {
         payload.outpaint_directions = outpaint.directions;
         payload.outpaint_amount = outpaint.amount;
@@ -525,6 +828,12 @@ export default function MaskEditPage() {
       let maskBlob = null;
       if (outpaintMode) {
         refFiles = [sourceFile, ...refs.map((r) => r.file)];
+      } else if (!maskPainted) {
+        // Prompt-only path (Feature 9): no mask, no fallback template.
+        // Just the source + user refs, prompt as-is. The model edits
+        // the whole image based on the prompt.
+        refFiles = [sourceFile, ...refs.map((r) => r.file)];
+        maskBlob = null;
       } else if (maskMethod === "fallback") {
         const bwMask = await exportFallbackMaskPng(maskCanvasRef);
         const bwMaskFile = new File([bwMask], "fallback_mask.png", { type: "image/png" });
@@ -570,9 +879,34 @@ export default function MaskEditPage() {
       // back to polling so the page works without that wiring).
       const done = await pollUntilTerminal(resp.hash_id);
       if (done.status === "SUCCEEDED") {
-        setStatus("done");
-        setStatusHint(`completed · #${done.seq_no}`);
+        // Brief "finalizing" phase: the GeneratingCard's progress bar
+        // animates from its asymptotic ~92% up to 100% during this
+        // window while we fetch + decode the result image. Without
+        // this, the card would either pop closed before the compare
+        // view paints (jarring) or look stuck at 92% (fake-y).
+        // The GeneratingCard's progress bar climbs from its asymptotic
+        // ~92% up toward 100% during the finalizing window while we
+        // fetch + decode the result image. That keeps the user looking
+        // at "almost done" feedback through the otherwise blank
+        // network round-trip; the card disappears only after we
+        // transition to ``done`` further below.
+        setStatus("finalizing");
         setResultJob(done);
+        // Record the actual render duration so future estimates get
+        // smarter. Prefer the backend's stamp; fall back to the
+        // wall-clock we kept.
+        const trueRenderSec =
+          typeof done.timing?.render_seconds === "number"
+            ? done.timing.render_seconds
+            : submitStartedAt
+            ? (Date.now() - submitStartedAt) / 1000
+            : null;
+        if (trueRenderSec != null) {
+          recordMaskEditDuration(
+            selectedModel?.model_id || sourceJob.model,
+            trueRenderSec
+          );
+        }
         // Submit succeeded → the work is on the server now, no need
         // to keep the local draft around.
         clearDraft({ silent: true }).catch(() => {});
@@ -583,8 +917,10 @@ export default function MaskEditPage() {
             setResultUrl(URL.createObjectURL(blob));
             // Kick off diff analysis. Use the cached source bitmap
             // and the freshly-decoded result bitmap; mask canvas is
-            // still in hand for the painted region.
-            if (!outpaintMode && maskCanvasRef && sourceImage) {
+            // still in hand for the painted region. Skip when the
+            // user submitted prompt-only — no mask = no meaningful
+            // "preserve region" to compute, just lock strategy=full.
+            if (!outpaintMode && maskCanvasRef && sourceImage && maskPainted) {
               let resBmp = null;
               try {
                 setAnalyzing(true);
@@ -611,6 +947,11 @@ export default function MaskEditPage() {
                 resBmp?.close?.();
                 setAnalyzing(false);
               }
+            } else if (!outpaintMode && !maskPainted) {
+              // Prompt-only path: no mask to preserve, so the only
+              // sensible accept strategy is "full replace" of source.
+              setAutoStrategy("full");
+              setStrategy("full");
             }
           }
         }
@@ -621,13 +962,23 @@ export default function MaskEditPage() {
         } catch (e) {
           console.warn("derived list failed:", e);
         }
+        // Final transition out of the locked window. Doing this here
+        // (after image fetch + diff analysis settle) means the
+        // GeneratingCard stays up through the "almost there" tail
+        // instead of unmounting on the SUCCEEDED-ack and leaving the
+        // user staring at a blank locked editor.
+        setStatus("done");
+        setStatusHint(`completed · #${done.seq_no}`);
+        setSubmitStartedAt(null);
       } else {
         setStatus("error");
+        setSubmitStartedAt(null);
         setErrorState({ code: done.error || "GENERATION_FAILED", message: done.error || "Unknown error" });
       }
     } catch (e) {
       console.error("submit failed:", e);
       setStatus("error");
+      setSubmitStartedAt(null);
       setErrorState({
         code: e.code || "UPSTREAM_ERROR",
         message: e.message || "Submit failed",
@@ -676,11 +1027,30 @@ export default function MaskEditPage() {
     historyStackRef.current = null;
     setHistory([]);
     setStatus("idle");
-    setStatusHint("paint a mask area before submitting (≥ 100 px)");
+    setStatusHint("describe a change · mask is optional");
     setResultJob(null);
     if (resultUrl) URL.revokeObjectURL(resultUrl);
     setResultUrl(null);
     setDerivedVersions([]);
+    // Feature 8: clear the user prompt after promote so the next round
+    // starts blank. The previous prompt described the change we just
+    // executed — keeping it would invite a stale resubmission. The
+    // ``customTemplate`` (system fallback wrap) is intentionally left
+    // alone; it's a separate state owned by the fallback path.
+    setPrompt("");
+    // Module-scoped marker (see top of file) — gates the load
+    // effect's prompt refill so the cleared state sticks even
+    // through StrictMode re-mounts and multiple loadSource calls.
+    PROMOTED_BLANK_KEYS.add(`${next.hash_id}#1`);
+    showHud("ready for next edit");
+    // Reset the dirty baseline so the now-empty prompt doesn't look
+    // "edited away" relative to the previous baseline.
+    setBaseline(null);
+    // Mark the new URL as already-loaded so the URL-change effect
+    // doesn't trip a fresh load and overwrite the now-empty prompt
+    // with the result job's prompt (which is the same as the source's
+    // for a typical mask edit).
+    loadedKeyRef.current = `${next.hash_id}#1`;
     navigate(`/edit/${next.hash_id}/1`, { replace: true });
   }
 
@@ -791,7 +1161,7 @@ export default function MaskEditPage() {
     setAutoStrategy(null);
     setShowHeatmap(false);
     setStatus("idle");
-    setStatusHint("paint a mask area before submitting (≥ 100 px)");
+    setStatusHint("describe a change · mask is optional");
     showHud("discarded · result kept in versions");
   }
 
@@ -835,6 +1205,18 @@ export default function MaskEditPage() {
       if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT") return;
       const key = e.key;
       const meta = e.metaKey || e.ctrlKey;
+      // While locked, only ``?`` (cheat sheet) and ``Escape`` (back to
+      // archive) get through. Everything else would either no-op or
+      // produce phantom mask edits the user can't see.
+      if (locked) {
+        if (key === "?") {
+          e.preventDefault();
+          setShowCheat((s) => !s);
+        } else if (key === "Escape") {
+          clearDraft({ silent: true }).finally(() => navigate("/archive"));
+        }
+        return;
+      }
       if (key === "?") {
         e.preventDefault();
         setShowCheat((s) => !s);
@@ -892,22 +1274,20 @@ export default function MaskEditPage() {
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [brushOpts, canSubmit, errorState, outpaintMode]);
+  }, [brushOpts, canSubmit, errorState, outpaintMode, locked, navigate, clearDraft]);
 
   // === Render ===========================================================
-  if (!sourceImage) {
-    return (
-      <div className="me-root" data-testid="me-loading">
-        <div style={{ padding: 40, textAlign: "center", margin: "auto" }}>
-          loading source image…
-        </div>
-      </div>
-    );
-  }
+  // Note: we intentionally do NOT early-return on ``!sourceImage``.
+  // The page chrome (top bar / toolbar / right panel / status) renders
+  // immediately so the user can see where they are and what's coming;
+  // the canvas slot shows a skeleton (or error card) until the bitmap
+  // lands. This avoids the "page swaps to a centered loading line and
+  // back" flicker when entering the editor or soft-switching history.
+  const imageReady = !!sourceImage && !loadError;
 
   // Compute outpaint bleed geometry for canvas overlay.
   const outpaintGeometry = (() => {
-    if (!outpaintMode) return null;
+    if (!outpaintMode || !imageReady) return null;
     const a = parseAmount(outpaint.amount, imageW, imageH);
     return {
       left: outpaint.directions.includes("left") ? a.x : 0,
@@ -918,31 +1298,35 @@ export default function MaskEditPage() {
   })();
 
   const showingCompare = status === "done" && resultJob;
+  // Disable the right-panel + tools while the source bitmap is in
+  // flight or has errored. Soft (canvas-only) — page chrome stays
+  // visible. Soft-switching counts too: even though we still have a
+  // (stale) sourceImage, we want the canvas slot to show a skeleton
+  // while the new image fetches.
+  const canvasUnavailable = !imageReady || softSwitching;
 
   return (
     <div className="me-root" data-testid="me-root">
       <TopBar
         sourceLabel={sourceJob ? `#${sourceJob.seq_no}` : "—"}
         mode={outpaintMode ? "outpaint" : "inpaint"}
-        model={sourceJob?.model}
+        model={selectedModel?.model_id || sourceJob?.model}
         status={
           validationMessage ? "empty" :
           status
         }
         canSubmit={canSubmit}
         onBack={() => {
-          // Only nag the user when there is something they could lose.
-          const dirty =
-            (maskCanvasRef && countMaskPaintedPixels(maskCanvasRef) > 0) ||
-            !!prompt.trim() ||
-            refs.length > 0;
-          if (dirty && status !== "done") {
-            const ok = window.confirm(
-              "放弃这次未提交的 mask edit 吗？草稿会被清除，无法恢复。"
-            );
-            if (!ok) return;
+          // Leaving = silently flush the draft, no confirm dialog. The
+          // user can always come back to the same image and pick up
+          // where they left off (autosave restore on mount). When the
+          // editor is locked (job in flight) the local draft is moot —
+          // the work is server-side now — so just clear and leave.
+          if (locked) {
+            clearDraft({ silent: true }).finally(() => navigate("/archive"));
+            return;
           }
-          clearDraft({ silent: true }).finally(() => navigate("/archive"));
+          flushNow().finally(() => navigate("/archive"));
         }}
         onSubmit={onSubmit}
         draftToast={draftToast}
@@ -975,6 +1359,13 @@ export default function MaskEditPage() {
             heatmapUrl={diffResult?.heatmapUrl || null}
             showHeatmap={showHeatmap}
           />
+        ) : canvasUnavailable ? (
+          <div className="me-stage" data-testid="me-stage-skeleton" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <CanvasSkeleton
+              error={loadError}
+              onBack={() => navigate("/archive")}
+            />
+          </div>
         ) : (
           <CanvasStage
             ref={canvasStageRef}
@@ -1030,6 +1421,7 @@ export default function MaskEditPage() {
             onVersionPick={(v) => navigate(`/edit/${v.hash_id}/1`)}
             accepting={accepting}
             analyzing={analyzing}
+            maskPainted={maskPainted}
           />
         ) : (
           <RightPanel
@@ -1062,6 +1454,8 @@ export default function MaskEditPage() {
             setTemplateLocked={setTemplateLocked}
             customTemplate={customTemplate}
             setCustomTemplate={setCustomTemplate}
+            maskPainted={maskPainted}
+            onPickNode={onPickNode}
           />
         )}
       </div>
@@ -1070,7 +1464,11 @@ export default function MaskEditPage() {
         dim={`${imageW}×${imageH}`}
         cursor={`(${cursorXY.x}, ${cursorXY.y})`}
         brush={Math.round(brushOpts.size)}
-        hint={restoreNote || validationMessage || statusHint}
+        hint={
+          locked
+            ? "generating · controls locked until complete or cancelled"
+            : (modelNotice || restoreNote || validationMessage || modeHint || statusHint)
+        }
         onHelp={() => setShowCheat(true)}
       />
       {validationMessage && !showingCompare && (
@@ -1078,7 +1476,55 @@ export default function MaskEditPage() {
           <ValidationBanner message={validationMessage} />
         </div>
       )}
-      {streaming && <StreamingOverlay {...streaming} />}
+      {locked && (selectedModel?.capabilities?.partial_images_max ?? 0) >= 1 && (
+        <CanvasPartial
+          partialUrl={partials[partials.length - 1]?.url || null}
+          partialIndex={Math.min(partials.length || 1, 2)}
+          partialMax={2}
+          elapsedSec={submitStartedAt ? (Date.now() - submitStartedAt) / 1000 : 0}
+        />
+      )}
+      {locked && (
+        <>
+          <LockVeil />
+          {/* Back-only top bar that floats above the lock veil so the
+              user always has an out — leaving while a job is in flight
+              is fine, the work is server-side and reachable from
+              archive. */}
+          <div className="me-back-overlay">
+            <button
+              type="button"
+              onClick={() => {
+                clearDraft({ silent: true }).finally(() => navigate("/archive"));
+              }}
+              title="Back to archive"
+              data-testid="me-lock-back"
+            >
+              <MEIcon name="back" size={18} />
+            </button>
+          </div>
+          <GeneratingCard
+            startedAt={submitStartedAt || Date.now()}
+            avgSec={getEstimatedDuration(
+              selectedModel?.model_id || sourceJob?.model || "default"
+            )}
+            phase={status}
+            partials={partials}
+            supportsPartial={
+              (selectedModel?.capabilities?.partial_images_max ?? 0) >= 1
+            }
+            prompt={prompt}
+            modelId={selectedModel?.model_id || sourceJob?.model || "—"}
+            quality={advanced.quality}
+            maskCoveragePct={
+              maskCanvasRef && maskPainted
+                ? Math.round(maskPaintedRatio(maskCanvasRef) * 100)
+                : null
+            }
+            seqNo={resultJob?.seq_no || null}
+          />
+        </>
+      )}
       {errorState && (
         <ErrorModal
           code={errorState.code}

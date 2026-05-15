@@ -23,7 +23,7 @@ const NODE_H = 56;
 const ROW_GAP = 56; // vertical between depths
 const COL_GAP = 24; // horizontal between lane slots
 
-export default function LineageGraphPanel({ currentHashId, currentOrder = 1 }) {
+export default function LineageGraphPanel({ currentHashId, currentOrder = 1, onPickNode = null }) {
   const navigate = useNavigate();
   const lineage = useLineage(currentHashId, currentOrder);
   const scrollerRef = useRef(null);
@@ -137,6 +137,14 @@ export default function LineageGraphPanel({ currentHashId, currentOrder = 1 }) {
   function navigateTo(hashId, order) {
     if (!hashId) return;
     if (hashId === currentHashId && order === currentOrder) return;
+    // Soft switch when the page wired ``onPickNode`` — keeps the
+    // history tab open, no page remount, no skeleton flash for the
+    // chrome. Hard navigate is only the fallback for stand-alone
+    // usage (none today, but safer than crashing).
+    if (onPickNode) {
+      void onPickNode(hashId, order || 1);
+      return;
+    }
     navigate(`/edit/${hashId}/${order || 1}`);
   }
 
@@ -174,7 +182,7 @@ export default function LineageGraphPanel({ currentHashId, currentOrder = 1 }) {
 
   const totalNodes = lineage.nodes.length;
   const goToRoot = () => {
-    navigate(`/edit/${lineage.root_hash_id}/${lineage.root_order || 1}`);
+    navigateTo(lineage.root_hash_id, lineage.root_order || 1);
   };
 
   return (

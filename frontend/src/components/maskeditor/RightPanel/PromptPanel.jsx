@@ -26,6 +26,7 @@ export default function PromptPanel({
   setTemplateLocked,
   customTemplate = null,
   setCustomTemplate,
+  maskPainted = false,
 }) {
   const promptRef = useRef(null);
   function insertPreset(text) {
@@ -52,8 +53,9 @@ export default function PromptPanel({
         method={maskMethod}
         expanded={templateOpen}
         onToggle={() => setTemplateOpen?.(!templateOpen)}
+        maskPainted={maskPainted}
       />
-      {maskMethod === "fallback" && templateOpen && (
+      {maskMethod === "fallback" && templateOpen && maskPainted && (
         <FallbackTemplateBlock
           value={customTemplate}
           defaultValue={defaultTemplate}

@@ -46,6 +46,8 @@ export default function RightPanel({
   setTemplateLocked,
   customTemplate = null,
   setCustomTemplate,
+  maskPainted = false,
+  onPickNode = null,
 }) {
   // Tabs differ between inpaint and outpaint modes (PRD §5.8).
   const tabs = outpaintMode
@@ -126,6 +128,7 @@ export default function RightPanel({
               setTemplateLocked={setTemplateLocked}
               customTemplate={customTemplate}
               setCustomTemplate={setCustomTemplate}
+              maskPainted={maskPainted}
             />
           </>
         )}
@@ -133,6 +136,7 @@ export default function RightPanel({
           <LineageGraphPanel
             currentHashId={sourceHashId}
             currentOrder={sourceOrder || 1}
+            onPickNode={onPickNode}
           />
         )}
       </div>
